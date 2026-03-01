@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node scripts/build-public.cjs",
     "dev": "tsx src/stdio.ts",
     "dev:http": "tsx src/standalone-http.ts",
     "start": "node dist/stdio.js",
