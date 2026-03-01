@@ -45,22 +45,21 @@ export type NodeHandler = (
 /**
  * Returns a request handler for Node.js HTTP (e.g. Vercel serverless).
  * Uses MCP Streamable HTTP (SSE + POST) so the server can be deployed to Vercel.
- * Stateless: each request gets a new transport and server connection.
+ * Stateless: each request gets a new McpServer and transport (avoids "Already connected" when concurrent).
  */
 export function createMcpHandler(): NodeHandler {
-  const server = createMcpServer();
-
   return async (req: IncomingMessage, res: ServerResponse): Promise<void> => {
+    const server = createMcpServer();
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless for serverless
     });
-    await server.connect(transport);
 
     res.on("close", () => {
       transport.close().catch(() => {});
     });
 
     try {
+      await server.connect(transport);
       const parsedBody =
         req.method === "POST" ? await getParsedBody(req) : undefined;
       await transport.handleRequest(req, res, parsedBody);
