@@ -6,7 +6,10 @@
 import "dotenv/config";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerGetMessagesTool } from "./tools/get-messages.js";
+import { registerGetLinkedinMessagesTool } from "./tools/get-linkedin-messages.js";
+import { registerGetSendersTool } from "./tools/get-senders.js";
+import { registerGetContactsTool } from "./tools/get-contacts.js";
+import { registerGetConversationByContactNameTool } from "./tools/get-conversation-by-contact-name.js";
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
 
 const server = new McpServer({
@@ -14,7 +17,10 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
-registerGetMessagesTool(server);
+registerGetLinkedinMessagesTool(server);
+registerGetSendersTool(server);
+registerGetContactsTool(server);
+registerGetConversationByContactNameTool(server);
 registerCompanyEnrichmentTools(server);
 
 const transport = new StdioServerTransport();

@@ -1,7 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { registerGetMessagesTool } from "./tools/get-messages.js";
+import { registerGetLinkedinMessagesTool } from "./tools/get-linkedin-messages.js";
+import { registerGetSendersTool } from "./tools/get-senders.js";
+import { registerGetContactsTool } from "./tools/get-contacts.js";
+import { registerGetConversationByContactNameTool } from "./tools/get-conversation-by-contact-name.js";
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
 
 function createMcpServer(): McpServer {
@@ -9,7 +12,10 @@ function createMcpServer(): McpServer {
     name: "mcp-toolkit",
     version: "0.1.0",
   });
-  registerGetMessagesTool(server);
+  registerGetLinkedinMessagesTool(server);
+  registerGetSendersTool(server);
+  registerGetContactsTool(server);
+  registerGetConversationByContactNameTool(server);
   registerCompanyEnrichmentTools(server);
   return server;
 }

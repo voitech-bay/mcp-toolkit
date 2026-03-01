@@ -1,11 +1,11 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { getSupabase, getMessagesTable, getMessages } from "../services/supabase.js";
+import { getSupabase, getLinkedinMessages } from "../services/supabase.js";
 
-export function registerGetMessagesTool(server: McpServer): void {
+export function registerGetLinkedinMessagesTool(server: McpServer): void {
   server.tool(
-    "get_messages",
-    "Get messages from Supabase. Filter by sender, sender_id, contact_id, lead_uuid, lead_id, message id, channel, direction, status, and date range. Supports limit, offset, and ordering. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY) in env. Table name defaults to 'messages' (set SUPABASE_MESSAGES_TABLE to override).",
+    "get_linkedin_messages",
+    "Get LinkedIn messages from Supabase (table LinkedinMessages). Filter by sender, sender_id, contact_id, lead_uuid, lead_id, conversation_uuid, message id, channel, direction, status, and date range. Supports limit, offset, and ordering. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY) in env.",
     {
       sender: z.string().optional().describe("Filter by sender (e.g. phone number or identifier)."),
       senderId: z.string().optional().describe("Filter by sender_id (user/account id who sent)."),
@@ -33,8 +33,7 @@ export function registerGetMessagesTool(server: McpServer): void {
         };
       }
 
-      const table = getMessagesTable();
-      const result = await getMessages(client, table, {
+      const result = await getLinkedinMessages(client, {
         sender: args.sender,
         senderId: args.senderId,
         contactId: args.contactId,
@@ -60,12 +59,8 @@ export function registerGetMessagesTool(server: McpServer): void {
         };
       }
 
-      const payload = {
-        messages: result.data,
-        count: result.data.length,
-      };
       return {
-        content: [{ type: "text" as const, text: JSON.stringify(payload, null, 2) }],
+        content: [{ type: "text" as const, text: JSON.stringify({ messages: result.data, count: result.data.length }, null, 2) }],
       };
     }
   );
