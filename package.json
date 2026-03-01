@@ -1,0 +1,28 @@
+{
+  "name": "mcp-toolkit",
+  "version": "0.1.0",
+  "description": "MCP server: Supabase messages + Company enrichment (Streamable HTTP / SSE for Vercel)",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/stdio.ts",
+    "dev:http": "tsx src/standalone-http.ts",
+    "start": "node dist/stdio.js",
+    "prepare": "npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@supabase/supabase-js": "^2.45.0",
+    "dotenv": "^16.4.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

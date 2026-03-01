@@ -1,0 +1,13 @@
+{
+  "version": 2,
+  "buildCommand": "npm run build",
+  "installCommand": "npm install",
+  "framework": null,
+  "functions": {
+    "api/mcp.ts": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  },
+  "env": {}
+}
