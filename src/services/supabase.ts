@@ -3,9 +3,9 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_KEY;
 
-const LINKEDIN_MESSAGES_TABLE = "LinkedinMessages";
-const SENDERS_TABLE = "Senders";
-const CONTACTS_TABLE = "Contacts";
+export const LINKEDIN_MESSAGES_TABLE = "LinkedinMessages";
+export const SENDERS_TABLE = "Senders";
+export const CONTACTS_TABLE = "Contacts";
 
 export function getSupabase(): SupabaseClient | null {
   if (!url || !key) return null;
@@ -373,4 +373,34 @@ export async function getContacts(
   const { data, error } = await query;
   if (error) return { data: [], error: error.message };
   return { data: data ?? [], error: null };
+}
+
+// --- Table counts (for /api/supabase-state) ---
+
+export interface TableCounts {
+  contacts: number;
+  linkedin_messages: number;
+  senders: number;
+}
+
+export async function getTableCounts(
+  client: SupabaseClient
+): Promise<{ counts: TableCounts; error: string | null }> {
+  try {
+    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+      client.from(CONTACTS_TABLE).select("*", { count: "exact", head: true }),
+      client.from(LINKEDIN_MESSAGES_TABLE).select("*", { count: "exact", head: true }),
+      client.from(SENDERS_TABLE).select("*", { count: "exact", head: true }),
+    ]);
+    const contacts = contactsRes.count ?? 0;
+    const linkedin_messages = messagesRes.count ?? 0;
+    const senders = sendersRes.count ?? 0;
+    if (contactsRes.error) return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: contactsRes.error.message };
+    if (messagesRes.error) return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: messagesRes.error.message };
+    if (sendersRes.error) return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: sendersRes.error.message };
+    return { counts: { contacts, linkedin_messages, senders }, error: null };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: message };
+  }
 }
