@@ -17,6 +17,7 @@ export function getSupabase(): SupabaseClient | null {
 export interface GetLinkedinMessagesParams {
   sender?: string;
   senderId?: string;
+  senderProfileUuid?: string;
   contactId?: string;
   leadUuid?: string;
   leadId?: string;
@@ -41,6 +42,8 @@ export async function getLinkedinMessages(
 
   if (params.sender != null) query = query.eq("sender", params.sender);
   if (params.senderId != null) query = query.eq("sender_id", params.senderId);
+  if (params.senderProfileUuid != null)
+    query = query.eq("sender_profile_uuid", params.senderProfileUuid);
   if (params.contactId != null) query = query.eq("contact_id", params.contactId);
   if (params.leadUuid != null) query = query.eq("lead_uuid", params.leadUuid);
   if (params.leadId != null) query = query.eq("lead_id", params.leadId);
@@ -131,6 +134,68 @@ export async function getConversationByContactFullName(
     messages: msgResult.data,
     error: null,
   };
+}
+
+/** Result for conversation API: messages (and optional contact when queried by leadUuid). */
+export interface GetConversationResult {
+  contact?: Record<string, unknown> | null;
+  messages: unknown[];
+  error: string | null;
+}
+
+/**
+ * Get LinkedIn conversation(s) by contact (leadUuid), by message (conversationUuid),
+ * or by sender (senderProfileUuid). Messages ordered by sent_at ascending.
+ */
+export async function getConversation(
+  client: SupabaseClient,
+  params: {
+    leadUuid?: string;
+    conversationUuid?: string;
+    senderProfileUuid?: string;
+    messageLimit?: number;
+  }
+): Promise<GetConversationResult> {
+  const limit = Math.min(Math.max(params.messageLimit ?? 500, 1), 1000);
+  if (params.leadUuid) {
+    const contactRes = await client
+      .from(CONTACTS_TABLE)
+      .select("*")
+      .eq("uuid", params.leadUuid)
+      .limit(1)
+      .maybeSingle();
+    const contact = contactRes.data ?? null;
+    const msgResult = await getLinkedinMessages(client, {
+      leadUuid: params.leadUuid,
+      orderBy: "sent_at",
+      order: "asc",
+      limit,
+    });
+    return {
+      contact: contact as Record<string, unknown> | null,
+      messages: msgResult.error ? [] : msgResult.data,
+      error: msgResult.error,
+    };
+  }
+  if (params.conversationUuid) {
+    const msgResult = await getLinkedinMessages(client, {
+      conversationUuid: params.conversationUuid,
+      orderBy: "sent_at",
+      order: "asc",
+      limit,
+    });
+    return { messages: msgResult.error ? [] : msgResult.data, error: msgResult.error };
+  }
+  if (params.senderProfileUuid) {
+    const msgResult = await getLinkedinMessages(client, {
+      senderProfileUuid: params.senderProfileUuid,
+      orderBy: "sent_at",
+      order: "asc",
+      limit,
+    });
+    return { messages: msgResult.error ? [] : msgResult.data, error: msgResult.error };
+  }
+  return { messages: [], error: "Provide leadUuid, conversationUuid, or senderProfileUuid." };
 }
 
 // --- Senders (table: Senders) ---

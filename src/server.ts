@@ -5,6 +5,8 @@ import { registerGetLinkedinMessagesTool } from "./tools/get-linkedin-messages.j
 import { registerGetSendersTool } from "./tools/get-senders.js";
 import { registerGetContactsTool } from "./tools/get-contacts.js";
 import { registerGetConversationByContactNameTool } from "./tools/get-conversation-by-contact-name.js";
+import { registerGetConversationBySenderTool } from "./tools/get-conversation-by-sender.js";
+import { registerGetConversationByMessageTool } from "./tools/get-conversation-by-message.js";
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
 
 function createMcpServer(): McpServer {
@@ -16,6 +18,8 @@ function createMcpServer(): McpServer {
   registerGetSendersTool(server);
   registerGetContactsTool(server);
   registerGetConversationByContactNameTool(server);
+  registerGetConversationBySenderTool(server);
+  registerGetConversationByMessageTool(server);
   registerCompanyEnrichmentTools(server);
   return server;
 }

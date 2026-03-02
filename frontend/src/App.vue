@@ -93,7 +93,7 @@ function toggleTheme() {
               {{ stateError }}
             </NAlert>
             <CountCards v-if="state?.counts" :counts="state.counts" />
-            <LatestTables v-if="state?.latest" :latest="state.latest" />
+            <LatestTables v-if="state?.latest" :latest="state.latest" :counts="state?.counts" />
             <p v-if="state?.latestError" class="muted small">
               Latest rows: {{ state.latestError }}
             </p>

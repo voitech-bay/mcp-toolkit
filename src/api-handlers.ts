@@ -2,7 +2,7 @@
  * HTTP handlers for Supabase state and sync. Used by Vercel serverless api/supabase-state and api/supabase-sync.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getSupabase, getTableCounts, getLatestRows, queryTableWithFilters, type TableQueryFilters } from "./services/supabase.js";
+import { getSupabase, getTableCounts, getLatestRows, queryTableWithFilters, getConversation, type TableQueryFilters } from "./services/supabase.js";
 import { syncSupabaseFromSource } from "./services/sync-supabase.js";
 
 export type NodeHandler = (
@@ -126,4 +126,40 @@ export async function handleSupabaseTableQuery(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+export async function handleConversation(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const leadUuid = params.get("leadUuid") ?? undefined;
+  const conversationUuid = params.get("conversationUuid") ?? undefined;
+  const senderProfileUuid = params.get("senderProfileUuid") ?? undefined;
+  const result = await getConversation(client, {
+    leadUuid: leadUuid || undefined,
+    conversationUuid: conversationUuid || undefined,
+    senderProfileUuid: senderProfileUuid || undefined,
+    messageLimit: Math.min(parseInt(params.get("limit") ?? "500", 10) || 500, 1000),
+  });
+  if (result.error) {
+    res.writeHead(200);
+    res.end(JSON.stringify({ contact: result.contact ?? null, messages: result.messages, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ contact: result.contact ?? null, messages: result.messages }));
 }

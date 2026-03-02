@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, h } from "vue";
 import { useUrlSearchParams } from "@vueuse/core";
-import type { LatestRows } from "../types";
+import type { LatestRows, TableCounts } from "../types";
 import {
   NTabs,
   NTabPane,
@@ -13,10 +13,14 @@ import {
   NSpace,
   NInput,
   NAlert,
+  NModal,
+  NCode,
+  NSpin,
 } from "naive-ui";
 import type { DataTableColumns, DataTableFilterState } from "naive-ui";
+import { MessageCircle } from "lucide-vue-next";
 
-const props = defineProps<{ latest: LatestRows }>();
+const props = defineProps<{ latest: LatestRows; counts?: TableCounts }>();
 
 const PAGE_SIZES = [10, 25, 50, 100];
 const DEFAULT_PAGE_SIZE = 25;
@@ -253,10 +257,42 @@ const effectiveVisibleKeys = computed(() => {
   return allKeys.value.filter((k) => set.has(k));
 });
 
+const AVATAR_PLACEHOLDER_SVG =
+  "data:image/svg+xml," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#888" rx="16"/><text x="16" y="22" text-anchor="middle" fill="#fff" font-size="14">?</text></svg>'
+  );
+
 function formatCell(value: unknown): string {
   if (value == null) return "—";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function isAvatarUrlColumn(key: string): boolean {
+  return key === "avatar_url" || key.toLowerCase() === "avatar_url";
+}
+
+function renderAvatarCell(url: unknown): ReturnType<typeof h> {
+  const s = typeof url === "string" && url.trim() ? url.trim() : null;
+  if (!s) return h("span", {}, formatCell(url));
+  return h("img", {
+    src: s,
+    alt: "",
+    class: "avatar-cell",
+    style: {
+      width: "32px",
+      height: "32px",
+      borderRadius: "50%",
+      objectFit: "cover",
+      display: "block",
+      background: "#e0e0e0",
+    },
+    onError(e: Event) {
+      const el = e.target as HTMLImageElement;
+      if (el) el.src = AVATAR_PLACEHOLDER_SVG;
+    },
+  });
 }
 
 function getUniqueValues(key: string): { label: string; value: string }[] {
@@ -326,23 +362,39 @@ function buildFilterMenu(key: string) {
 }
 
 const tableColumns = computed((): DataTableColumns<Record<string, unknown>> => {
-  return effectiveVisibleKeys.value.map((key) => {
+  const dataColumns = effectiveVisibleKeys.value.map((key) => {
     const options = getUniqueValues(key);
+    const isAvatar = isAvatarUrlColumn(key);
     return {
-      width: 200,
+      width: isAvatar ? 120 : 200,
       title: key,
       key,
-      ellipsis: { tooltip: true },
+      ellipsis: !isAvatar,
       filter: true,
       filterOptions: options.length > 0 ? options : [{ label: "(empty)", value: "—" }],
       filterOptionValues: filterState.value[key] as string[] | undefined,
       filterMultiple: true,
       renderFilterMenu: buildFilterMenu(key),
       render(row: Record<string, unknown>) {
+        if (isAvatar) return renderAvatarCell(row[key]);
         return formatCell(row[key]);
       },
     };
   });
+  const actionsColumn = {
+    title: "Actions",
+    key: "__actions",
+    width: 120,
+    fixed: "right" as const,
+    filter: false,
+    render: (row: Record<string, unknown>) => renderActionsCell(row),
+  } as const;
+  return [...dataColumns, actionsColumn];
+});
+
+const scrollX = computed(() => {
+  const cols = tableColumns.value;
+  return cols.reduce((sum, c) => sum + (Number((c as { width?: number }).width) || 200), 0);
 });
 
 function toggleColumn(key: string, visible: boolean) {
@@ -362,6 +414,109 @@ function toggleColumn(key: string, visible: boolean) {
 
 function setAllColumnsVisible() {
   visibleColumnKeys.value = [];
+}
+
+// --- Conversation modal (find by contact / message / sender) ---
+const conversationModalOpen = ref(false);
+const conversationLoading = ref(false);
+const conversationError = ref("");
+const conversationData = ref<{ contact?: Record<string, unknown> | null; messages: unknown[] }>({
+  messages: [],
+});
+
+async function fetchConversation(params: {
+  leadUuid?: string;
+  conversationUuid?: string;
+  senderProfileUuid?: string;
+}) {
+  conversationError.value = "";
+  conversationModalOpen.value = true;
+  conversationLoading.value = true;
+  try {
+    const q = new URLSearchParams();
+    if (params.leadUuid) q.set("leadUuid", params.leadUuid);
+    if (params.conversationUuid) q.set("conversationUuid", params.conversationUuid);
+    if (params.senderProfileUuid) q.set("senderProfileUuid", params.senderProfileUuid);
+    const r = await fetch(`/api/conversation?${q.toString()}`);
+    const json = await r.json();
+    conversationData.value = {
+      contact: json.contact ?? null,
+      messages: Array.isArray(json.messages) ? json.messages : [],
+    };
+    if (json.error) conversationError.value = json.error;
+  } catch (e) {
+    conversationError.value = e instanceof Error ? e.message : "Request failed";
+    conversationData.value = { messages: [] };
+  } finally {
+    conversationLoading.value = false;
+  }
+}
+
+function onFindConversationByContact(row: Record<string, unknown>) {
+  const uuid = row.uuid != null ? String(row.uuid) : undefined;
+  if (uuid) fetchConversation({ leadUuid: uuid });
+  else {
+    conversationModalOpen.value = true;
+    conversationLoading.value = false;
+    conversationError.value = "Contact has no uuid";
+    conversationData.value = { messages: [] };
+  }
+}
+
+function onFindConversationByMessage(row: Record<string, unknown>) {
+  const convUuid =
+    row.linkedin_conversation_uuid != null
+      ? String(row.linkedin_conversation_uuid)
+      : undefined;
+  if (convUuid) fetchConversation({ conversationUuid: convUuid });
+  else {
+    conversationModalOpen.value = true;
+    conversationLoading.value = false;
+    conversationError.value = "Message has no linkedin_conversation_uuid";
+    conversationData.value = { messages: [] };
+  }
+}
+
+function onFindConversationBySender(row: Record<string, unknown>) {
+  const uuid = row.uuid != null ? String(row.uuid) : undefined;
+  if (uuid) fetchConversation({ senderProfileUuid: uuid });
+  else {
+    conversationModalOpen.value = true;
+    conversationLoading.value = false;
+    conversationError.value = "Sender has no uuid";
+    conversationData.value = { messages: [] };
+  }
+}
+
+function renderActionsCell(row: Record<string, unknown>) {
+  const tab = activeTab.value;
+  let tooltip = "";
+  let onClick: () => void;
+  if (tab === "contacts") {
+    tooltip = "Find conversation by contact";
+    onClick = () => onFindConversationByContact(row);
+  } else if (tab === "linkedin_messages") {
+    tooltip = "Find conversation by message";
+    onClick = () => onFindConversationByMessage(row);
+  } else if (tab === "senders") {
+    tooltip = "Find all conversations by sender";
+    onClick = () => onFindConversationBySender(row);
+  } else {
+    return "—";
+  }
+  return h(
+    NPopover,
+    { trigger: "hover", placement: "top", showArrow: true },
+    {
+      default: () => tooltip,
+      trigger: () =>
+        h(
+          NButton,
+          { size: "small", quaternary: true, onClick },
+          { default: () => h(MessageCircle, { size: 16 }) }
+        ),
+    }
+  );
 }
 </script>
 
@@ -395,7 +550,7 @@ function setAllColumnsVisible() {
         v-for="t in tabs"
         :key="t.key"
         :name="t.key"
-        :tab="`${t.label} (${props.latest[t.key].length})`"
+        :tab="`${t.label} (${props.counts?.[t.key] ?? '—'})`"
       >
         <NAlert v-if="tableDataError" type="error" class="table-error">
           {{ tableDataError }}
@@ -409,6 +564,7 @@ function setAllColumnsVisible() {
           :bordered="false"
           size="small"
           :max-height="360"
+          :scroll-x="scrollX"
           remote
           :pagination="{
             page: currentPage,
@@ -424,6 +580,31 @@ function setAllColumnsVisible() {
         <NEmpty v-else-if="!tableDataLoading" description="No rows" />
       </NTabPane>
     </NTabs>
+
+    <NModal
+      v-model:show="conversationModalOpen"
+      preset="card"
+      title="Conversation"
+      style="width: 640px; max-width: 95vw"
+      :mask-closable="true"
+    >
+      <NSpin :show="conversationLoading">
+        <NAlert v-if="conversationError" type="error" class="mb">
+          {{ conversationError }}
+        </NAlert>
+        <template v-if="conversationData.contact">
+          <p class="conversation-label">Contact</p>
+          <NCode :code="JSON.stringify(conversationData.contact, null, 2)" language="json" word-wrap />
+        </template>
+        <p class="conversation-label">Messages ({{ conversationData.messages.length }})</p>
+        <NCode
+          :code="JSON.stringify(conversationData.messages, null, 2)"
+          language="json"
+          word-wrap
+          class="conversation-json"
+        />
+      </NSpin>
+    </NModal>
   </div>
 </template>
 
@@ -475,5 +656,29 @@ function setAllColumnsVisible() {
 .filter-menu-actions {
   border-top: 1px solid var(--n-border-color);
   padding-top: 6px;
+}
+.conversation-label {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 0.5rem 0 0.25rem 0;
+  opacity: 0.9;
+}
+.conversation-label:first-child {
+  margin-top: 0;
+}
+.conversation-json {
+  max-height: 60vh;
+  overflow: auto;
+}
+.mb {
+  margin-bottom: 0.75rem;
+}
+.avatar-cell {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  background: #e0e0e0;
 }
 </style>

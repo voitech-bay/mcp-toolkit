@@ -7,9 +7,66 @@ Single MCP server merging **Supabase messages** and **Company enrichment** tools
 - **get_linkedin_messages** – LinkedIn messages from Supabase (table LinkedinMessages)
 - **get_senders** – Senders from Supabase (table Senders)
 - **get_contacts** – Contacts from Supabase (table Contacts)
+- **get_conversation_by_contact_name** – Find contact by name, return that contact + full LinkedIn conversation (by lead_uuid)
+- **get_conversation_by_sender** – All LinkedIn messages (all conversations) for a sender (by sender_profile_uuid)
+- **get_conversation_by_message** – Full conversation thread by message id or by conversation UUID
 - **search_companies** – Apollo organization search
 - **search_people** – Apollo people search
 - **search_lookalike_companies** – Ocean.io lookalike companies
+
+### Conversation tools – when to use
+
+| Scenario | MCP tool | Example Cursor prompt |
+|----------|----------|------------------------|
+| Find conversation by contact name | `get_conversation_by_contact_name` | "Find conversation with John Doe" / "Show LinkedIn thread for contact named Alice Smith" |
+| Find all conversations by sender | `get_conversation_by_sender` | "Show all messages from sender uuid abc-123..." / "All conversations for this sender" |
+| Find conversation by a specific message | `get_conversation_by_message` | "Get the full thread for message id xyz" / "Show conversation containing this message" |
+
+### Example MCP calls (Cursor / API)
+
+**1. By contact name**
+
+```json
+{ "name": "get_conversation_by_contact_name", "arguments": { "contactFullName": "John Doe" } }
+```
+
+Optional: `"messageLimit": 500` (default 500, max 1000).
+
+**2. By sender (all conversations)**
+
+```json
+{ "name": "get_conversation_by_sender", "arguments": { "senderProfileUuid": "550e8400-e29b-41d4-a716-446655440000" } }
+```
+
+Optional: `"messageLimit": 500`.
+
+**3. By message (full thread)**
+
+By message id (tool looks up `linkedin_conversation_uuid` from that message):
+
+```json
+{ "name": "get_conversation_by_message", "arguments": { "messageId": "msg-123" } }
+```
+
+By conversation UUID if you already have it:
+
+```json
+{ "name": "get_conversation_by_message", "arguments": { "conversationUuid": "550e8400-e29b-41d4-a716-446655440000" } }
+```
+
+Optional: `"messageLimit": 500`.
+
+### Deeplinks (app URLs for Cursor / sharing)
+
+Use these URLs to open the web app on the right table so you can use the row actions (“Find conversation by contact”, “Find conversation by message”, “Find all conversations by sender”). Replace `https://your-app.vercel.app` with your deployed base URL (or `http://localhost:5173` when running the frontend locally).
+
+| Scenario | Deeplink |
+|----------|----------|
+| Find conversation by contact | `https://your-app.vercel.app/?table=contacts` |
+| Find conversation by message | `https://your-app.vercel.app/?table=linkedin_messages` |
+| Find all conversations by sender | `https://your-app.vercel.app/?table=senders` |
+
+From each table, use the **Actions** column (message icon) on a row to load that conversation in the modal. You can share a link with filters and pagination, e.g. `?table=contacts&page=2&cols=name,uuid` (see app URL query params).
 
 ## Local development
 
@@ -42,7 +99,7 @@ cp .env.example .env   # fill in keys
 
 - `src/` – backend (MCP server, API handlers)
   - `services/` – supabase, apollo, ocean, source-api, sync-supabase
-  - `tools/` – get-linkedin-messages, get-senders, get-contacts, company-enrichment
+  - `tools/` – get-linkedin-messages, get-senders, get-contacts, get-conversation-by-contact-name, get-conversation-by-sender, get-conversation-by-message, company-enrichment
   - `server.ts` – merged MCP server + Streamable HTTP handler
   - `stdio.ts` – stdio entry for local MCP
   - `standalone-http.ts` – local HTTP server
