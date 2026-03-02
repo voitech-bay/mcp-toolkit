@@ -407,33 +407,117 @@ async function fetchConversation(params: {
   }
 }
 
-const cursorDeeplink = computed(() => {
-  const p = lastConversationParams.value;
-  let text = "";
-  if (p.leadUuid) {
-    const name =
-      conversationData.value.contact && typeof conversationData.value.contact.name === "string"
-        ? conversationData.value.contact.name
-        : null;
-    if (name) {
-      text = `Use MCP tool get_conversation_by_contact_name with contactFullName: "${name.replace(/"/g, '\\"')}" to show this LinkedIn conversation.`;
-    } else {
-      text = `Get the LinkedIn conversation for contact with lead_uuid ${p.leadUuid}. Use get_contacts filtered by uuid then get_conversation_by_contact_name with that contact's name.`;
-    }
-  } else if (p.conversationUuid) {
-    text = `Use MCP tool get_conversation_by_message with conversationUuid: "${p.conversationUuid}" to show this LinkedIn conversation thread.`;
-  } else if (p.senderProfileUuid) {
-    text = `Use MCP tool get_conversation_by_sender with senderProfileUuid: "${p.senderProfileUuid}" to show all LinkedIn messages from this sender.`;
-  } else {
-    return "";
+const conversationContactName = computed(() => {
+  const c = conversationData.value.contact;
+  if (!c || typeof c !== "object") return null;
+  if (typeof (c as Record<string, unknown>).name === "string") {
+    const n = (c as Record<string, unknown>).name as string;
+    if (n.trim()) return n.trim();
   }
-  const encoded = encodeURIComponent(text);
-  return `cursor://anysphere.cursor-deeplink/prompt?text=${encoded}`;
+  const first = typeof (c as Record<string, unknown>).first_name === "string" ? ((c as Record<string, unknown>).first_name as string).trim() : "";
+  const last = typeof (c as Record<string, unknown>).last_name === "string" ? ((c as Record<string, unknown>).last_name as string).trim() : "";
+  return [first, last].filter(Boolean).join(" ") || null;
 });
 
-function openInCursor() {
-  const url = cursorDeeplink.value;
-  if (url) window.open(url, "_blank", "noopener");
+const conversationCompanyName = computed(() => {
+  const c = conversationData.value.contact;
+  if (!c || typeof c !== "object") return null;
+  const v = (c as Record<string, unknown>).company_name;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+});
+
+type CursorWorkflowOption = { label: string; prompt: string };
+
+const cursorWorkflowOptions = computed((): CursorWorkflowOption[] => {
+  const p = lastConversationParams.value;
+  const contact = conversationData.value.contact;
+  const contactName = conversationContactName.value;
+  const companyName = conversationCompanyName.value;
+  const options: CursorWorkflowOption[] = [];
+
+  if (contact && contactName) {
+    options.push({
+      label: "Company context workflow",
+      prompt: `Run company context workflow for contact ${contactName}.`,
+    });
+    options.push({
+      label: "Find contact (get_contacts)",
+      prompt: `Use MCP tool get_contacts to find this contact. Filter by name: "${contactName.replace(/"/g, '\\"')}".`,
+    });
+  }
+
+  if (p.leadUuid) {
+    if (contactName) {
+      options.push({
+        label: "Get conversation by contact name",
+        prompt: `Use MCP tool get_conversation_by_contact_name with contactFullName: "${contactName.replace(/"/g, '\\"')}" to show this LinkedIn conversation.`,
+      });
+    } else {
+      options.push({
+        label: "Get conversation by lead",
+        prompt: `Get the LinkedIn conversation for contact with lead_uuid ${p.leadUuid}. Use get_contacts filtered by uuid then get_conversation_by_contact_name with that contact's name.`,
+      });
+    }
+  }
+  if (p.conversationUuid) {
+    options.push({
+      label: "Get conversation by message",
+      prompt: `Use MCP tool get_conversation_by_message with conversationUuid: "${p.conversationUuid}" to show this LinkedIn conversation thread.`,
+    });
+  }
+  if (p.senderProfileUuid) {
+    options.push({
+      label: "Get conversations by sender",
+      prompt: `Use MCP tool get_conversation_by_sender with senderProfileUuid: "${p.senderProfileUuid}" to show all LinkedIn messages from this sender.`,
+    });
+  }
+
+  if (contactName) {
+    options.push({
+      label: "MCP: get_conversation_by_contact_name",
+      prompt: `Call MCP tool get_conversation_by_contact_name with contactFullName: "${contactName.replace(/"/g, '\\"')}".`,
+    });
+  }
+  if (p.conversationUuid) {
+    options.push({
+      label: "MCP: get_conversation_by_message",
+      prompt: `Call MCP tool get_conversation_by_message with conversationUuid: "${p.conversationUuid}".`,
+    });
+  }
+  if (p.senderProfileUuid) {
+    options.push({
+      label: "MCP: get_conversation_by_sender",
+      prompt: `Call MCP tool get_conversation_by_sender with senderProfileUuid: "${p.senderProfileUuid}".`,
+    });
+  }
+  if (contactName) {
+    options.push({
+      label: "MCP: get_contacts",
+      prompt: `Use MCP tool get_contacts to find contact. Filter by name: "${contactName.replace(/"/g, '\\"')}".`,
+    });
+  }
+  if (companyName) {
+    options.push({
+      label: "MCP: get_company_root_context",
+      prompt: `Use MCP tool get_company_root_context with companyName: "${companyName.replace(/"/g, '\\"')}" to get the company root context.`,
+    });
+    options.push({
+      label: "MCP: set_company_root_context",
+      prompt: `Use MCP tool set_company_root_context with companyName: "${companyName.replace(/"/g, '\\"')}" and rootContext with the context you want to set.`,
+    });
+  }
+  options.push(
+    { label: "MCP: get_linkedin_messages", prompt: "Use MCP tool get_linkedin_messages with optional filters (limit, orderBy, etc.) to fetch LinkedIn messages." },
+    { label: "MCP: get_senders", prompt: "Use MCP tool get_senders with optional filters to fetch senders." }
+  );
+
+  return options;
+});
+
+function openInCursor(prompt: string) {
+  if (!prompt.trim()) return;
+  const url = `cursor://anysphere.cursor-deeplink/prompt?text=${encodeURIComponent(prompt)}`;
+  window.open(url, "_blank", "noopener");
 }
 
 function onFindConversationByContact(row: Record<string, unknown>) {
@@ -459,6 +543,17 @@ function onFindConversationByMessage(row: Record<string, unknown>) {
     conversationError.value = "Message has no linkedin_conversation_uuid";
     conversationData.value = { messages: [] };
   }
+}
+
+function onGoToContact(row: Record<string, unknown>) {
+  const leadUuid = row.lead_uuid != null ? String(row.lead_uuid) : undefined;
+  if (!leadUuid) return;
+  activeTab.value = "contacts";
+  filterStateByTable.value = {
+    ...filterStateByTable.value,
+    contacts: { uuid: [leadUuid] },
+  };
+  pageByTable.value = { ...pageByTable.value, contacts: 1 };
 }
 
 function onFindConversationBySender(row: Record<string, unknown>) {
@@ -548,6 +643,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
           @update:page="onUpdatePage"
           @update:page-size="onUpdatePageSize"
           @action="onFindConversationByMessage"
+          @go-to-contact="onGoToContact"
         />
         <SendersTable
           v-else-if="activeTab === 'senders'"
@@ -575,7 +671,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
       :error="conversationError"
       :contact="conversationData.contact"
       :messages="conversationData.messages"
-      :cursor-deeplink="cursorDeeplink"
+      :cursor-workflow-options="cursorWorkflowOptions"
       @update:show="conversationModalOpen = $event"
       @open-in-cursor="openInCursor"
     />

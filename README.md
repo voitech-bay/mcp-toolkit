@@ -10,6 +10,8 @@ Single MCP server merging **Supabase messages** and **Company enrichment** tools
 - **get_conversation_by_contact_name** – Find contact by name, return that contact + full LinkedIn conversation (by lead_uuid)
 - **get_conversation_by_sender** – All LinkedIn messages (all conversations) for a sender (by sender_profile_uuid)
 - **get_conversation_by_message** – Full conversation thread by message id or by conversation UUID
+- **get_company_root_context** – Get root context for a company by name (table CompaniesContext)
+- **set_company_root_context** – Create or update root context for a company by name (table CompaniesContext)
 - **search_companies** – Apollo organization search
 - **search_people** – Apollo people search
 - **search_lookalike_companies** – Ocean.io lookalike companies
@@ -56,6 +58,24 @@ By conversation UUID if you already have it:
 
 Optional: `"messageLimit": 500`.
 
+**4. Company root context (get)**
+
+```json
+{ "name": "get_company_root_context", "arguments": { "companyName": "Acme Inc" } }
+```
+
+Returns the row (id, name, rootContext, created_at) or indicates not found.
+
+**5. Company root context (set)**
+
+Create or update by company name; if the name exists the row is updated, otherwise a new row is inserted:
+
+```json
+{ "name": "set_company_root_context", "arguments": { "companyName": "Acme Inc", "rootContext": "Your context text here..." } }
+```
+
+Use `"rootContext": null` to clear. Requires Supabase table `CompaniesContext` (columns: id, created_at, name, rootContext).
+
 ### Deeplinks (app URLs for Cursor / sharing)
 
 Use these URLs to open the web app on the right table so you can use the row actions (“Find conversation by contact”, “Find conversation by message”, “Find all conversations by sender”). Replace `https://your-app.vercel.app` with your deployed base URL (or `http://localhost:5173` when running the frontend locally).
@@ -82,7 +102,10 @@ cp .env.example .env   # fill in keys
   `npm run dev:http` — server at `http://localhost:3000/mcp`. Use this URL in MCP clients that support Streamable HTTP / SSE.
 
 - **Frontend (Vue 3 + TypeScript):**  
-  `npm run dev:frontend` — Vite dev server with hot reload. Proxies `/api` to `http://localhost:3000`, so run `npm run dev:http` in another terminal to hit the API. After `npm run build`, the app is in `public/` (built from `frontend/`).
+  `npm run dev:frontend` — Vite dev server with hot reload. Proxies `/api` to `http://localhost:3001` by default; run `npm run dev:api` in another terminal for the local API (or `npm run dev:http` for MCP at 3000). After `npm run build`, the app is in `public/` (built from `frontend/`).
+
+- **Local API (mirrors Vercel routes):**  
+  `npm run dev:api` — HTTP server at `http://localhost:3001` with GET/POST `/api/supabase-state`, `/api/supabase-table-query`, `/api/conversation`, **GET/POST `/api/company-context`** (company context by name: GET `?name=...`, POST body `{ "name", "rootContext" }`).
 
 ## Deploy to Vercel
 
@@ -99,11 +122,11 @@ cp .env.example .env   # fill in keys
 
 - `src/` – backend (MCP server, API handlers)
   - `services/` – supabase, apollo, ocean, source-api, sync-supabase
-  - `tools/` – get-linkedin-messages, get-senders, get-contacts, get-conversation-by-contact-name, get-conversation-by-sender, get-conversation-by-message, company-enrichment
+  - `tools/` – get-linkedin-messages, get-senders, get-contacts, get-conversation-by-contact-name, get-conversation-by-sender, get-conversation-by-message, get-company-root-context, set-company-root-context, company-enrichment
   - `server.ts` – merged MCP server + Streamable HTTP handler
   - `stdio.ts` – stdio entry for local MCP
   - `standalone-http.ts` – local HTTP server
 - `frontend/` – Vue 3 + TypeScript app (builds into `public/`)
   - `src/` – App.vue, components (CountCards, LatestTables), types
   - `index.html` – Vite entry
-- `api/` – Vercel serverless (mcp, supabase-state, supabase-sync)
+- `api/` – Vercel serverless (mcp, supabase-state, supabase-sync, supabase-table-query, conversation, company-context)

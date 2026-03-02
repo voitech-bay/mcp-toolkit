@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { h, toRef, computed } from "vue";
-import { NButton, NPopover } from "naive-ui";
+import { NButton, NPopover, NSpace } from "naive-ui";
 import type { DataTableFilterState } from "naive-ui";
-import { MessageCircle } from "lucide-vue-next";
+import { MessageCircle, User } from "lucide-vue-next";
 import { useDataTableColumns } from "../composables/useDataTableColumns";
 import DataTableSection from "./DataTableSection.vue";
 
@@ -25,6 +25,7 @@ const emit = defineEmits<{
   "update:page": [value: number];
   "update:pageSize": [value: number];
   action: [row: Record<string, unknown>];
+  goToContact: [row: Record<string, unknown>];
 }>();
 
 const highlightTerm = computed(() => (props.searchTerm ?? "").trim());
@@ -34,12 +35,12 @@ const { tableColumns, scrollX } = useDataTableColumns(
   toRef(props, "visibleColumnKeys"),
   (v) => emit("update:filters", v),
   (row) => {
-    const tooltip = "Find conversation by message";
-    return h(
+    const hasLeadUuid = row.lead_uuid != null && String(row.lead_uuid).trim() !== "";
+    const conversationBtn = h(
       NPopover,
       { trigger: "hover", placement: "top", showArrow: true },
       {
-        default: () => tooltip,
+        default: () => "Find conversation by message",
         trigger: () =>
           h(
             NButton,
@@ -52,6 +53,26 @@ const { tableColumns, scrollX } = useDataTableColumns(
           ),
       }
     );
+    const goToContactBtn = hasLeadUuid
+      ? h(
+          NPopover,
+          { trigger: "hover", placement: "top", showArrow: true },
+          {
+            default: () => "Go to contact",
+            trigger: () =>
+              h(
+                NButton,
+                {
+                  size: "small",
+                  quaternary: true,
+                  onClick: () => emit("goToContact", row),
+                },
+                { default: () => h(User, { size: 16 }) }
+              ),
+          }
+        )
+      : null;
+    return h(NSpace, { size: 4 }, [conversationBtn, goToContactBtn].filter(Boolean));
   },
   { highlightTerm, highlightColumnKeys: ["text"] }
 );

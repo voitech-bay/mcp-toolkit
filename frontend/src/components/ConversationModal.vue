@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { NModal, NSpin, NAlert, NButton, NCode, NTag } from "naive-ui";
+import { computed, ref, watch } from "vue";
+import { NModal, NSpin, NAlert, NButton, NCode, NTag, NSelect } from "naive-ui";
+
+export interface CursorWorkflowOption {
+  label: string;
+  prompt: string;
+}
 
 const props = defineProps<{
   show: boolean;
@@ -8,15 +13,40 @@ const props = defineProps<{
   error: string;
   contact?: Record<string, unknown> | null;
   messages: unknown[];
-  cursorDeeplink: string;
+  cursorWorkflowOptions: CursorWorkflowOption[];
 }>();
 
 const emit = defineEmits<{
   "update:show": [value: boolean];
-  openInCursor: [];
+  openInCursor: [prompt: string];
 }>();
 
-const hasCursorDeeplink = computed(() => (props.cursorDeeplink ?? "").length > 0);
+const selectedWorkflowIndex = ref(0);
+const optionsForSelect = computed(() =>
+  props.cursorWorkflowOptions.map((o, i) => ({ label: o.label, value: i }))
+);
+const hasWorkflowOptions = computed(() => (props.cursorWorkflowOptions?.length ?? 0) > 0);
+
+watch(
+  () => props.cursorWorkflowOptions,
+  (opts) => {
+    if (opts?.length && selectedWorkflowIndex.value >= opts.length) {
+      selectedWorkflowIndex.value = 0;
+    }
+  },
+  { immediate: true }
+);
+
+const selectedPromptPreview = computed(() => {
+  const opts = props.cursorWorkflowOptions ?? [];
+  const idx = selectedWorkflowIndex.value;
+  const option = opts[idx];
+  return option?.prompt ?? "";
+});
+
+function onOpenInCursor() {
+  if (selectedPromptPreview.value) emit("openInCursor", selectedPromptPreview.value);
+}
 
 function formatSentAt(value: unknown): string {
   if (value == null) return "";
@@ -155,17 +185,29 @@ const contactOtherFields = computed(() => {
         <aside class="conversation-modal-sidebar">
           <div class="conversation-modal-actions-block">
             <p class="conversation-modal-sidebar-label">Actions</p>
+            <NSelect
+              v-if="hasWorkflowOptions"
+              v-model:value="selectedWorkflowIndex"
+              :options="optionsForSelect"
+              size="small"
+              class="conversation-modal-workflow-select"
+            />
+            <div v-if="hasWorkflowOptions && selectedPromptPreview" class="conversation-modal-prompt-preview">
+              <p class="conversation-modal-sidebar-label">Prompt preview</p>
+              <div class="conversation-modal-prompt-preview-text">{{ selectedPromptPreview }}</div>
+            </div>
             <NButton
-              v-if="hasCursorDeeplink"
+              v-if="hasWorkflowOptions"
               type="primary"
               size="medium"
               block
-              @click="emit('openInCursor')"
+              class="conversation-modal-open-cursor-btn"
+              @click="onOpenInCursor"
             >
               Open in Cursor
             </NButton>
-            <span v-if="hasCursorDeeplink" class="conversation-modal-actions-hint">
-              Opens Cursor with a pre-filled prompt to load this conversation via MCP
+            <span v-if="hasWorkflowOptions" class="conversation-modal-actions-hint">
+              Opens Cursor with the selected workflow prompt
             </span>
           </div>
           <div v-if="contact && !loading" class="conversation-meta-block">
@@ -345,6 +387,29 @@ const contactOtherFields = computed(() => {
   letter-spacing: 0.02em;
   margin: 0 0 0.5rem 0;
   opacity: 0.85;
+}
+.conversation-modal-workflow-select {
+  width: 100%;
+  margin-bottom: 0.5rem;
+}
+.conversation-modal-prompt-preview {
+  margin-bottom: 0.5rem;
+}
+.conversation-modal-prompt-preview-text {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--n-text-color-2);
+  background: var(--n-color-modal);
+  border: 1px solid var(--n-border-color);
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  max-height: 80px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.conversation-modal-open-cursor-btn {
+  margin-bottom: 0.35rem;
 }
 .conversation-modal-actions-block :deep(.n-button) {
   margin-bottom: 0.35rem;
