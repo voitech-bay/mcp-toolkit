@@ -4,7 +4,8 @@ import { useDark } from "@vueuse/core";
 import type { StateResponse, SyncResult } from "./types";
 import CountCards from "./components/CountCards.vue";
 import LatestTables from "./components/LatestTables.vue";
-import { NConfigProvider, darkTheme, lightTheme, NH1, NCard, NButton, NSpin, NAlert, NSpace, NCode } from "naive-ui";
+import { NConfigProvider, darkTheme, lightTheme, NH1, NH3, NCard, NButton, NSpin, NAlert, NSpace, NCode } from "naive-ui";
+import { MoonIcon, SunIcon } from "lucide-vue-next";
 
 // VueUse: dark theme by default, persisted in localStorage (vueuse-color-scheme)
 const isDark = useDark();
@@ -56,7 +57,9 @@ async function runSync() {
 }
 
 onMounted(() => loadState());
-
+function toggleTheme() {
+  isDark.value = !isDark.value;
+}
 </script>
 
 <template>
@@ -64,15 +67,20 @@ onMounted(() => loadState());
     <div class="app">
       <header class="header">
         <NH1 class="title">MCP Toolkit</NH1>
-        <p class="subtitle">
+        <NH3 class="subtitle">
           MCP endpoint: <a href="/api/mcp" target="_blank" rel="noopener">/api/mcp</a>
-        </p>
+        </NH3>
       </header>
 
       <main class="main">
         <NCard title="Supabase state" class="section">
           <template #header-extra>
             <NSpace>
+              <NButton @click="toggleTheme()">
+              
+                <SunIcon :size="12" v-if="isDark" />
+                <MoonIcon :size="12" v-else />
+              </NButton>
               <NButton :loading="loading" @click="loadState()">Refresh</NButton>
               <NButton type="primary" :loading="syncing" @click="runSync()">
                 Sync from source

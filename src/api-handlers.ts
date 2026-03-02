@@ -2,7 +2,7 @@
  * HTTP handlers for Supabase state and sync. Used by Vercel serverless api/supabase-state and api/supabase-sync.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getSupabase, getTableCounts, getLatestRows } from "./services/supabase.js";
+import { getSupabase, getTableCounts, getLatestRows, queryTableWithFilters, type TableQueryFilters } from "./services/supabase.js";
 import { syncSupabaseFromSource } from "./services/sync-supabase.js";
 
 export type NodeHandler = (
@@ -67,4 +67,63 @@ export async function handleSupabaseSync(
   const result = await syncSupabaseFromSource();
   res.writeHead(200);
   res.end(JSON.stringify(result));
+}
+
+/** Parse query string from req.url. */
+function getQueryParams(req: IncomingMessage): URLSearchParams {
+  const url = req.url ?? "";
+  const q = url.includes("?") ? url.slice(url.indexOf("?") + 1) : "";
+  return new URLSearchParams(q);
+}
+
+export async function handleSupabaseTableQuery(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const table = params.get("table");
+  const validTables = ["contacts", "linkedin_messages", "senders"];
+  if (!table || !validTables.includes(table)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid query: table (contacts|linkedin_messages|senders)" }));
+    return;
+  }
+  let filters: TableQueryFilters = {};
+  const filtersParam = params.get("filters");
+  if (filtersParam) {
+    try {
+      const decoded = decodeURIComponent(filtersParam);
+      const parsed = JSON.parse(decoded) as TableQueryFilters;
+      if (typeof parsed === "object" && parsed !== null) {
+        filters = parsed;
+      }
+    } catch {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "Invalid filters JSON" }));
+      return;
+    }
+  }
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "100", 10) || 100, 1), 1000);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await queryTableWithFilters(client, table, { filters, limit, offset });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
 }

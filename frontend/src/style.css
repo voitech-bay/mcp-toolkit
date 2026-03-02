@@ -4,6 +4,8 @@ body {
   font-family: system-ui, -apple-system, sans-serif;
   line-height: 1.5;
   min-height: 100vh;
+}
+html.dark body {
   background: rgb(66, 66, 66);
 }
 #app {

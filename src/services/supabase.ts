@@ -466,3 +466,49 @@ export async function getLatestRows(
     };
   }
 }
+
+// --- Table query with filters (for /api/supabase-table-query) ---
+
+export const TABLE_KEY_TO_NAME: Record<string, string> = {
+  contacts: CONTACTS_TABLE,
+  linkedin_messages: LINKEDIN_MESSAGES_TABLE,
+  senders: SENDERS_TABLE,
+};
+
+/** Filters: column key -> array of values (row must match one of the values per column). */
+export interface TableQueryFilters {
+  [columnKey: string]: (string | number)[] | string | number | null | undefined;
+}
+
+export async function queryTableWithFilters(
+  client: SupabaseClient,
+  tableKey: string,
+  params: {
+    filters: TableQueryFilters;
+    limit?: number;
+    offset?: number;
+  }
+): Promise<{ data: unknown[]; error: string | null }> {
+  const tableName = TABLE_KEY_TO_NAME[tableKey];
+  if (!tableName) {
+    return { data: [], error: `Unknown table: ${tableKey}` };
+  }
+  const limit = Math.min(Math.max(params.limit ?? 100, 1), 1000);
+  const offset = Math.max(params.offset ?? 0, 0);
+
+  let query = client.from(tableName).select("*");
+
+  for (const [columnKey, raw] of Object.entries(params.filters)) {
+    if (raw === null || raw === undefined) continue;
+    const values = Array.isArray(raw) ? raw : [raw];
+    const trimmed = values.filter((v) => v !== "" && v !== null && v !== undefined);
+    if (trimmed.length === 0) continue;
+    query = query.in(columnKey, trimmed);
+  }
+
+  query = query.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
+
+  const { data, error } = await query;
+  if (error) return { data: [], error: error.message };
+  return { data: data ?? [], error: null };
+}
