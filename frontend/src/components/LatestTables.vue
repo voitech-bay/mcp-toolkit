@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import type { LatestRows } from "../types";
+import { NTabs, NTabPane, NDataTable, NEmpty } from "naive-ui";
+import type { DataTableColumns } from "naive-ui";
 
-defineProps<{ latest: LatestRows }>();
+const props = defineProps<{ latest: LatestRows }>();
 
 const activeTab = ref<keyof LatestRows>("contacts");
 
@@ -23,41 +25,42 @@ function keysFromRows(rows: Record<string, unknown>[]): string[] {
   rows.forEach((r) => Object.keys(r).forEach((k) => set.add(k)));
   return Array.from(set).sort();
 }
+
+function buildColumns(rows: Record<string, unknown>[]): DataTableColumns<Record<string, unknown>> {
+  return keysFromRows(rows).map((key) => ({
+    width: 200,
+    title: key,
+    key,
+    ellipsis: { tooltip: true },
+    render(row: Record<string, unknown>) {
+      return formatCell(row[key]);
+    },
+  }));
+}
 </script>
 
 <template>
   <div class="latest-tables">
     <h3 class="latest-title">Latest rows (newest first)</h3>
-    <div class="tabs">
-      <button
+    <NTabs v-model:value="activeTab" type="line" size="medium">
+      <NTabPane
         v-for="t in tabs"
         :key="t.key"
-        type="button"
-        :class="{ active: activeTab === t.key }"
-        @click="activeTab = t.key"
+        :name="t.key"
+        :tab="`${t.label} (${props.latest[t.key].length})`"
       >
-        {{ t.label }} ({{ latest[t.key].length }})
-      </button>
-    </div>
-    <div class="table-wrap">
-      <table v-if="latest[activeTab].length > 0" class="data-table">
-        <thead>
-          <tr>
-            <th v-for="k in keysFromRows(latest[activeTab])" :key="k" scope="col">
-              {{ k }}
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="(row, i) in latest[activeTab]" :key="i">
-            <td v-for="k in keysFromRows(latest[activeTab])" :key="k" class="cell">
-              {{ formatCell(row[k]) }}
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      <p v-else class="empty">No rows</p>
-    </div>
+        <NDataTable
+          v-if="props.latest[activeTab].length > 0"
+          :columns="buildColumns(props.latest[activeTab])"
+          :data="props.latest[activeTab]"
+          :bordered="false"
+          size="small"
+          :max-height="360"
+          virtual-scroll
+        />
+        <NEmpty v-else description="No rows" />
+      </NTabPane>
+    </NTabs>
   </div>
 </template>
 
@@ -69,62 +72,6 @@ function keysFromRows(rows: Record<string, unknown>[]): string[] {
   font-size: 0.95rem;
   font-weight: 600;
   margin: 0 0 0.75rem 0;
-  color: var(--muted);
-}
-.tabs {
-  display: flex;
-  gap: 0.25rem;
-  margin-bottom: 1rem;
-}
-.tabs button {
-  padding: 0.4rem 0.75rem;
-  font-size: 0.85rem;
-  border-radius: 6px;
-}
-.tabs button.active {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-  color: white;
-}
-.table-wrap {
-  overflow: auto;
-  max-height: 360px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-}
-.data-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.8rem;
-}
-.data-table th,
-.data-table td {
-  padding: 0.5rem 0.75rem;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
-}
-.data-table th {
-  position: sticky;
-  top: 0;
-  background: var(--surface);
-  color: var(--muted);
-  font-weight: 500;
-  white-space: nowrap;
-}
-.data-table td.cell {
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.data-table tr:hover td {
-  background: rgba(255, 255, 255, 0.02);
-}
-.empty {
-  padding: 1.5rem;
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.9rem;
+  opacity: 0.85;
 }
 </style>

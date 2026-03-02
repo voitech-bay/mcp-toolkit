@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, computed } from "vue";
+import { useDark } from "@vueuse/core";
 import type { StateResponse, SyncResult } from "./types";
 import CountCards from "./components/CountCards.vue";
 import LatestTables from "./components/LatestTables.vue";
+import { NConfigProvider, darkTheme, lightTheme, NH1, NCard, NButton, NSpin, NAlert, NSpace, NCode } from "naive-ui";
+
+// VueUse: dark theme by default, persisted in localStorage (vueuse-color-scheme)
+const isDark = useDark();
+isDark.value = true;
+
+const naiveTheme = computed(() => (isDark.value ? darkTheme : lightTheme));
 
 const state = ref<StateResponse | null>(null);
 const stateError = ref("");
@@ -48,44 +56,48 @@ async function runSync() {
 }
 
 onMounted(() => loadState());
+
 </script>
 
 <template>
-  <div class="app">
-    <header class="header">
-      <h1>MCP Toolkit</h1>
-      <p class="subtitle">
-        MCP endpoint: <a href="/api/mcp" target="_blank" rel="noopener">/api/mcp</a>
-      </p>
-    </header>
-
-    <main class="main">
-      <section class="section">
-        <div class="section-header">
-          <h2>Supabase state</h2>
-          <div class="actions">
-            <button type="button" :disabled="loading" @click="loadState()">
-              {{ loading ? "Loading…" : "Refresh" }}
-            </button>
-            <button type="button" class="primary" :disabled="syncing" @click="runSync()">
-              {{ syncing ? "Syncing…" : "Sync from source" }}
-            </button>
-          </div>
-        </div>
-        <p v-if="stateError" class="error">{{ stateError }}</p>
-        <CountCards v-if="state?.counts" :counts="state.counts" />
-        <LatestTables v-if="state?.latest" :latest="state.latest" />
-        <p v-if="state?.latestError" class="muted small">
-          Latest rows: {{ state.latestError }}
+  <NConfigProvider :theme="naiveTheme">
+    <div class="app">
+      <header class="header">
+        <NH1 class="title">MCP Toolkit</NH1>
+        <p class="subtitle">
+          MCP endpoint: <a href="/api/mcp" target="_blank" rel="noopener">/api/mcp</a>
         </p>
-      </section>
+      </header>
 
-      <section v-if="syncResult" class="section sync-result">
-        <h3>Last sync result</h3>
-        <pre>{{ JSON.stringify(syncResult, null, 2) }}</pre>
-      </section>
-    </main>
-  </div>
+      <main class="main">
+        <NCard title="Supabase state" class="section">
+          <template #header-extra>
+            <NSpace>
+              <NButton :loading="loading" @click="loadState()">Refresh</NButton>
+              <NButton type="primary" :loading="syncing" @click="runSync()">
+                Sync from source
+              </NButton>
+            </NSpace>
+          </template>
+
+          <NSpin :show="loading">
+            <NAlert v-if="stateError" type="error" class="mb">
+              {{ stateError }}
+            </NAlert>
+            <CountCards v-if="state?.counts" :counts="state.counts" />
+            <LatestTables v-if="state?.latest" :latest="state.latest" />
+            <p v-if="state?.latestError" class="muted small">
+              Latest rows: {{ state.latestError }}
+            </p>
+          </NSpin>
+        </NCard>
+
+        <NCard v-if="syncResult" title="Last sync result" class="section">
+          <NCode :code="JSON.stringify(syncResult, null, 2)" language="json" word-wrap />
+        </NCard>
+      </main>
+    </div>
+  </NConfigProvider>
 </template>
 
 <style scoped>
@@ -97,14 +109,14 @@ onMounted(() => loadState());
 .header {
   margin-bottom: 2rem;
 }
-.header h1 {
+.title {
   font-size: 1.75rem;
   font-weight: 600;
   margin: 0 0 0.25rem 0;
 }
 .subtitle {
   margin: 0;
-  color: var(--muted);
+  opacity: 0.8;
   font-size: 0.95rem;
 }
 .main {
@@ -113,49 +125,14 @@ onMounted(() => loadState());
   gap: 1.5rem;
 }
 .section {
-  background: var(--surface);
-  border: 1px solid var(--border);
   border-radius: 12px;
-  padding: 1.25rem 1.5rem;
 }
-.section-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
+.mb {
   margin-bottom: 1rem;
 }
-.section-header h2 {
-  font-size: 1.15rem;
-  font-weight: 600;
-  margin: 0;
-}
-.actions {
-  display: flex;
-  gap: 0.5rem;
-}
-.error {
-  color: var(--error);
-  margin: 0 0 1rem 0;
-  font-size: 0.9rem;
-}
 .muted.small {
-  color: var(--muted);
+  opacity: 0.7;
   font-size: 0.85rem;
   margin: 0.5rem 0 0 0;
-}
-.sync-result pre {
-  margin: 0;
-  padding: 1rem;
-  background: var(--bg);
-  border-radius: 8px;
-  font-size: 0.8rem;
-  overflow: auto;
-  max-height: 280px;
-}
-.sync-result h3 {
-  font-size: 1rem;
-  margin: 0 0 0.75rem 0;
 }
 </style>

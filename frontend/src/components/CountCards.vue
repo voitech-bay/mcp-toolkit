@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { TableCounts } from "../types";
+import { NGrid, NGi, NCard, NStatistic, NProgress } from "naive-ui";
 
 defineProps<{ counts: TableCounts }>();
 
@@ -9,60 +10,40 @@ const labels: { key: keyof TableCounts; label: string }[] = [
   { key: "senders", label: "Senders" },
 ];
 
-function barWidth(n: number): string {
+function progressPercent(n: number): number {
   const max = 10000;
-  if (n <= 0) return "0%";
-  const pct = Math.min(100, (n / max) * 100);
-  return `${pct}%`;
+  if (n <= 0) return 0;
+  return Math.min(100, (n / max) * 100);
 }
 </script>
 
 <template>
-  <div class="count-cards">
-    <div v-for="item in labels" :key="item.key" class="card">
-      <span class="card-label">{{ item.label }}</span>
-      <span class="card-value">{{ counts[item.key].toLocaleString() }}</span>
-      <div class="bar" :style="{ width: barWidth(counts[item.key]) }" />
-    </div>
-  </div>
+  <NGrid :cols="3" :x-gap="16" :y-gap="16" responsive="screen" item-responsive>
+    <NGi v-for="item in labels" :key="item.key" span="1 600:1 800:1">
+      <NCard size="small" class="stat-card">
+        <NStatistic :label="item.label">
+          <template #default>
+            {{ counts[item.key].toLocaleString() }}
+          </template>
+        </NStatistic>
+        <NProgress
+          type="line"
+          :percentage="progressPercent(counts[item.key])"
+          :show-indicator="false"
+          :height="4"
+          :border-radius="2"
+          class="stat-progress"
+        />
+      </NCard>
+    </NGi>
+  </NGrid>
 </template>
 
 <style scoped>
-.count-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-  gap: 1rem;
-  margin-bottom: 1.5rem;
+.stat-card {
+  margin-bottom: 1rem;
 }
-.card {
-  position: relative;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1rem 1.25rem;
-  overflow: hidden;
-}
-.card-label {
-  display: block;
-  font-size: 0.8rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-bottom: 0.25rem;
-}
-.card-value {
-  font-size: 1.5rem;
-  font-weight: 600;
-  color: var(--accent);
-}
-.card .bar {
-  position: absolute;
-  bottom: 0;
-  left: 0;
-  height: 3px;
-  background: var(--accent-dim);
-  border-radius: 0 2px 0 0;
-  max-width: 100%;
-  transition: width 0.4s ease;
+.stat-progress {
+  margin-top: 8px;
 }
 </style>

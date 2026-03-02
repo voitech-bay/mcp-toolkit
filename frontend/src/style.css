@@ -1,64 +1,19 @@
-:root {
-  --bg: #0f0f12;
-  --surface: #18181c;
-  --border: #2a2a2e;
-  --text: #e4e4e7;
-  --muted: #71717a;
-  --accent: #a78bfa;
-  --accent-dim: #7c3aed;
-  --success: #22c55e;
-  --error: #ef4444;
-  --warning: #eab308;
-}
-
-* {
-  box-sizing: border-box;
-}
-
+/* Minimal global styles; Naive UI provides theme and component styles */
 body {
   margin: 0;
-  font-family: "DM Sans", system-ui, -apple-system, sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  font-family: system-ui, -apple-system, sans-serif;
   line-height: 1.5;
   min-height: 100vh;
+  background: rgb(66, 66, 66);
 }
-
 #app {
   min-height: 100vh;
 }
 
 a {
-  color: var(--accent);
+  color: var(--n-primary-color);
   text-decoration: none;
 }
 a:hover {
   text-decoration: underline;
-}
-
-button {
-  font: inherit;
-  cursor: pointer;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
-  transition: background 0.15s, border-color 0.15s;
-}
-button:hover:not(:disabled) {
-  background: var(--border);
-  border-color: var(--accent-dim);
-}
-button:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-button.primary {
-  background: var(--accent-dim);
-  border-color: var(--accent);
-  color: white;
-}
-button.primary:hover:not(:disabled) {
-  background: var(--accent);
 }
