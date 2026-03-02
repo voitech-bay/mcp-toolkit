@@ -19,3 +19,37 @@ a {
 a:hover {
   text-decoration: underline;
 }
+
+/* Data table: avatar column and filter menu (used by useDataTableColumns) */
+.avatar-cell {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+  background: #e0e0e0;
+}
+.filter-menu {
+  padding: 8px;
+  min-width: 220px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.filter-menu-options {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-bottom: 8px;
+}
+.filter-menu-custom {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.filter-menu-custom .n-input {
+  flex: 1;
+}
+.filter-menu-actions {
+  border-top: 1px solid var(--n-border-color);
+  padding-top: 6px;
+}

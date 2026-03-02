@@ -15,7 +15,8 @@ export default defineConfig({
     server: {
         proxy: {
             "/api": {
-                target: "https://mcp-toolkit-mu.vercel.app/",
+                // For local API: run npm run dev:api and use target "http://localhost:3001"
+                target: "http://localhost:3001",
                 changeOrigin: true,
             },
         },

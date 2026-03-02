@@ -1,24 +1,24 @@
 <script setup lang="ts">
-import { ref, computed, watch, h } from "vue";
-import { useUrlSearchParams } from "@vueuse/core";
+import { ref, computed, watch } from "vue";
+import { useUrlSearchParams, useDebounceFn } from "@vueuse/core";
 import type { LatestRows, TableCounts } from "../types";
 import {
   NTabs,
   NTabPane,
-  NDataTable,
-  NEmpty,
   NButton,
+  NInput,
   NPopover,
   NCheckbox,
   NSpace,
-  NInput,
-  NAlert,
   NModal,
   NCode,
   NSpin,
+  NAlert,
 } from "naive-ui";
-import type { DataTableColumns, DataTableFilterState } from "naive-ui";
-import { MessageCircle } from "lucide-vue-next";
+import type { DataTableFilterState } from "naive-ui";
+import ContactsTable from "./ContactsTable.vue";
+import LinkedinMessagesTable from "./LinkedinMessagesTable.vue";
+import SendersTable from "./SendersTable.vue";
 
 const props = defineProps<{ latest: LatestRows; counts?: TableCounts }>();
 
@@ -40,14 +40,54 @@ const params = useUrlSearchParams("history", {
 });
 
 const validTableKeys: TableKey[] = ["contacts", "linkedin_messages", "senders"];
+
+const DEFAULT_VISIBLE_COLUMNS: Record<TableKey, string[]> = {
+  contacts: [
+    "avatar_url",
+    "name",
+    "company_name",
+    "position",
+    "connections_number",
+    "location",
+    "personal_email",
+    "work_email",
+  ],
+  linkedin_messages: ["text", "type", "sent_at", "read_at"],
+  senders: ["avatar_url", "first_name", "last_name", "status", "smart_limits_enabled"],
+};
+
+const STORAGE_KEY_PREFIX = "mcp-toolkit/table-visible-columns";
+
+function getVisibleColumnsFromStorage(table: TableKey): string[] | null {
+  if (typeof localStorage === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}/${table}`);
+    if (raw == null) return null;
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) && parsed.every((x) => typeof x === "string") ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function setVisibleColumnsInStorage(table: TableKey, cols: string[]) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}/${table}`, JSON.stringify(cols));
+  } catch {
+    /* ignore */
+  }
+}
+
 const activeTab = ref<TableKey>(
   validTableKeys.includes((params.table as TableKey) ?? "") ? (params.table as TableKey) : "contacts"
 );
-// Per-tab state (URL only stores current tab)
 const visibleColumnKeysByTable = ref<Partial<Record<TableKey, string[]>>>({});
 const filterStateByTable = ref<Partial<Record<TableKey, DataTableFilterState>>>({});
 const pageByTable = ref<Partial<Record<TableKey, number>>>({});
 const pageSizeByTable = ref<Partial<Record<TableKey, number>>>({});
+const searchByTable = ref<Partial<Record<TableKey, string>>>({});
+const searchInputByTable = ref<Partial<Record<TableKey, string>>>({});
 
 const visibleColumnKeys = computed({
   get: () => visibleColumnKeysByTable.value[activeTab.value] ?? [],
@@ -81,8 +121,23 @@ const currentPageSize = computed({
     pageSizeByTable.value = next;
   },
 });
+const debouncedApplySearch = useDebounceFn(() => {
+  const tab = activeTab.value;
+  const value = (searchInputByTable.value[tab] ?? "").trim();
+  searchByTable.value = { ...searchByTable.value, [tab]: value };
+  currentPage.value = 1;
+}, 300);
 
-// Initialize from URL on mount and on popstate
+const searchQuery = computed({
+  get: () => searchInputByTable.value[activeTab.value] ?? searchByTable.value[activeTab.value] ?? "",
+  set: (v: string) => {
+    const next = { ...searchInputByTable.value };
+    next[activeTab.value] = (v ?? "").trim();
+    searchInputByTable.value = next;
+    debouncedApplySearch();
+  },
+});
+
 function parseUrlState() {
   const table = params.table;
   if (table && validTableKeys.includes(table as TableKey)) {
@@ -97,6 +152,14 @@ function parseUrlState() {
   } catch {
     /* ignore */
   }
+  // Fill visible columns from localStorage or defaults for any table not set (e.g. from URL)
+  const nextCols = { ...visibleColumnKeysByTable.value };
+  for (const t of validTableKeys) {
+    if (nextCols[t] === undefined) {
+      nextCols[t] = getVisibleColumnsFromStorage(t as TableKey) ?? DEFAULT_VISIBLE_COLUMNS[t as TableKey];
+    }
+  }
+  visibleColumnKeysByTable.value = nextCols;
   try {
     if (params.filters && typeof params.filters === "string") {
       const decoded = decodeURIComponent(params.filters);
@@ -129,6 +192,14 @@ function parseUrlState() {
   } catch {
     /* ignore */
   }
+  try {
+    const search = params.search;
+    if (search != null && typeof search === "string") {
+      searchByTable.value = { ...searchByTable.value, [tab]: search };
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 function writeUrlState() {
@@ -150,22 +221,42 @@ function writeUrlState() {
   }
   const p = currentPage.value;
   if (p > 1) (params as Record<string, string>).page = String(p);
-  else try { delete (params as Record<string, string>).page; } catch { /* ignore */ }
+  else try {
+    delete (params as Record<string, string>).page;
+  } catch {
+    /* ignore */
+  }
   const ps = currentPageSize.value;
   if (ps !== DEFAULT_PAGE_SIZE) (params as Record<string, string>).pageSize = String(ps);
-  else try { delete (params as Record<string, string>).pageSize; } catch { /* ignore */ }
+  else try {
+    delete (params as Record<string, string>).pageSize;
+  } catch {
+    /* ignore */
+  }
+  const search = (searchByTable.value[activeTab.value] ?? "").trim();
+  if (search.length > 0) (params as Record<string, string>).search = search;
+  else try {
+    delete (params as Record<string, string>).search;
+  } catch {
+    /* ignore */
+  }
 }
 
-// Sync URL -> state on init and when user changes URL (e.g. back/forward)
 parseUrlState();
 if (typeof window !== "undefined") {
   window.addEventListener("popstate", parseUrlState);
 }
 
-// Sync state -> URL when table, columns, filters or pagination change
 watch(
-  [activeTab, visibleColumnKeysByTable, filterStateByTable, pageByTable, pageSizeByTable],
-  () => writeUrlState(),
+  [activeTab, visibleColumnKeysByTable, filterStateByTable, pageByTable, pageSizeByTable, searchByTable],
+  () => {
+    writeUrlState();
+    visibleColumnKeysByTable.value &&
+      (validTableKeys as TableKey[]).forEach((t) => {
+        const cols = visibleColumnKeysByTable.value[t];
+        if (cols !== undefined) setVisibleColumnsInStorage(t, cols);
+      });
+  },
   { deep: true }
 );
 
@@ -202,6 +293,8 @@ async function fetchTableData() {
     if (Object.keys(filters).length > 0) {
       q.set("filters", encodeURIComponent(JSON.stringify(filters)));
     }
+    const search = searchQuery.value.trim();
+    if (search.length > 0) q.set("search", search);
     const r = await fetch(`/api/supabase-table-query?${q.toString()}`);
     const json = await r.json();
     if (!r.ok) {
@@ -222,7 +315,7 @@ async function fetchTableData() {
 }
 
 watch(
-  [activeTab, filterStateByTable, pageByTable, pageSizeByTable],
+  [activeTab, filterStateByTable, pageByTable, pageSizeByTable, searchByTable],
   () => fetchTableData(),
   { immediate: true, deep: true }
 );
@@ -239,7 +332,7 @@ function onUpdateFilters(filters: DataTableFilterState) {
   currentPage.value = 1;
 }
 
-// --- Table data and columns ---
+// --- Column visibility (for Columns popover) ---
 const currentRows = computed(() => {
   if (tableData.value.length > 0) return tableData.value;
   return (props.latest[activeTab.value] ?? []) as Record<string, unknown>[];
@@ -249,7 +342,6 @@ const allKeys = computed(() => {
   currentRows.value.forEach((r) => Object.keys(r).forEach((k) => set.add(k)));
   return Array.from(set).sort();
 });
-
 const effectiveVisibleKeys = computed(() => {
   const visible = visibleColumnKeys.value;
   if (visible.length === 0) return allKeys.value;
@@ -257,150 +349,10 @@ const effectiveVisibleKeys = computed(() => {
   return allKeys.value.filter((k) => set.has(k));
 });
 
-const AVATAR_PLACEHOLDER_SVG =
-  "data:image/svg+xml," +
-  encodeURIComponent(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#888" rx="16"/><text x="16" y="22" text-anchor="middle" fill="#fff" font-size="14">?</text></svg>'
-  );
-
-function formatCell(value: unknown): string {
-  if (value == null) return "—";
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
-function isAvatarUrlColumn(key: string): boolean {
-  return key === "avatar_url" || key.toLowerCase() === "avatar_url";
-}
-
-function renderAvatarCell(url: unknown): ReturnType<typeof h> {
-  const s = typeof url === "string" && url.trim() ? url.trim() : null;
-  if (!s) return h("span", {}, formatCell(url));
-  return h("img", {
-    src: s,
-    alt: "",
-    class: "avatar-cell",
-    style: {
-      width: "32px",
-      height: "32px",
-      borderRadius: "50%",
-      objectFit: "cover",
-      display: "block",
-      background: "#e0e0e0",
-    },
-    onError(e: Event) {
-      const el = e.target as HTMLImageElement;
-      if (el) el.src = AVATAR_PLACEHOLDER_SVG;
-    },
-  });
-}
-
-function getUniqueValues(key: string): { label: string; value: string }[] {
-  const set = new Set<string>();
-  currentRows.value.forEach((row) => {
-    const v = row[key];
-    const s = formatCell(v);
-    if (s) set.add(s);
-  });
-  return Array.from(set)
-    .sort()
-    .slice(0, 200)
-    .map((s) => ({ label: s, value: s }));
-}
-
-const manualFilterInputByColumn = ref<Record<string, string>>({});
-
-function addCustomFilterValue(colKey: string) {
-  const raw = (manualFilterInputByColumn.value[colKey] ?? "").trim();
-  if (!raw) return;
-  const current = filterState.value[colKey];
-  const values = Array.isArray(current) ? [...current] : current != null ? [current] : [];
-  if (values.includes(raw)) return;
-  filterState.value = { ...filterState.value, [colKey]: [...values, raw] };
-  manualFilterInputByColumn.value = { ...manualFilterInputByColumn.value, [colKey]: "" };
-}
-
-function buildFilterMenu(key: string) {
-  return (actions: { hide: () => void }) => {
-    const options = getUniqueValues(key);
-    const selected = filterState.value[key];
-    const values = Array.isArray(selected) ? selected : selected != null ? [selected] : [];
-    const inputVal = manualFilterInputByColumn.value[key] ?? "";
-    return h("div", { class: "filter-menu" }, [
-      h(
-        "div",
-        { class: "filter-menu-options" },
-        options.map((opt) =>
-          h(NCheckbox, {
-            checked: values.includes(opt.value),
-            onUpdateChecked: (checked: boolean) => {
-              const next = checked ? [...values, opt.value] : values.filter((v) => v !== opt.value);
-              filterState.value = { ...filterState.value, [key]: next };
-            },
-          }, () => opt.label)
-        )
-      ),
-      h("div", { class: "filter-menu-custom" }, [
-        h(NInput, {
-          value: inputVal,
-          onUpdateValue: (v: string) => {
-            manualFilterInputByColumn.value = { ...manualFilterInputByColumn.value, [key]: v };
-          },
-          placeholder: "Type value…",
-          size: "small",
-          onKeydown: (e: KeyboardEvent) => {
-            if (e.key === "Enter") addCustomFilterValue(key);
-          },
-        }),
-        h(NButton, { size: "small", onClick: () => addCustomFilterValue(key) }, "Add"),
-      ]),
-      h("div", { class: "filter-menu-actions" }, [
-        h(NButton, { size: "small", type: "primary", onClick: actions.hide }, "OK"),
-      ]),
-    ]);
-  };
-}
-
-const tableColumns = computed((): DataTableColumns<Record<string, unknown>> => {
-  const dataColumns = effectiveVisibleKeys.value.map((key) => {
-    const options = getUniqueValues(key);
-    const isAvatar = isAvatarUrlColumn(key);
-    return {
-      width: isAvatar ? 120 : 200,
-      title: key,
-      key,
-      ellipsis: !isAvatar,
-      filter: true,
-      filterOptions: options.length > 0 ? options : [{ label: "(empty)", value: "—" }],
-      filterOptionValues: filterState.value[key] as string[] | undefined,
-      filterMultiple: true,
-      renderFilterMenu: buildFilterMenu(key),
-      render(row: Record<string, unknown>) {
-        if (isAvatar) return renderAvatarCell(row[key]);
-        return formatCell(row[key]);
-      },
-    };
-  });
-  const actionsColumn = {
-    title: "Actions",
-    key: "__actions",
-    width: 120,
-    fixed: "right" as const,
-    filter: false,
-    render: (row: Record<string, unknown>) => renderActionsCell(row),
-  } as const;
-  return [...dataColumns, actionsColumn];
-});
-
-const scrollX = computed(() => {
-  const cols = tableColumns.value;
-  return cols.reduce((sum, c) => sum + (Number((c as { width?: number }).width) || 200), 0);
-});
-
 function toggleColumn(key: string, visible: boolean) {
   const all = allKeys.value;
   if (visible) {
-    if (visibleColumnKeys.value.length === 0) return; // already "all"
+    if (visibleColumnKeys.value.length === 0) return;
     const next = [...visibleColumnKeys.value, key].sort();
     visibleColumnKeys.value = next;
   } else {
@@ -416,13 +368,18 @@ function setAllColumnsVisible() {
   visibleColumnKeys.value = [];
 }
 
-// --- Conversation modal (find by contact / message / sender) ---
+// --- Conversation modal ---
 const conversationModalOpen = ref(false);
 const conversationLoading = ref(false);
 const conversationError = ref("");
 const conversationData = ref<{ contact?: Record<string, unknown> | null; messages: unknown[] }>({
   messages: [],
 });
+const lastConversationParams = ref<{
+  leadUuid?: string;
+  conversationUuid?: string;
+  senderProfileUuid?: string;
+}>({});
 
 async function fetchConversation(params: {
   leadUuid?: string;
@@ -432,6 +389,7 @@ async function fetchConversation(params: {
   conversationError.value = "";
   conversationModalOpen.value = true;
   conversationLoading.value = true;
+  lastConversationParams.value = { ...params };
   try {
     const q = new URLSearchParams();
     if (params.leadUuid) q.set("leadUuid", params.leadUuid);
@@ -452,6 +410,37 @@ async function fetchConversation(params: {
   }
 }
 
+const cursorDeeplink = computed(() => {
+  const p = lastConversationParams.value;
+  let text = "";
+  if (p.leadUuid) {
+    const name =
+      conversationData.value.contact && typeof conversationData.value.contact.name === "string"
+        ? conversationData.value.contact.name
+        : null;
+    if (name) {
+      text = `Use MCP tool get_conversation_by_contact_name with contactFullName: "${name.replace(/"/g, '\\"')}" to show this LinkedIn conversation.`;
+    } else {
+      text = `Get the LinkedIn conversation for contact with lead_uuid ${p.leadUuid}. Use get_contacts filtered by uuid then get_conversation_by_contact_name with that contact's name.`;
+    }
+  } else if (p.conversationUuid) {
+    text = `Use MCP tool get_conversation_by_message with conversationUuid: "${p.conversationUuid}" to show this LinkedIn conversation thread.`;
+  } else if (p.senderProfileUuid) {
+    text = `Use MCP tool get_conversation_by_sender with senderProfileUuid: "${p.senderProfileUuid}" to show all LinkedIn messages from this sender.`;
+  } else {
+    return "";
+  }
+  const encoded = encodeURIComponent(text);
+  return `cursor://anysphere.cursor-deeplink/prompt?text=${encoded}`;
+});
+
+const hasCursorDeeplink = computed(() => cursorDeeplink.value.length > 0);
+
+function openInCursor() {
+  const url = cursorDeeplink.value;
+  if (url) window.open(url, "_blank", "noopener");
+}
+
 function onFindConversationByContact(row: Record<string, unknown>) {
   const uuid = row.uuid != null ? String(row.uuid) : undefined;
   if (uuid) fetchConversation({ leadUuid: uuid });
@@ -465,9 +454,7 @@ function onFindConversationByContact(row: Record<string, unknown>) {
 
 function onFindConversationByMessage(row: Record<string, unknown>) {
   const convUuid =
-    row.linkedin_conversation_uuid != null
-      ? String(row.linkedin_conversation_uuid)
-      : undefined;
+    row.linkedin_conversation_uuid != null ? String(row.linkedin_conversation_uuid) : undefined;
   if (convUuid) fetchConversation({ conversationUuid: convUuid });
   else {
     conversationModalOpen.value = true;
@@ -487,51 +474,30 @@ function onFindConversationBySender(row: Record<string, unknown>) {
     conversationData.value = { messages: [] };
   }
 }
-
-function renderActionsCell(row: Record<string, unknown>) {
-  const tab = activeTab.value;
-  let tooltip = "";
-  let onClick: () => void;
-  if (tab === "contacts") {
-    tooltip = "Find conversation by contact";
-    onClick = () => onFindConversationByContact(row);
-  } else if (tab === "linkedin_messages") {
-    tooltip = "Find conversation by message";
-    onClick = () => onFindConversationByMessage(row);
-  } else if (tab === "senders") {
-    tooltip = "Find all conversations by sender";
-    onClick = () => onFindConversationBySender(row);
-  } else {
-    return "—";
-  }
-  return h(
-    NPopover,
-    { trigger: "hover", placement: "top", showArrow: true },
-    {
-      default: () => tooltip,
-      trigger: () =>
-        h(
-          NButton,
-          { size: "small", quaternary: true, onClick },
-          { default: () => h(MessageCircle, { size: 16 }) }
-        ),
-    }
-  );
-}
 </script>
 
 <template>
   <div class="latest-tables">
     <div class="latest-header">
       <h3 class="latest-title">Latest rows (newest first)</h3>
-      <NPopover trigger="click" placement="bottom-end">
-        <template #trigger>
-          <NButton quaternary size="small">Columns</NButton>
-        </template>
+    </div>
+    <NTabs v-model:value="activeTab" type="line" size="medium">
+      <template #suffix>
+        <NSpace align="center" :size="12">
+        <NInput
+          v-model:value="searchQuery"
+          type="text"
+          placeholder="Search…"
+          clearable
+          size="small"
+          style="width: 200px"
+        />
+        <NPopover trigger="click" placement="bottom-end">
+          <template #trigger>
+            <NButton quaternary size="small">Columns</NButton>
+          </template>
         <div class="columns-popover">
-          <NButton quaternary size="tiny" @click="setAllColumnsVisible">
-            Show all
-          </NButton>
+          <NButton quaternary size="tiny" @click="setAllColumnsVisible">Show all</NButton>
           <NSpace vertical :size="4" style="margin-top: 8px">
             <NCheckbox
               v-for="key in allKeys"
@@ -544,40 +510,62 @@ function renderActionsCell(row: Record<string, unknown>) {
           </NSpace>
         </div>
       </NPopover>
-    </div>
-    <NTabs v-model:value="activeTab" type="line" size="medium">
+      </NSpace>
+       </template>
       <NTabPane
         v-for="t in tabs"
         :key="t.key"
         :name="t.key"
         :tab="`${t.label} (${props.counts?.[t.key] ?? '—'})`"
       >
-        <NAlert v-if="tableDataError" type="error" class="table-error">
-          {{ tableDataError }}
-        </NAlert>
-        <NDataTable
-          v-if="currentRows.length > 0 || tableDataLoading"
-          :columns="tableColumns"
-          :data="currentRows"
-          :filters="filterState"
+        <ContactsTable
+          v-if="activeTab === 'contacts'"
+          :data="tableData"
           :loading="tableDataLoading"
-          :bordered="false"
-          size="small"
-          :max-height="360"
-          :scroll-x="scrollX"
-          remote
-          :pagination="{
-            page: currentPage,
-            pageSize: currentPageSize,
-            itemCount: totalItemCount,
-            showSizePicker: true,
-            pageSizes: PAGE_SIZES,
-            onUpdatePage: onUpdatePage,
-            onUpdatePageSize: onUpdatePageSize,
-          }"
+          :error="tableDataError"
+          :filter-state="filterState"
+          :visible-column-keys="visibleColumnKeys"
+          :total-item-count="totalItemCount"
+          :page="currentPage"
+          :page-size="currentPageSize"
+          :page-sizes="PAGE_SIZES"
           @update:filters="onUpdateFilters"
+          @update:page="onUpdatePage"
+          @update:page-size="onUpdatePageSize"
+          @action="onFindConversationByContact"
         />
-        <NEmpty v-else-if="!tableDataLoading" description="No rows" />
+        <LinkedinMessagesTable
+          v-else-if="activeTab === 'linkedin_messages'"
+          :data="tableData"
+          :loading="tableDataLoading"
+          :error="tableDataError"
+          :filter-state="filterState"
+          :visible-column-keys="visibleColumnKeys"
+          :total-item-count="totalItemCount"
+          :page="currentPage"
+          :page-size="currentPageSize"
+          :page-sizes="PAGE_SIZES"
+          @update:filters="onUpdateFilters"
+          @update:page="onUpdatePage"
+          @update:page-size="onUpdatePageSize"
+          @action="onFindConversationByMessage"
+        />
+        <SendersTable
+          v-else-if="activeTab === 'senders'"
+          :data="tableData"
+          :loading="tableDataLoading"
+          :error="tableDataError"
+          :filter-state="filterState"
+          :visible-column-keys="visibleColumnKeys"
+          :total-item-count="totalItemCount"
+          :page="currentPage"
+          :page-size="currentPageSize"
+          :page-sizes="PAGE_SIZES"
+          @update:filters="onUpdateFilters"
+          @update:page="onUpdatePage"
+          @update:page-size="onUpdatePageSize"
+          @action="onFindConversationBySender"
+        />
       </NTabPane>
     </NTabs>
 
@@ -592,6 +580,12 @@ function renderActionsCell(row: Record<string, unknown>) {
         <NAlert v-if="conversationError" type="error" class="mb">
           {{ conversationError }}
         </NAlert>
+        <div v-if="hasCursorDeeplink" class="conversation-actions">
+          <NButton type="primary" size="small" @click="openInCursor">Open in Cursor</NButton>
+          <span class="conversation-actions-hint">
+            Opens Cursor with a pre-filled prompt to load this conversation via MCP
+          </span>
+        </div>
         <template v-if="conversationData.contact">
           <p class="conversation-label">Contact</p>
           <NCode :code="JSON.stringify(conversationData.contact, null, 2)" language="json" word-wrap />
@@ -630,32 +624,16 @@ function renderActionsCell(row: Record<string, unknown>) {
   max-height: 320px;
   overflow-y: auto;
 }
-.table-error {
-  margin-bottom: 0.5rem;
-}
-.filter-menu {
-  padding: 8px;
-  min-width: 220px;
-  max-height: 360px;
-  overflow-y: auto;
-}
-.filter-menu-options {
-  max-height: 200px;
-  overflow-y: auto;
-  margin-bottom: 8px;
-}
-.filter-menu-custom {
+.conversation-actions {
   display: flex;
-  gap: 6px;
   align-items: center;
-  margin-bottom: 8px;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  flex-wrap: wrap;
 }
-.filter-menu-custom .n-input {
-  flex: 1;
-}
-.filter-menu-actions {
-  border-top: 1px solid var(--n-border-color);
-  padding-top: 6px;
+.conversation-actions-hint {
+  font-size: 0.75rem;
+  opacity: 0.75;
 }
 .conversation-label {
   font-size: 0.85rem;
@@ -672,13 +650,5 @@ function renderActionsCell(row: Record<string, unknown>) {
 }
 .mb {
   margin-bottom: 0.75rem;
-}
-.avatar-cell {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  object-fit: cover;
-  display: block;
-  background: #e0e0e0;
 }
 </style>

@@ -118,7 +118,8 @@ export async function handleSupabaseTableQuery(
   }
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
-  const result = await queryTableWithFilters(client, table, { filters, limit, offset });
+  const search = params.get("search") ?? undefined;
+  const result = await queryTableWithFilters(client, table, { filters, search, limit, offset });
   if (result.error) {
     res.writeHead(500);
     res.end(JSON.stringify({ data: [], total: 0, error: result.error }));

@@ -545,11 +545,28 @@ export interface TableQueryFilters {
   [columnKey: string]: (string | number)[] | string | number | null | undefined;
 }
 
+/** Columns to search with ILIKE %term% per table (case-insensitive). */
+export const SEARCH_COLUMNS_BY_TABLE: Record<string, string[]> = {
+  contacts: ["company_name", "first_name", "last_name"],
+  linkedin_messages: ["text"],
+  senders: ["first_name", "last_name"],
+};
+
+/** Escape user input for use inside PostgREST ilike pattern (literal % and _; quote-safe). */
+function escapeSearchTerm(term: string): string {
+  return term
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/%/g, "\\%")
+    .replace(/_/g, "\\_");
+}
+
 export async function queryTableWithFilters(
   client: SupabaseClient,
   tableKey: string,
   params: {
     filters: TableQueryFilters;
+    search?: string | null;
     limit?: number;
     offset?: number;
   }
@@ -569,6 +586,17 @@ export async function queryTableWithFilters(
     const trimmed = values.filter((v) => v !== "" && v !== null && v !== undefined);
     if (trimmed.length === 0) continue;
     query = query.in(columnKey, trimmed);
+  }
+
+  const searchTrimmed = typeof params.search === "string" ? params.search.trim().toLowerCase() : "";
+  if (searchTrimmed.length > 0) {
+    const columns = SEARCH_COLUMNS_BY_TABLE[tableKey];
+    if (columns && columns.length > 0) {
+      const escaped = escapeSearchTerm(searchTrimmed);
+      const pattern = `%${escaped}%`;
+      const orClause = columns.map((col) => `${col}.ilike."${pattern}"`).join(",");
+      query = query.or(orClause);
+    }
   }
 
   query = query.order("created_at", { ascending: false }).range(offset, offset + limit - 1);

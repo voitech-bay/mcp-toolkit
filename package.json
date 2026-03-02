@@ -10,6 +10,7 @@
     "build:frontend": "cd frontend && npm run build",
     "dev": "tsx src/stdio.ts",
     "dev:http": "tsx src/standalone-http.ts",
+    "dev:api": "tsx src/api-server.ts",
     "dev:frontend": "cd frontend && npm run dev",
     "start": "node dist/stdio.js",
     "prepare": "npm run build"
