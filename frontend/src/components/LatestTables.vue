@@ -18,7 +18,8 @@ import type { DataTableColumns, DataTableFilterState } from "naive-ui";
 
 const props = defineProps<{ latest: LatestRows }>();
 
-const TABLE_QUERY_LIMIT = 500;
+const PAGE_SIZES = [10, 25, 50, 100];
+const DEFAULT_PAGE_SIZE = 25;
 
 type TableKey = keyof LatestRows;
 
@@ -41,6 +42,8 @@ const activeTab = ref<TableKey>(
 // Per-tab state (URL only stores current tab)
 const visibleColumnKeysByTable = ref<Partial<Record<TableKey, string[]>>>({});
 const filterStateByTable = ref<Partial<Record<TableKey, DataTableFilterState>>>({});
+const pageByTable = ref<Partial<Record<TableKey, number>>>({});
+const pageSizeByTable = ref<Partial<Record<TableKey, number>>>({});
 
 const visibleColumnKeys = computed({
   get: () => visibleColumnKeysByTable.value[activeTab.value] ?? [],
@@ -56,6 +59,22 @@ const filterState = computed({
     const next = { ...filterStateByTable.value };
     next[activeTab.value] = v;
     filterStateByTable.value = next;
+  },
+});
+const currentPage = computed({
+  get: () => pageByTable.value[activeTab.value] ?? 1,
+  set: (v: number) => {
+    const next = { ...pageByTable.value };
+    next[activeTab.value] = v;
+    pageByTable.value = next;
+  },
+});
+const currentPageSize = computed({
+  get: () => pageSizeByTable.value[activeTab.value] ?? DEFAULT_PAGE_SIZE,
+  set: (v: number) => {
+    const next = { ...pageSizeByTable.value };
+    next[activeTab.value] = v;
+    pageSizeByTable.value = next;
   },
 });
 
@@ -84,6 +103,28 @@ function parseUrlState() {
   } catch {
     /* ignore */
   }
+  try {
+    const p = params.page;
+    if (p != null && p !== "") {
+      const num = parseInt(String(p), 10);
+      if (Number.isInteger(num) && num >= 1) {
+        pageByTable.value = { ...pageByTable.value, [tab]: num };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  try {
+    const ps = params.pageSize;
+    if (ps != null && ps !== "") {
+      const num = parseInt(String(ps), 10);
+      if (PAGE_SIZES.includes(num)) {
+        pageSizeByTable.value = { ...pageSizeByTable.value, [tab]: num };
+      }
+    }
+  } catch {
+    /* ignore */
+  }
 }
 
 function writeUrlState() {
@@ -103,6 +144,12 @@ function writeUrlState() {
       (params as Record<string, string>).filters = "";
     }
   }
+  const p = currentPage.value;
+  if (p > 1) (params as Record<string, string>).page = String(p);
+  else try { delete (params as Record<string, string>).page; } catch { /* ignore */ }
+  const ps = currentPageSize.value;
+  if (ps !== DEFAULT_PAGE_SIZE) (params as Record<string, string>).pageSize = String(ps);
+  else try { delete (params as Record<string, string>).pageSize; } catch { /* ignore */ }
 }
 
 // Sync URL -> state on init and when user changes URL (e.g. back/forward)
@@ -111,15 +158,16 @@ if (typeof window !== "undefined") {
   window.addEventListener("popstate", parseUrlState);
 }
 
-// Sync state -> URL when table, columns or filters change
+// Sync state -> URL when table, columns, filters or pagination change
 watch(
-  [activeTab, visibleColumnKeysByTable, filterStateByTable],
+  [activeTab, visibleColumnKeysByTable, filterStateByTable, pageByTable, pageSizeByTable],
   () => writeUrlState(),
   { deep: true }
 );
 
-// --- Backend-filtered table data ---
+// --- Backend-filtered table data (paginated) ---
 const tableData = ref<Record<string, unknown>[]>([]);
+const totalItemCount = ref(0);
 const tableDataLoading = ref(false);
 const tableDataError = ref("");
 
@@ -139,10 +187,13 @@ async function fetchTableData() {
   tableDataLoading.value = true;
   try {
     const filters = filtersToApiFormat(filterState.value);
+    const page = currentPage.value;
+    const pageSize = currentPageSize.value;
+    const offset = (page - 1) * pageSize;
     const q = new URLSearchParams({
       table: activeTab.value,
-      limit: String(TABLE_QUERY_LIMIT),
-      offset: "0",
+      limit: String(pageSize),
+      offset: String(offset),
     });
     if (Object.keys(filters).length > 0) {
       q.set("filters", encodeURIComponent(JSON.stringify(filters)));
@@ -151,12 +202,15 @@ async function fetchTableData() {
     const json = await r.json();
     if (!r.ok) {
       tableData.value = [];
+      totalItemCount.value = 0;
       tableDataError.value = json.error ?? "Request failed";
       return;
     }
     tableData.value = Array.isArray(json.data) ? json.data : [];
+    totalItemCount.value = Number(json.total) || 0;
   } catch (e) {
     tableData.value = [];
+    totalItemCount.value = 0;
     tableDataError.value = e instanceof Error ? e.message : "Request failed";
   } finally {
     tableDataLoading.value = false;
@@ -164,10 +218,22 @@ async function fetchTableData() {
 }
 
 watch(
-  [activeTab, filterStateByTable],
+  [activeTab, filterStateByTable, pageByTable, pageSizeByTable],
   () => fetchTableData(),
   { immediate: true, deep: true }
 );
+
+function onUpdatePage(page: number) {
+  currentPage.value = page;
+}
+function onUpdatePageSize(pageSize: number) {
+  currentPageSize.value = pageSize;
+  currentPage.value = 1;
+}
+function onUpdateFilters(filters: DataTableFilterState) {
+  filterState.value = { ...filters };
+  currentPage.value = 1;
+}
 
 // --- Table data and columns ---
 const currentRows = computed(() => {
@@ -279,10 +345,6 @@ const tableColumns = computed((): DataTableColumns<Record<string, unknown>> => {
   });
 });
 
-function onUpdateFilters(filters: DataTableFilterState) {
-  filterState.value = { ...filters };
-}
-
 function toggleColumn(key: string, visible: boolean) {
   const all = allKeys.value;
   if (visible) {
@@ -347,7 +409,16 @@ function setAllColumnsVisible() {
           :bordered="false"
           size="small"
           :max-height="360"
-          virtual-scroll
+          remote
+          :pagination="{
+            page: currentPage,
+            pageSize: currentPageSize,
+            itemCount: totalItemCount,
+            showSizePicker: true,
+            pageSizes: PAGE_SIZES,
+            onUpdatePage: onUpdatePage,
+            onUpdatePageSize: onUpdatePageSize,
+          }"
           @update:filters="onUpdateFilters"
         />
         <NEmpty v-else-if="!tableDataLoading" description="No rows" />

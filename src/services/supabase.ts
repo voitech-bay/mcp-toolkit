@@ -488,15 +488,15 @@ export async function queryTableWithFilters(
     limit?: number;
     offset?: number;
   }
-): Promise<{ data: unknown[]; error: string | null }> {
+): Promise<{ data: unknown[]; total: number; error: string | null }> {
   const tableName = TABLE_KEY_TO_NAME[tableKey];
   if (!tableName) {
-    return { data: [], error: `Unknown table: ${tableKey}` };
+    return { data: [], total: 0, error: `Unknown table: ${tableKey}` };
   }
-  const limit = Math.min(Math.max(params.limit ?? 100, 1), 1000);
+  const limit = Math.min(Math.max(params.limit ?? 25, 1), 100);
   const offset = Math.max(params.offset ?? 0, 0);
 
-  let query = client.from(tableName).select("*");
+  let query = client.from(tableName).select("*", { count: "exact" });
 
   for (const [columnKey, raw] of Object.entries(params.filters)) {
     if (raw === null || raw === undefined) continue;
@@ -508,7 +508,7 @@ export async function queryTableWithFilters(
 
   query = query.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
 
-  const { data, error } = await query;
-  if (error) return { data: [], error: error.message };
-  return { data: data ?? [], error: null };
+  const { data, error, count } = await query;
+  if (error) return { data: [], total: 0, error: error.message };
+  return { data: data ?? [], total: count ?? 0, error: null };
 }
