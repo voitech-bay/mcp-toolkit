@@ -184,7 +184,22 @@ export async function getConversation(
       order: "asc",
       limit,
     });
-    return { messages: msgResult.error ? [] : msgResult.data, error: msgResult.error };
+    const messages = msgResult.error ? [] : msgResult.data;
+    let contact: Record<string, unknown> | null = null;
+    if (Array.isArray(messages) && messages.length > 0) {
+      const first = messages[0] as Record<string, unknown>;
+      const leadUuid = first?.lead_uuid != null ? String(first.lead_uuid) : null;
+      if (leadUuid) {
+        const contactRes = await client
+          .from(CONTACTS_TABLE)
+          .select("*")
+          .eq("uuid", leadUuid)
+          .limit(1)
+          .maybeSingle();
+        contact = (contactRes.data ?? null) as Record<string, unknown> | null;
+      }
+    }
+    return { contact, messages, error: msgResult.error };
   }
   if (params.senderProfileUuid) {
     const msgResult = await getLinkedinMessages(client, {
@@ -547,7 +562,7 @@ export interface TableQueryFilters {
 
 /** Columns to search with ILIKE %term% per table (case-insensitive). */
 export const SEARCH_COLUMNS_BY_TABLE: Record<string, string[]> = {
-  contacts: ["company_name", "first_name", "last_name"],
+  contacts: ["company_name", "first_name", "last_name", "position"],
   linkedin_messages: ["text"],
   senders: ["first_name", "last_name"],
 };

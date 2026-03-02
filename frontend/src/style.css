@@ -53,3 +53,10 @@ a:hover {
   border-top: 1px solid var(--n-border-color);
   padding-top: 6px;
 }
+
+/* Search highlight in table cells */
+.search-highlight {
+  background: rgba(255, 212, 0, 0.45);
+  padding: 0 1px;
+  border-radius: 2px;
+}

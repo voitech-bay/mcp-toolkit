@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { h, toRef } from "vue";
+import { h, toRef, computed } from "vue";
 import { NButton, NPopover } from "naive-ui";
 import type { DataTableFilterState } from "naive-ui";
 import { MessageCircle } from "lucide-vue-next";
@@ -16,6 +16,8 @@ const props = defineProps<{
   page: number;
   pageSize: number;
   pageSizes: number[];
+  /** Applied search term for highlighting matches in the text column. */
+  searchTerm?: string;
 }>();
 
 const emit = defineEmits<{
@@ -25,6 +27,7 @@ const emit = defineEmits<{
   action: [row: Record<string, unknown>];
 }>();
 
+const highlightTerm = computed(() => (props.searchTerm ?? "").trim());
 const { tableColumns, scrollX } = useDataTableColumns(
   toRef(props, "data"),
   toRef(props, "filterState"),
@@ -49,7 +52,8 @@ const { tableColumns, scrollX } = useDataTableColumns(
           ),
       }
     );
-  }
+  },
+  { highlightTerm, highlightColumnKeys: ["text"] }
 );
 </script>
 

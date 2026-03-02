@@ -47,7 +47,7 @@ function onUpdatePageSize(ps: number) {
     :loading="loading"
     :bordered="false"
     size="small"
-    :max-height="360"
+    :max-height="600"
     :scroll-x="scrollX"
     remote
     :pagination="{

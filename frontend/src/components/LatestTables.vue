@@ -10,15 +10,12 @@ import {
   NPopover,
   NCheckbox,
   NSpace,
-  NModal,
-  NCode,
-  NSpin,
-  NAlert,
 } from "naive-ui";
 import type { DataTableFilterState } from "naive-ui";
 import ContactsTable from "./ContactsTable.vue";
 import LinkedinMessagesTable from "./LinkedinMessagesTable.vue";
 import SendersTable from "./SendersTable.vue";
+import ConversationModal from "./ConversationModal.vue";
 
 const props = defineProps<{ latest: LatestRows; counts?: TableCounts }>();
 
@@ -434,8 +431,6 @@ const cursorDeeplink = computed(() => {
   return `cursor://anysphere.cursor-deeplink/prompt?text=${encoded}`;
 });
 
-const hasCursorDeeplink = computed(() => cursorDeeplink.value.length > 0);
-
 function openInCursor() {
   const url = cursorDeeplink.value;
   if (url) window.open(url, "_blank", "noopener");
@@ -455,7 +450,9 @@ function onFindConversationByContact(row: Record<string, unknown>) {
 function onFindConversationByMessage(row: Record<string, unknown>) {
   const convUuid =
     row.linkedin_conversation_uuid != null ? String(row.linkedin_conversation_uuid) : undefined;
+  const leadUuid = row.lead_uuid != null ? String(row.lead_uuid) : undefined;
   if (convUuid) fetchConversation({ conversationUuid: convUuid });
+  else if (leadUuid) fetchConversation({ leadUuid: leadUuid });
   else {
     conversationModalOpen.value = true;
     conversationLoading.value = false;
@@ -525,6 +522,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
           :error="tableDataError"
           :filter-state="filterState"
           :visible-column-keys="visibleColumnKeys"
+          :search-term="searchByTable.contacts ?? ''"
           :total-item-count="totalItemCount"
           :page="currentPage"
           :page-size="currentPageSize"
@@ -541,6 +539,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
           :error="tableDataError"
           :filter-state="filterState"
           :visible-column-keys="visibleColumnKeys"
+          :search-term="searchByTable.linkedin_messages ?? ''"
           :total-item-count="totalItemCount"
           :page="currentPage"
           :page-size="currentPageSize"
@@ -557,6 +556,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
           :error="tableDataError"
           :filter-state="filterState"
           :visible-column-keys="visibleColumnKeys"
+          :search-term="searchByTable.senders ?? ''"
           :total-item-count="totalItemCount"
           :page="currentPage"
           :page-size="currentPageSize"
@@ -569,36 +569,16 @@ function onFindConversationBySender(row: Record<string, unknown>) {
       </NTabPane>
     </NTabs>
 
-    <NModal
-      v-model:show="conversationModalOpen"
-      preset="card"
-      title="Conversation"
-      style="width: 640px; max-width: 95vw"
-      :mask-closable="true"
-    >
-      <NSpin :show="conversationLoading">
-        <NAlert v-if="conversationError" type="error" class="mb">
-          {{ conversationError }}
-        </NAlert>
-        <div v-if="hasCursorDeeplink" class="conversation-actions">
-          <NButton type="primary" size="small" @click="openInCursor">Open in Cursor</NButton>
-          <span class="conversation-actions-hint">
-            Opens Cursor with a pre-filled prompt to load this conversation via MCP
-          </span>
-        </div>
-        <template v-if="conversationData.contact">
-          <p class="conversation-label">Contact</p>
-          <NCode :code="JSON.stringify(conversationData.contact, null, 2)" language="json" word-wrap />
-        </template>
-        <p class="conversation-label">Messages ({{ conversationData.messages.length }})</p>
-        <NCode
-          :code="JSON.stringify(conversationData.messages, null, 2)"
-          language="json"
-          word-wrap
-          class="conversation-json"
-        />
-      </NSpin>
-    </NModal>
+    <ConversationModal
+      :show="conversationModalOpen"
+      :loading="conversationLoading"
+      :error="conversationError"
+      :contact="conversationData.contact"
+      :messages="conversationData.messages"
+      :cursor-deeplink="cursorDeeplink"
+      @update:show="conversationModalOpen = $event"
+      @open-in-cursor="openInCursor"
+    />
   </div>
 </template>
 
@@ -623,32 +603,5 @@ function onFindConversationBySender(row: Record<string, unknown>) {
   min-width: 180px;
   max-height: 320px;
   overflow-y: auto;
-}
-.conversation-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  margin-bottom: 0.75rem;
-  flex-wrap: wrap;
-}
-.conversation-actions-hint {
-  font-size: 0.75rem;
-  opacity: 0.75;
-}
-.conversation-label {
-  font-size: 0.85rem;
-  font-weight: 600;
-  margin: 0.5rem 0 0.25rem 0;
-  opacity: 0.9;
-}
-.conversation-label:first-child {
-  margin-top: 0;
-}
-.conversation-json {
-  max-height: 60vh;
-  overflow: auto;
-}
-.mb {
-  margin-bottom: 0.75rem;
 }
 </style>

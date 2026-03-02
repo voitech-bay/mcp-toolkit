@@ -7,6 +7,26 @@ import {
 } from "naive-ui";
 import type { DataTableColumns, DataTableFilterState } from "naive-ui";
 
+/** Escape special regex chars so the term can be used in new RegExp(escaped, 'gi'). */
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** Split text by term (case-insensitive) and return VNode with matches wrapped in mark. */
+function renderWithHighlights(text: string, term: string): ReturnType<typeof h> {
+  const raw = text ?? "";
+  const t = term.trim();
+  if (!t || !raw) return h("span", {}, raw || "—");
+  const escaped = escapeRegex(t);
+  const re = new RegExp(`(${escaped})`, "gi");
+  const parts = raw.split(re);
+  // With capturing group, split gives [before, match1, between, match2, ...]; odd indices are matches.
+  const nodes = parts.map((part, i) =>
+    i % 2 === 1 ? h("mark", { class: "search-highlight", key: i }, part) : part
+  );
+  return h("span", {}, nodes);
+}
+
 const AVATAR_PLACEHOLDER_SVG =
   "data:image/svg+xml," +
   encodeURIComponent(
@@ -18,8 +38,17 @@ export function useDataTableColumns(
   filterState: Ref<DataTableFilterState>,
   visibleColumnKeys: Ref<string[]>,
   setFilterState: (v: DataTableFilterState) => void,
-  renderAction: (row: Record<string, unknown>) => ReturnType<typeof h>
+  renderAction: (row: Record<string, unknown>) => ReturnType<typeof h>,
+  options?: {
+    highlightTerm?: Ref<string>;
+    /** Single column key (legacy) or list of column keys to highlight search term in. */
+    highlightColumnKey?: string;
+    highlightColumnKeys?: string[];
+  }
 ) {
+  const highlightTerm = options?.highlightTerm;
+  const highlightColumnKey = options?.highlightColumnKey ?? "";
+  const highlightColumnKeys = options?.highlightColumnKeys ?? (highlightColumnKey ? [highlightColumnKey] : []);
   const manualFilterInputByColumn = ref<Record<string, string>>({});
 
   const allKeys = computed(() => {
@@ -131,7 +160,7 @@ export function useDataTableColumns(
         width: isAvatar ? 120 : 200,
         title: key,
         key,
-        ellipsis: !isAvatar,
+        ellipsis: key === "text" ? false : true,
         filter: true,
         filterOptions: options.length > 0 ? options : [{ label: "(empty)", value: "—" }],
         filterOptionValues: filterState.value[key] as string[] | undefined,
@@ -139,7 +168,11 @@ export function useDataTableColumns(
         renderFilterMenu: buildFilterMenu(key),
         render(row: Record<string, unknown>) {
           if (isAvatar) return renderAvatarCell(row[key]);
-          return formatCell(row[key]);
+          const cellText = formatCell(row[key]);
+          if (highlightColumnKeys.includes(key) && highlightTerm?.value?.trim()) {
+            return renderWithHighlights(cellText, highlightTerm.value.trim());
+          }
+          return cellText;
         },
       };
     });
