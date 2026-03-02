@@ -56,7 +56,30 @@ export interface FetchContactsResult {
   error: string | null;
 }
 
+/** Get created_at from a row (API may use created_at or different casing). */
+function rowCreatedAt(row: Record<string, unknown>): string | null {
+  const v = row.created_at ?? row.createdAt;
+  if (v == null) return null;
+  return typeof v === "string" ? v : (v as Date).toISOString?.() ?? String(v);
+}
+
+/** True if we should stop fetching (we've reached or passed the cursor). */
+function isAtOrOlder(rowCreatedAtVal: string | null, sinceCreatedAt: string | null): boolean {
+  if (sinceCreatedAt == null || rowCreatedAtVal == null) return false;
+  return rowCreatedAtVal <= sinceCreatedAt;
+}
+
 export async function fetchAllContacts(): Promise<FetchContactsResult> {
+  return fetchContactsIncremental(null);
+}
+
+/**
+ * Fetch contacts from source API (newest first). Stops when a row has created_at <= sinceCreatedAt.
+ * If sinceCreatedAt is null, fetches all. Returns only rows with created_at > sinceCreatedAt.
+ */
+export async function fetchContactsIncremental(
+  sinceCreatedAt: string | null
+): Promise<FetchContactsResult> {
   const config = getConfig();
   if (!config) return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
   const all: Record<string, unknown>[] = [];
@@ -77,8 +100,18 @@ export async function fetchAllContacts(): Promise<FetchContactsResult> {
       });
       const raw = res.data ?? [];
       const page = raw.map(unwrapContact);
-      all.push(...page);
-      if (page.length === 0 || (res.total != null && offset + page.length >= res.total)) break;
+      let shouldStop = false;
+      for (const row of page) {
+        const at = rowCreatedAt(row);
+        if (sinceCreatedAt != null && isAtOrOlder(at, sinceCreatedAt)) {
+          shouldStop = true;
+          break;
+        }
+        if (sinceCreatedAt == null || (at != null && at > sinceCreatedAt)) {
+          all.push(row);
+        }
+      }
+      if (page.length === 0 || (res.total != null && offset + page.length >= res.total) || shouldStop) break;
       offset += PAGE_SIZE;
       await sleep(DELAY_MS);
     }
@@ -95,6 +128,16 @@ export interface FetchLinkedInMessagesResult {
 }
 
 export async function fetchAllLinkedInMessages(): Promise<FetchLinkedInMessagesResult> {
+  return fetchLinkedInMessagesIncremental(null);
+}
+
+/**
+ * Fetch LinkedIn messages from source (newest first). Stops when a row has created_at <= sinceCreatedAt.
+ * If sinceCreatedAt is null, fetches all. Returns only rows with created_at > sinceCreatedAt.
+ */
+export async function fetchLinkedInMessagesIncremental(
+  sinceCreatedAt: string | null
+): Promise<FetchLinkedInMessagesResult> {
   const config = getConfig();
   if (!config) return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
   const all: Record<string, unknown>[] = [];
@@ -108,8 +151,18 @@ export async function fetchAllLinkedInMessages(): Promise<FetchLinkedInMessagesR
         total?: number;
       }>(url, { method: "GET" });
       const page = res.data ?? [];
-      all.push(...page);
-      if (page.length === 0 || !res.has_more) break;
+      let shouldStop = false;
+      for (const row of page) {
+        const at = rowCreatedAt(row);
+        if (sinceCreatedAt != null && isAtOrOlder(at, sinceCreatedAt)) {
+          shouldStop = true;
+          break;
+        }
+        if (sinceCreatedAt == null || (at != null && at > sinceCreatedAt)) {
+          all.push(row);
+        }
+      }
+      if (page.length === 0 || !res.has_more || shouldStop) break;
       offset += PAGE_SIZE;
       await sleep(DELAY_MS);
     }
@@ -126,6 +179,16 @@ export interface FetchSendersResult {
 }
 
 export async function fetchAllSenders(): Promise<FetchSendersResult> {
+  return fetchSendersIncremental(null);
+}
+
+/**
+ * Fetch senders from source (newest first). Stops when a row has created_at <= sinceCreatedAt.
+ * If sinceCreatedAt is null, fetches all. Returns only rows with created_at > sinceCreatedAt.
+ */
+export async function fetchSendersIncremental(
+  sinceCreatedAt: string | null
+): Promise<FetchSendersResult> {
   const config = getConfig();
   if (!config) return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
   const all: Record<string, unknown>[] = [];
@@ -138,8 +201,18 @@ export async function fetchAllSenders(): Promise<FetchSendersResult> {
         has_more?: boolean;
       }>(url, { method: "GET" });
       const page = res.data ?? [];
-      all.push(...page);
-      if (page.length === 0 || !res.has_more) break;
+      let shouldStop = false;
+      for (const row of page) {
+        const at = rowCreatedAt(row);
+        if (sinceCreatedAt != null && isAtOrOlder(at, sinceCreatedAt)) {
+          shouldStop = true;
+          break;
+        }
+        if (sinceCreatedAt == null || (at != null && at > sinceCreatedAt)) {
+          all.push(row);
+        }
+      }
+      if (page.length === 0 || !res.has_more || shouldStop) break;
       offset += PAGE_SIZE;
       await sleep(DELAY_MS);
     }

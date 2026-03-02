@@ -383,6 +383,27 @@ export interface TableCounts {
   senders: number;
 }
 
+/**
+ * Returns the latest created_at (ISO string) for the table, or null if empty.
+ * Used by incremental sync to fetch only rows newer than this from the source API.
+ */
+export async function getLatestCreatedAt(
+  client: SupabaseClient,
+  table: string
+): Promise<{ latest: string | null; error: string | null }> {
+  const { data, error } = await client
+    .from(table)
+    .select("created_at")
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return { latest: null, error: error.message };
+  const raw = data?.created_at;
+  if (raw == null) return { latest: null, error: null };
+  const latest = typeof raw === "string" ? raw : (raw as Date).toISOString?.() ?? String(raw);
+  return { latest, error: null };
+}
+
 export async function getTableCounts(
   client: SupabaseClient
 ): Promise<{ counts: TableCounts; error: string | null }> {
@@ -402,5 +423,46 @@ export async function getTableCounts(
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: message };
+  }
+}
+
+export interface LatestRows {
+  contacts: unknown[];
+  linkedin_messages: unknown[];
+  senders: unknown[];
+}
+
+const DEFAULT_LATEST_LIMIT = 10;
+
+/**
+ * Returns the latest rows per table (by created_at desc) for visualization.
+ * Used by /api/supabase-state so the UI can show what was recently updated.
+ */
+export async function getLatestRows(
+  client: SupabaseClient,
+  limit: number = DEFAULT_LATEST_LIMIT
+): Promise<{ latest: LatestRows; error: string | null }> {
+  const n = Math.min(Math.max(limit, 1), 100);
+  try {
+    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+      client.from(CONTACTS_TABLE).select("*").order("created_at", { ascending: false }).limit(n),
+      client.from(LINKEDIN_MESSAGES_TABLE).select("*").order("created_at", { ascending: false }).limit(n),
+      client.from(SENDERS_TABLE).select("*").order("created_at", { ascending: false }).limit(n),
+    ]);
+    const latest: LatestRows = {
+      contacts: contactsRes.data ?? [],
+      linkedin_messages: messagesRes.data ?? [],
+      senders: sendersRes.data ?? [],
+    };
+    if (contactsRes.error) return { latest, error: contactsRes.error.message };
+    if (messagesRes.error) return { latest, error: messagesRes.error.message };
+    if (sendersRes.error) return { latest, error: sendersRes.error.message };
+    return { latest, error: null };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      latest: { contacts: [], linkedin_messages: [], senders: [] },
+      error: message,
+    };
   }
 }

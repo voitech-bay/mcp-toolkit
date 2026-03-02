@@ -4,7 +4,9 @@ Single MCP server merging **Supabase messages** and **Company enrichment** tools
 
 ## Tools
 
-- **get_messages** – Supabase messages (filter by sender, contact, lead, channel, date range, etc.)
+- **get_linkedin_messages** – LinkedIn messages from Supabase (table LinkedinMessages)
+- **get_senders** – Senders from Supabase (table Senders)
+- **get_contacts** – Contacts from Supabase (table Contacts)
 - **search_companies** – Apollo organization search
 - **search_people** – Apollo people search
 - **search_lookalike_companies** – Ocean.io lookalike companies
@@ -22,6 +24,9 @@ cp .env.example .env   # fill in keys
 - **HTTP (test SSE endpoint):**  
   `npm run dev:http` — server at `http://localhost:3000/mcp`. Use this URL in MCP clients that support Streamable HTTP / SSE.
 
+- **Frontend (Vue 3 + TypeScript):**  
+  `npm run dev:frontend` — Vite dev server with hot reload. Proxies `/api` to `http://localhost:3000`, so run `npm run dev:http` in another terminal to hit the API. After `npm run build`, the app is in `public/` (built from `frontend/`).
+
 ## Deploy to Vercel
 
 1. Build: `npm run build` (required before deploy; produces `dist/`).
@@ -35,10 +40,13 @@ cp .env.example .env   # fill in keys
 
 ## Project layout
 
-- `src/` – all app code
-  - `services/` – supabase, apollo, ocean
-  - `tools/` – get-messages, company-enrichment
+- `src/` – backend (MCP server, API handlers)
+  - `services/` – supabase, apollo, ocean, source-api, sync-supabase
+  - `tools/` – get-linkedin-messages, get-senders, get-contacts, company-enrichment
   - `server.ts` – merged MCP server + Streamable HTTP handler
   - `stdio.ts` – stdio entry for local MCP
   - `standalone-http.ts` – local HTTP server
-- `api/mcp.ts` – Vercel serverless entry (GET/POST/DELETE `/api/mcp`)
+- `frontend/` – Vue 3 + TypeScript app (builds into `public/`)
+  - `src/` – App.vue, components (CountCards, LatestTables), types
+  - `index.html` – Vite entry
+- `api/` – Vercel serverless (mcp, supabase-state, supabase-sync)

@@ -1,29 +1,29 @@
 /**
- * Syncs Supabase tables from the source API: fetch all from source, upsert (dedupe by uuid).
+ * Incremental sync: for each table we take the latest created_at in Supabase, then fetch from
+ * the source API (newest first) until we reach that row, and upsert only the new rows.
+ * Requires SUPABASE_SERVICE_ROLE_KEY (not anon key) so upserts bypass Row Level Security.
+ * LinkedinMessages: API columns are sent as-is (e.g. sender_profile_uuid); do not add sender_id.
  */
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   getSupabase,
+  getLatestCreatedAt,
   CONTACTS_TABLE,
   LINKEDIN_MESSAGES_TABLE,
   SENDERS_TABLE,
 } from "./supabase.js";
 import {
-  fetchAllContacts,
-  fetchAllLinkedInMessages,
-  fetchAllSenders,
+  fetchContactsIncremental,
+  fetchLinkedInMessagesIncremental,
+  fetchSendersIncremental,
 } from "./source-api.js";
 
 const CHUNK_SIZE = 100;
 
+/** Pass through message rows as-is. LinkedinMessages table uses API column names (e.g. sender_profile_uuid), not sender_id. */
 function mapMessageForSupabase(row: Record<string, unknown>): Record<string, unknown> {
-  const out = { ...row };
-  // Supabase table uses sender_id; API returns sender_profile_uuid
-  if (row.sender_profile_uuid != null && out.sender_id === undefined) {
-    out.sender_id = row.sender_profile_uuid;
-  }
-  return out;
+  return { ...row };
 }
 
 async function upsertChunk(
@@ -48,6 +48,16 @@ export interface SyncResult {
   error: string | null;
 }
 
+/** Resolve latest created_at for a table; on error return null (will do full fetch for that table). */
+async function latestCreatedAt(
+  client: SupabaseClient,
+  table: string
+): Promise<string | null> {
+  const { latest, error } = await getLatestCreatedAt(client, table);
+  if (error) return null;
+  return latest;
+}
+
 export async function syncSupabaseFromSource(): Promise<SyncResult> {
   const client = getSupabase();
   const result: SyncResult = {
@@ -62,8 +72,18 @@ export async function syncSupabaseFromSource(): Promise<SyncResult> {
     return result;
   }
 
-  // --- Contacts ---
-  const contactsRes = await fetchAllContacts();
+  const rlsHint =
+    " Use SUPABASE_SERVICE_ROLE_KEY (not anon key) so sync bypasses Row Level Security.";
+
+  // Resolve latest created_at per table (empty table → null → fetch all new)
+  const [contactsLatest, messagesLatest, sendersLatest] = await Promise.all([
+    latestCreatedAt(client, CONTACTS_TABLE),
+    latestCreatedAt(client, LINKEDIN_MESSAGES_TABLE),
+    latestCreatedAt(client, SENDERS_TABLE),
+  ]);
+
+  // --- Contacts (incremental: only rows with created_at > contactsLatest) ---
+  const contactsRes = await fetchContactsIncremental(contactsLatest);
   result.contacts.fetched = contactsRes.data.length;
   if (contactsRes.error) {
     result.contacts.error = contactsRes.error;
@@ -72,15 +92,15 @@ export async function syncSupabaseFromSource(): Promise<SyncResult> {
       const chunk = contactsRes.data.slice(i, i + CHUNK_SIZE);
       const { inserted, error } = await upsertChunk(client, CONTACTS_TABLE, chunk, "uuid");
       if (error) {
-        result.contacts.error = error;
+        result.contacts.error = error + (error.includes("row-level security") ? rlsHint : "");
         break;
       }
       result.contacts.upserted += inserted;
     }
   }
 
-  // --- LinkedIn Messages ---
-  const messagesRes = await fetchAllLinkedInMessages();
+  // --- LinkedIn Messages (incremental) ---
+  const messagesRes = await fetchLinkedInMessagesIncremental(messagesLatest);
   result.linkedin_messages.fetched = messagesRes.data.length;
   if (messagesRes.error) {
     result.linkedin_messages.error = messagesRes.error;
@@ -95,15 +115,19 @@ export async function syncSupabaseFromSource(): Promise<SyncResult> {
         "uuid"
       );
       if (error) {
-        result.linkedin_messages.error = error;
+        result.linkedin_messages.error =
+          error +
+          (error.includes("sender_id")
+            ? " (LinkedinMessages table may use sender_profile_uuid; sync sends API columns as-is.)"
+            : "");
         break;
       }
       result.linkedin_messages.upserted += inserted;
     }
   }
 
-  // --- Senders ---
-  const sendersRes = await fetchAllSenders();
+  // --- Senders (incremental) ---
+  const sendersRes = await fetchSendersIncremental(sendersLatest);
   result.senders.fetched = sendersRes.data.length;
   if (sendersRes.error) {
     result.senders.error = sendersRes.error;
@@ -112,7 +136,7 @@ export async function syncSupabaseFromSource(): Promise<SyncResult> {
       const chunk = sendersRes.data.slice(i, i + CHUNK_SIZE);
       const { inserted, error } = await upsertChunk(client, SENDERS_TABLE, chunk, "uuid");
       if (error) {
-        result.senders.error = error;
+        result.senders.error = error + (error.includes("row-level security") ? rlsHint : "");
         break;
       }
       result.senders.upserted += inserted;
