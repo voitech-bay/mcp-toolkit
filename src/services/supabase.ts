@@ -213,6 +213,72 @@ export async function getConversation(
   return { messages: [], error: "Provide leadUuid, conversationUuid, or senderProfileUuid." };
 }
 
+// --- CompaniesContext (table: CompaniesContext) ---
+
+export const COMPANIES_CONTEXT_TABLE = "CompaniesContext";
+
+export interface CompanyContextRow {
+  id: string;
+  created_at: string;
+  name: string | null;
+  rootContext: string | null;
+}
+
+/**
+ * Get company context by name (case-sensitive exact match).
+ */
+export async function getCompanyContextByName(
+  client: SupabaseClient,
+  companyName: string
+): Promise<{ data: CompanyContextRow | null; error: string | null }> {
+  const trimmed = companyName?.trim();
+  if (!trimmed) {
+    return { data: null, error: "companyName is required." };
+  }
+  const { data, error } = await client
+    .from(COMPANIES_CONTEXT_TABLE)
+    .select("*")
+    .eq("name", trimmed)
+    .limit(1)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: data as CompanyContextRow | null, error: null };
+}
+
+/**
+ * Set root context for a company. If a row with the given name exists, update it;
+ * otherwise insert a new row.
+ */
+export async function setCompanyRootContext(
+  client: SupabaseClient,
+  companyName: string,
+  rootContext: string | null
+): Promise<{ data: CompanyContextRow | null; error: string | null }> {
+  const trimmed = companyName?.trim();
+  if (!trimmed) {
+    return { data: null, error: "companyName is required." };
+  }
+  const existing = await getCompanyContextByName(client, trimmed);
+  if (existing.error) return { data: null, error: existing.error };
+  if (existing.data) {
+    const { data, error } = await client
+      .from(COMPANIES_CONTEXT_TABLE)
+      .update({ rootContext: rootContext ?? null })
+      .eq("id", existing.data.id)
+      .select()
+      .single();
+    if (error) return { data: null, error: error.message };
+    return { data: data as CompanyContextRow, error: null };
+  }
+  const { data, error } = await client
+    .from(COMPANIES_CONTEXT_TABLE)
+    .insert({ name: trimmed, rootContext: rootContext ?? null })
+    .select()
+    .single();
+  if (error) return { data: null, error: error.message };
+  return { data: data as CompanyContextRow, error: null };
+}
+
 // --- Senders (table: Senders) ---
 
 export interface GetSendersParams {

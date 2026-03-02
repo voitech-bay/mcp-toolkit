@@ -10,6 +10,8 @@ import {
   handleSupabaseTableQuery,
   handleSupabaseSync,
   handleConversation,
+  handleGetCompanyContext,
+  handleSetCompanyContext,
 } from "./api-handlers.js";
 
 const PORT = Number(process.env.API_PORT) || 3001;
@@ -47,6 +49,16 @@ const server = createServer(async (req, res) => {
       case "/api/conversation":
         await handleConversation(req, res);
         return;
+      case "/api/company-context":
+        if (req.method === "GET") {
+          await handleGetCompanyContext(req, res);
+        } else if (req.method === "POST" || req.method === "PUT") {
+          await handleSetCompanyContext(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       default:
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Not found" }));
@@ -65,4 +77,6 @@ server.listen(PORT, () => {
   console.log("  POST /api/supabase-sync");
   console.log("  GET  /api/supabase-table-query");
   console.log("  GET  /api/conversation");
+  console.log("  GET  /api/company-context");
+  console.log("  POST /api/company-context");
 });

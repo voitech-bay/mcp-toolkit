@@ -13,6 +13,8 @@ import { registerGetConversationByContactNameTool } from "./tools/get-conversati
 import { registerGetConversationBySenderTool } from "./tools/get-conversation-by-sender.js";
 import { registerGetConversationByMessageTool } from "./tools/get-conversation-by-message.js";
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
+import { registerGetCompanyRootContextTool } from "./tools/get-company-root-context.js";
+import { registerSetCompanyRootContextTool } from "./tools/set-company-root-context.js";
 
 const server = new McpServer({
   name: "mcp-toolkit",
@@ -26,6 +28,8 @@ registerGetConversationByContactNameTool(server);
 registerGetConversationBySenderTool(server);
 registerGetConversationByMessageTool(server);
 registerCompanyEnrichmentTools(server);
+registerGetCompanyRootContextTool(server);
+registerSetCompanyRootContextTool(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

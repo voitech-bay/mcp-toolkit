@@ -2,8 +2,25 @@
  * HTTP handlers for Supabase state and sync. Used by Vercel serverless api/supabase-state and api/supabase-sync.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getSupabase, getTableCounts, getLatestRows, queryTableWithFilters, getConversation, type TableQueryFilters } from "./services/supabase.js";
+import { getSupabase, getTableCounts, getLatestRows, queryTableWithFilters, getConversation, getCompanyContextByName, setCompanyRootContext, type TableQueryFilters } from "./services/supabase.js";
 import { syncSupabaseFromSource } from "./services/sync-supabase.js";
+
+/** Read and parse JSON body from request (for POST). */
+async function getParsedBody(req: IncomingMessage): Promise<unknown> {
+  const contentType = req.headers["content-type"] ?? "";
+  if (!contentType.includes("application/json")) return undefined;
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const raw = Buffer.concat(chunks).toString("utf8");
+  if (!raw.trim()) return undefined;
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return undefined;
+  }
+}
 
 export type NodeHandler = (
   req: IncomingMessage,
@@ -163,4 +180,63 @@ export async function handleConversation(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ contact: result.contact ?? null, messages: result.messages }));
+}
+
+export async function handleGetCompanyContext(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const name = params.get("name") ?? "";
+  const result = await getCompanyContextByName(client, name);
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error, data: null }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleSetCompanyContext(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST" && req.method !== "PUT") {
+    res.writeHead(405, { Allow: "POST, PUT" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { name?: string; rootContext?: string } | undefined;
+  const name = typeof body?.name === "string" ? body.name : "";
+  const rootContext = body?.rootContext !== undefined ? (body.rootContext === null ? null : String(body.rootContext)) : null;
+  const result = await setCompanyRootContext(client, name, rootContext);
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error, data: null }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
 }

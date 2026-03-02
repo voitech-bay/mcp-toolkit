@@ -8,6 +8,8 @@ import { registerGetConversationByContactNameTool } from "./tools/get-conversati
 import { registerGetConversationBySenderTool } from "./tools/get-conversation-by-sender.js";
 import { registerGetConversationByMessageTool } from "./tools/get-conversation-by-message.js";
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
+import { registerGetCompanyRootContextTool } from "./tools/get-company-root-context.js";
+import { registerSetCompanyRootContextTool } from "./tools/set-company-root-context.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -21,6 +23,8 @@ function createMcpServer(): McpServer {
   registerGetConversationBySenderTool(server);
   registerGetConversationByMessageTool(server);
   registerCompanyEnrichmentTools(server);
+  registerGetCompanyRootContextTool(server);
+  registerSetCompanyRootContextTool(server);
   return server;
 }
 
