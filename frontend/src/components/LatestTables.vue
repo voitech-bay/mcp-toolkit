@@ -556,6 +556,39 @@ function onGoToContact(row: Record<string, unknown>) {
   pageByTable.value = { ...pageByTable.value, contacts: 1 };
 }
 
+function onGoToLinkedinMessagesFromContact(row: Record<string, unknown>) {
+  const uuid = row.uuid != null ? String(row.uuid) : undefined;
+  if (!uuid) return;
+  activeTab.value = "linkedin_messages";
+  filterStateByTable.value = {
+    ...filterStateByTable.value,
+    linkedin_messages: { lead_uuid: [uuid] },
+  };
+  pageByTable.value = { ...pageByTable.value, linkedin_messages: 1 };
+}
+
+function onGoToSender(row: Record<string, unknown>) {
+  const senderProfileUuid = row.sender_profile_uuid != null ? String(row.sender_profile_uuid) : undefined;
+  if (!senderProfileUuid) return;
+  activeTab.value = "senders";
+  filterStateByTable.value = {
+    ...filterStateByTable.value,
+    senders: { uuid: [senderProfileUuid] },
+  };
+  pageByTable.value = { ...pageByTable.value, senders: 1 };
+}
+
+function onGoToLinkedinMessagesFromSender(row: Record<string, unknown>) {
+  const uuid = row.uuid != null ? String(row.uuid) : undefined;
+  if (!uuid) return;
+  activeTab.value = "linkedin_messages";
+  filterStateByTable.value = {
+    ...filterStateByTable.value,
+    linkedin_messages: { sender_profile_uuid: [uuid] },
+  };
+  pageByTable.value = { ...pageByTable.value, linkedin_messages: 1 };
+}
+
 function onFindConversationBySender(row: Record<string, unknown>) {
   const uuid = row.uuid != null ? String(row.uuid) : undefined;
   if (uuid) fetchConversation({ senderProfileUuid: uuid });
@@ -626,6 +659,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
           @update:page="onUpdatePage"
           @update:page-size="onUpdatePageSize"
           @action="onFindConversationByContact"
+          @go-to-messages="onGoToLinkedinMessagesFromContact"
         />
         <LinkedinMessagesTable
           v-else-if="activeTab === 'linkedin_messages'"
@@ -644,6 +678,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
           @update:page-size="onUpdatePageSize"
           @action="onFindConversationByMessage"
           @go-to-contact="onGoToContact"
+          @go-to-sender="onGoToSender"
         />
         <SendersTable
           v-else-if="activeTab === 'senders'"
@@ -661,6 +696,7 @@ function onFindConversationBySender(row: Record<string, unknown>) {
           @update:page="onUpdatePage"
           @update:page-size="onUpdatePageSize"
           @action="onFindConversationBySender"
+          @go-to-messages="onGoToLinkedinMessagesFromSender"
         />
       </NTabPane>
     </NTabs>

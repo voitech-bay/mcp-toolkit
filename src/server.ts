@@ -16,15 +16,15 @@ function createMcpServer(): McpServer {
     name: "mcp-toolkit",
     version: "0.1.0",
   });
-  registerGetLinkedinMessagesTool(server);
-  registerGetSendersTool(server);
-  registerGetContactsTool(server);
-  registerGetConversationByContactNameTool(server);
-  registerGetConversationBySenderTool(server);
-  registerGetConversationByMessageTool(server);
+  // registerGetLinkedinMessagesTool(server);
+  // registerGetSendersTool(server);
+  // registerGetContactsTool(server);
+  // registerGetConversationByContactNameTool(server);
+  // registerGetConversationBySenderTool(server);
+  // registerGetConversationByMessageTool(server);
   registerCompanyEnrichmentTools(server);
-  registerGetCompanyRootContextTool(server);
-  registerSetCompanyRootContextTool(server);
+  // registerGetCompanyRootContextTool(server);
+  // registerSetCompanyRootContextTool(server);
   return server;
 }
 

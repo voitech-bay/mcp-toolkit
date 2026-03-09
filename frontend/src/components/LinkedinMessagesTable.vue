@@ -2,7 +2,7 @@
 import { h, toRef, computed } from "vue";
 import { NButton, NPopover, NSpace } from "naive-ui";
 import type { DataTableFilterState } from "naive-ui";
-import { MessageCircle, User } from "lucide-vue-next";
+import { MessageCircle, User, UserCircle } from "lucide-vue-next";
 import { useDataTableColumns } from "../composables/useDataTableColumns";
 import DataTableSection from "./DataTableSection.vue";
 
@@ -26,6 +26,7 @@ const emit = defineEmits<{
   "update:pageSize": [value: number];
   action: [row: Record<string, unknown>];
   goToContact: [row: Record<string, unknown>];
+  goToSender: [row: Record<string, unknown>];
 }>();
 
 const highlightTerm = computed(() => (props.searchTerm ?? "").trim());
@@ -53,6 +54,7 @@ const { tableColumns, scrollX } = useDataTableColumns(
           ),
       }
     );
+    const hasSenderUuid = row.sender_profile_uuid != null && String(row.sender_profile_uuid).trim() !== "";
     const goToContactBtn = hasLeadUuid
       ? h(
           NPopover,
@@ -72,7 +74,26 @@ const { tableColumns, scrollX } = useDataTableColumns(
           }
         )
       : null;
-    return h(NSpace, { size: 4 }, [conversationBtn, goToContactBtn].filter(Boolean));
+    const goToSenderBtn = hasSenderUuid
+      ? h(
+          NPopover,
+          { trigger: "hover", placement: "top", showArrow: true },
+          {
+            default: () => "Go to sender",
+            trigger: () =>
+              h(
+                NButton,
+                {
+                  size: "small",
+                  quaternary: true,
+                  onClick: () => emit("goToSender", row),
+                },
+                { default: () => h(UserCircle, { size: 16 }) }
+              ),
+          }
+        )
+      : null;
+    return h(NSpace, { size: 4 }, [conversationBtn, goToContactBtn, goToSenderBtn].filter(Boolean));
   },
   { highlightTerm, highlightColumnKeys: ["text"] }
 );
