@@ -5,12 +5,12 @@ import { getSupabase, getConversation, getLinkedinMessages } from "../services/s
 export function registerGetConversationByMessageTool(server: McpServer): void {
   server.tool(
     "get_conversation_by_message",
-    "Return the full LinkedIn conversation (thread) that contains a given message. Use when the user has a specific message and wants to see the whole thread, e.g. 'show conversation for this message' or 'get thread by message id'. Provide either the message id (then the message is looked up to get its conversation UUID) or the conversation UUID directly. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).",
+    "Return the full LinkedIn conversation (thread) that contains a given message. Use when the user has a specific message and wants to see the whole thread, e.g. 'show conversation for this message' or 'get thread by message uuid'. Provide either the message uuid (then the message is looked up to get its conversation UUID) or the conversation UUID directly. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).",
     {
       messageId: z
         .string()
         .optional()
-        .describe("Id of any message in the conversation. The message is fetched to get linkedin_conversation_uuid, then the full thread is returned."),
+        .describe("UUID of any message in the conversation. The message is fetched to get linkedin_conversation_uuid, then the full thread is returned."),
       conversationUuid: z
         .string()
         .uuid()
@@ -56,7 +56,7 @@ export function registerGetConversationByMessageTool(server: McpServer): void {
             content: [
               {
                 type: "text" as const,
-                text: `No message found with id ${args.messageId}, or message has no linkedin_conversation_uuid.`,
+                text: `No message found with uuid ${args.messageId}, or message has no linkedin_conversation_uuid.`,
               },
             ],
             isError: true,

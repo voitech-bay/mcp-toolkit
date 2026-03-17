@@ -6,6 +6,425 @@ const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_K
 export const LINKEDIN_MESSAGES_TABLE = "LinkedinMessages";
 export const SENDERS_TABLE = "Senders";
 export const CONTACTS_TABLE = "Contacts";
+/** Core companies table; domain is unique. Contacts link via company_id. */
+export const COMPANIES_TABLE = "companies";
+
+// --- Projects (table: Projects) ---
+
+export const PROJECTS_TABLE = "Projects";
+
+export interface ProjectRow {
+  id: string;
+  created_at: string;
+  name: string;
+  description: string | null;
+  source_api_key: string | null;
+  source_api_base_url: string | null;
+}
+
+/** Sanitised project returned by listing endpoints (hides actual API key). */
+export interface ProjectSummary {
+  id: string;
+  name: string;
+  description: string | null;
+  api_key_set: boolean;
+  source_api_base_url: string | null;
+  created_at: string;
+}
+
+function toProjectSummary(row: ProjectRow): ProjectSummary {
+  return {
+    id: row.id,
+    name: row.name,
+    description: row.description,
+    api_key_set: row.source_api_key != null && row.source_api_key.length > 0,
+    source_api_base_url: row.source_api_base_url,
+    created_at: row.created_at,
+  };
+}
+
+/**
+ * List all projects. Returns sanitised summaries (actual API key is hidden).
+ */
+export async function getProjects(
+  client: SupabaseClient
+): Promise<{ data: ProjectSummary[]; error: string | null }> {
+  const { data, error } = await client
+    .from(PROJECTS_TABLE)
+    .select("*")
+    .order("name", { ascending: true });
+  if (error) return { data: [], error: error.message };
+  return {
+    data: ((data ?? []) as ProjectRow[]).map(toProjectSummary),
+    error: null,
+  };
+}
+
+/**
+ * Get a single project by id, including credentials.
+ */
+export async function getProjectById(
+  client: SupabaseClient,
+  id: string
+): Promise<{ data: ProjectRow | null; error: string | null }> {
+  const { data, error } = await client
+    .from(PROJECTS_TABLE)
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: (data as ProjectRow) ?? null, error: null };
+}
+
+/**
+ * Update project API credentials. Only updates the provided fields.
+ */
+export async function updateProjectCredentials(
+  client: SupabaseClient,
+  id: string,
+  credentials: { apiKey?: string | null; baseUrl?: string | null }
+): Promise<{ error: string | null }> {
+  const update: Record<string, unknown> = {};
+  if (credentials.apiKey !== undefined) update.source_api_key = credentials.apiKey;
+  if (credentials.baseUrl !== undefined) update.source_api_base_url = credentials.baseUrl;
+  if (Object.keys(update).length === 0) return { error: null };
+  const { error } = await client
+    .from(PROJECTS_TABLE)
+    .update(update)
+    .eq("id", id);
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Get entity counts (Contacts, LinkedinMessages, Senders) filtered by project_id.
+ */
+export async function getProjectEntityCounts(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ counts: TableCounts; error: string | null }> {
+  try {
+    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+      client
+        .from(CONTACTS_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
+      client
+        .from(LINKEDIN_MESSAGES_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
+      client
+        .from(SENDERS_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
+    ]);
+    const zeroCounts: TableCounts = { contacts: 0, linkedin_messages: 0, senders: 0 };
+    if (contactsRes.error) return { counts: zeroCounts, error: contactsRes.error.message };
+    if (messagesRes.error) return { counts: zeroCounts, error: messagesRes.error.message };
+    if (sendersRes.error) return { counts: zeroCounts, error: sendersRes.error.message };
+    return {
+      counts: {
+        contacts: contactsRes.count ?? 0,
+        linkedin_messages: messagesRes.count ?? 0,
+        senders: sendersRes.count ?? 0,
+      },
+      error: null,
+    };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: message };
+  }
+}
+
+/**
+ * Get latest rows per table filtered by project_id.
+ */
+export async function getProjectLatestRows(
+  client: SupabaseClient,
+  projectId: string,
+  limit: number = DEFAULT_LATEST_LIMIT
+): Promise<{ latest: LatestRows; error: string | null }> {
+  const n = Math.min(Math.max(limit, 1), 100);
+  try {
+    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+      client
+        .from(CONTACTS_TABLE)
+        .select("*")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false })
+        .limit(n),
+      client
+        .from(LINKEDIN_MESSAGES_TABLE)
+        .select("*")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false })
+        .limit(n),
+      client
+        .from(SENDERS_TABLE)
+        .select("*")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false })
+        .limit(n),
+    ]);
+    const latest: LatestRows = {
+      contacts: contactsRes.data ?? [],
+      linkedin_messages: messagesRes.data ?? [],
+      senders: sendersRes.data ?? [],
+    };
+    if (contactsRes.error) return { latest, error: contactsRes.error.message };
+    if (messagesRes.error) return { latest, error: messagesRes.error.message };
+    if (sendersRes.error) return { latest, error: sendersRes.error.message };
+    return { latest, error: null };
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    return {
+      latest: { contacts: [], linkedin_messages: [], senders: [] },
+      error: message,
+    };
+  }
+}
+
+/**
+ * Check if any sync run is currently active (status = 'running').
+ * Returns the active run row if one exists, or null.
+ */
+export async function getActiveSyncRun(
+  client: SupabaseClient
+): Promise<{ data: (SyncRunRow & { project_id: string | null }) | null; error: string | null }> {
+  const { data, error } = await client
+    .from(SYNC_RUNS_TABLE)
+    .select("*")
+    .eq("status", "running")
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: data as (SyncRunRow & { project_id: string | null }) | null, error: null };
+}
+
+export interface SyncHistoryEntry {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: SyncRunStatus;
+  result_summary: Record<string, unknown> | null;
+  error: string | null;
+  project_id: string | null;
+  log_entries: Array<{
+    id: string;
+    created_at: string;
+    kind: string;
+    level: string;
+    message: string;
+    table_name: string | null;
+    row_count: number | null;
+    data: Record<string, unknown> | null;
+  }>;
+}
+
+/**
+ * Get recent sync runs (optionally filtered by project_id) with their log entries.
+ */
+export async function getSyncHistory(
+  client: SupabaseClient,
+  options?: { projectId?: string; limit?: number }
+): Promise<{ data: SyncHistoryEntry[]; error: string | null }> {
+  const n = Math.min(Math.max(options?.limit ?? 20, 1), 100);
+
+  let runsQuery = client
+    .from(SYNC_RUNS_TABLE)
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(n);
+  if (options?.projectId) {
+    runsQuery = runsQuery.eq("project_id", options.projectId);
+  }
+
+  const { data: runs, error: runsError } = await runsQuery;
+  if (runsError) return { data: [], error: runsError.message };
+  if (!runs || runs.length === 0) return { data: [], error: null };
+
+  const runIds = (runs as SyncRunRow[]).map((r) => r.id);
+  const { data: entries, error: entriesError } = await client
+    .from(SYNC_LOG_ENTRIES_TABLE)
+    .select("*")
+    .in("run_id", runIds)
+    .order("created_at", { ascending: true });
+  if (entriesError) return { data: [], error: entriesError.message };
+
+  const entriesByRun = new Map<string, SyncHistoryEntry["log_entries"]>();
+  for (const entry of (entries ?? []) as Array<Record<string, unknown>>) {
+    const runId = entry.run_id as string;
+    if (!entriesByRun.has(runId)) entriesByRun.set(runId, []);
+    entriesByRun.get(runId)!.push({
+      id: entry.id as string,
+      created_at: entry.created_at as string,
+      kind: entry.kind as string,
+      level: entry.level as string,
+      message: entry.message as string,
+      table_name: (entry.table_name as string) ?? null,
+      row_count: (entry.row_count as number) ?? null,
+      data: (entry.data as Record<string, unknown>) ?? null,
+    });
+  }
+
+  const result: SyncHistoryEntry[] = (runs as Array<Record<string, unknown>>).map((r) => ({
+    id: r.id as string,
+    started_at: r.started_at as string,
+    finished_at: (r.finished_at as string) ?? null,
+    status: r.status as SyncRunStatus,
+    result_summary: (r.result_summary as Record<string, unknown>) ?? null,
+    error: (r.error as string) ?? null,
+    project_id: (r.project_id as string) ?? null,
+    log_entries: entriesByRun.get(r.id as string) ?? [],
+  }));
+
+  return { data: result, error: null };
+}
+
+// --- companies (table: companies) ---
+
+/**
+ * Get company ids by domain. Returns a map domain -> id for all found.
+ * Domains should be normalized (lowercase, trimmed).
+ */
+export async function getCompanyIdsByDomains(
+  client: SupabaseClient,
+  domains: string[]
+): Promise<{ map: Record<string, string>; error: string | null }> {
+  const unique = [...new Set(domains)].filter((d) => d.length > 0);
+  if (unique.length === 0) return { map: {}, error: null };
+  const { data, error } = await client
+    .from(COMPANIES_TABLE)
+    .select("id, domain")
+    .in("domain", unique);
+  if (error) return { map: {}, error: error.message };
+  const map: Record<string, string> = {};
+  for (const row of data ?? []) {
+    const d = row?.domain;
+    const id = row?.id;
+    if (typeof d === "string" && typeof id === "string") map[d] = id;
+  }
+  return { map, error: null };
+}
+
+/**
+ * Ensure companies exist by domain. Inserts missing rows (name/linkedin_url optional),
+ * then returns domain -> id for all given domains. Uses upsert on domain so existing
+ * rows are updated with provided name/linkedin_url when given.
+ */
+export async function ensureCompanies(
+  client: SupabaseClient,
+  rows: Array<{ domain: string; name?: string | null; linkedin_url?: string | null }>
+): Promise<{ map: Record<string, string>; error: string | null }> {
+  if (rows.length === 0) return { map: {}, error: null };
+  const { data, error } = await client
+    .from(COMPANIES_TABLE)
+    .upsert(
+      rows.map((r) => ({
+        domain: r.domain,
+        name: r.name ?? r.domain,
+        linkedin_url: r.linkedin_url ?? null,
+      })),
+      { onConflict: "domain" }
+    )
+    .select("id, domain");
+  if (error) return { map: {}, error: error.message };
+  const map: Record<string, string> = {};
+  for (const row of data ?? []) {
+    const d = row?.domain;
+    const id = row?.id;
+    if (typeof d === "string" && typeof id === "string") map[d] = id;
+  }
+  return { map, error: null };
+}
+
+// --- Sync logging (sync_runs, sync_log_entries) ---
+
+export const SYNC_RUNS_TABLE = "sync_runs";
+export const SYNC_LOG_ENTRIES_TABLE = "sync_log_entries";
+
+export type SyncRunStatus = "running" | "success" | "partial" | "error";
+
+export interface SyncRunRow {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: SyncRunStatus;
+  result_summary: Record<string, unknown> | null;
+  error: string | null;
+}
+
+/**
+ * Create a new sync run. Returns run id or error.
+ * When projectId is provided, the run is associated with that project.
+ */
+export async function createSyncRun(
+  client: SupabaseClient,
+  projectId?: string | null
+): Promise<{ id: string | null; error: string | null }> {
+  const row: Record<string, unknown> = { status: "running" };
+  if (projectId) row.project_id = projectId;
+  const { data, error } = await client
+    .from(SYNC_RUNS_TABLE)
+    .insert(row)
+    .select("id")
+    .single();
+  if (error) return { id: null, error: error.message };
+  const id = data?.id;
+  return { id: typeof id === "string" ? id : null, error: null };
+}
+
+/**
+ * Update sync run with finish time, status, and optional result/error.
+ */
+export async function updateSyncRun(
+  client: SupabaseClient,
+  runId: string,
+  payload: {
+    finished_at?: string;
+    status: SyncRunStatus;
+    result_summary?: Record<string, unknown> | null;
+    error?: string | null;
+  }
+): Promise<{ error: string | null }> {
+  const { error } = await client
+    .from(SYNC_RUNS_TABLE)
+    .update({
+      finished_at: payload.finished_at ?? new Date().toISOString(),
+      status: payload.status,
+      result_summary: payload.result_summary ?? null,
+      error: payload.error ?? null,
+    })
+    .eq("id", runId);
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Insert a sync log entry (log message or upsert event). Fails silently if table is missing.
+ */
+export async function insertSyncLogEntry(
+  client: SupabaseClient,
+  runId: string,
+  entry: {
+    kind: "log" | "upsert";
+    level: "info" | "error";
+    message: string;
+    table_name?: string | null;
+    row_count?: number | null;
+    data?: Record<string, unknown> | null;
+  }
+): Promise<{ error: string | null }> {
+  const { error } = await client.from(SYNC_LOG_ENTRIES_TABLE).insert({
+    run_id: runId,
+    kind: entry.kind,
+    level: entry.level,
+    message: entry.message,
+    table_name: entry.table_name ?? null,
+    row_count: entry.row_count ?? null,
+    data: entry.data ?? null,
+  });
+  return { error: error?.message ?? null };
+}
 
 export function getSupabase(): SupabaseClient | null {
   if (!url || !key) return null;
@@ -22,6 +441,7 @@ export interface GetLinkedinMessagesParams {
   leadUuid?: string;
   leadId?: string;
   conversationUuid?: string;
+  /** Message UUID (table primary key; no separate id column). */
   messageId?: string;
   channel?: string;
   direction?: string;
@@ -49,7 +469,7 @@ export async function getLinkedinMessages(
   if (params.leadId != null) query = query.eq("lead_id", params.leadId);
   if (params.conversationUuid != null)
     query = query.eq("linkedin_conversation_uuid", params.conversationUuid);
-  if (params.messageId != null) query = query.eq("id", params.messageId);
+  if (params.messageId != null) query = query.eq("uuid", params.messageId);
   if (params.channel != null) query = query.eq("channel", params.channel);
   if (params.direction != null) query = query.eq("direction", params.direction);
   if (params.status != null) query = query.eq("status", params.status);
@@ -532,17 +952,22 @@ export interface TableCounts {
 /**
  * Returns the latest created_at (ISO string) for the table, or null if empty.
  * Used by incremental sync to fetch only rows newer than this from the source API.
+ * When projectId is provided, only considers rows belonging to that project.
  */
 export async function getLatestCreatedAt(
   client: SupabaseClient,
-  table: string
+  table: string,
+  projectId?: string | null
 ): Promise<{ latest: string | null; error: string | null }> {
-  const { data, error } = await client
+  let query = client
     .from(table)
     .select("created_at")
     .order("created_at", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+    .limit(1);
+  if (projectId) {
+    query = query.eq("project_id", projectId);
+  }
+  const { data, error } = await query.maybeSingle();
   if (error) return { latest: null, error: error.message };
   const raw = data?.created_at;
   if (raw == null) return { latest: null, error: null };

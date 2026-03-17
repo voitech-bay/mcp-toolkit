@@ -2,7 +2,24 @@
  * HTTP handlers for Supabase state and sync. Used by Vercel serverless api/supabase-state and api/supabase-sync.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getSupabase, getTableCounts, getLatestRows, queryTableWithFilters, getConversation, getCompanyContextByName, setCompanyRootContext, type TableQueryFilters } from "./services/supabase.js";
+import {
+  getSupabase,
+  getTableCounts,
+  getLatestRows,
+  queryTableWithFilters,
+  getConversation,
+  getCompanyContextByName,
+  setCompanyRootContext,
+  getProjects,
+  getProjectById,
+  updateProjectCredentials,
+  getProjectEntityCounts,
+  getProjectLatestRows,
+  getActiveSyncRun,
+  getSyncHistory,
+  createSyncRun,
+  type TableQueryFilters,
+} from "./services/supabase.js";
 import { syncSupabaseFromSource } from "./services/sync-supabase.js";
 
 /** Read and parse JSON body from request (for POST). */
@@ -81,9 +98,43 @@ export async function handleSupabaseSync(
     return;
   }
   res.setHeader("Content-Type", "application/json");
-  const result = await syncSupabaseFromSource();
+
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  const body = (await getParsedBody(req)) as { projectId?: string } | undefined;
+  const projectId = body?.projectId;
+
+  const { data: activeRun } = await getActiveSyncRun(client);
+  if (activeRun) {
+    res.writeHead(409);
+    res.end(JSON.stringify({
+      error: "sync already running",
+      activeRunId: activeRun.id,
+      activeProjectId: activeRun.project_id ?? null,
+    }));
+    return;
+  }
+
+  const runResult = await createSyncRun(client, projectId);
+  if (runResult.error || !runResult.id) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: runResult.error ?? "Failed to create sync run" }));
+    return;
+  }
+
+  const runId = runResult.id;
+
   res.writeHead(200);
-  res.end(JSON.stringify(result));
+  res.end(JSON.stringify({ runId }));
+
+  syncSupabaseFromSource(projectId, runId).catch((err) => {
+    console.error("[sync] background sync error:", err);
+  });
 }
 
 /** Parse query string from req.url. */
@@ -235,6 +286,190 @@ export async function handleSetCompanyContext(
   if (result.error) {
     res.writeHead(400);
     res.end(JSON.stringify({ error: result.error, data: null }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+// --- Project & Sync endpoints ---
+
+export async function handleGetProjects(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await getProjects(client);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleUpdateProjectCredentials(
+  req: IncomingMessage,
+  res: ServerResponse,
+  projectId: string
+): Promise<void> {
+  if (req.method !== "PUT") {
+    res.writeHead(405, { Allow: "PUT" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const { data: project } = await getProjectById(client, projectId);
+  if (!project) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: `Project not found: ${projectId}` }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as {
+    apiKey?: string | null;
+    baseUrl?: string | null;
+  } | undefined;
+  if (!body) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const result = await updateProjectCredentials(client, projectId, {
+    apiKey: body.apiKey,
+    baseUrl: body.baseUrl,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+export async function handleSyncPreflight(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const [countsResult, latestResult, activeRunResult] = await Promise.all([
+    getProjectEntityCounts(client, projectId),
+    getProjectLatestRows(client, projectId, 3),
+    getActiveSyncRun(client),
+  ]);
+  res.writeHead(200);
+  res.end(JSON.stringify({
+    projectId,
+    counts: countsResult.counts,
+    countsError: countsResult.error ?? undefined,
+    latest: latestResult.latest,
+    latestError: latestResult.error ?? undefined,
+    activeSyncRun: activeRunResult.data
+      ? { id: activeRunResult.data.id, project_id: activeRunResult.data.project_id }
+      : null,
+  }));
+}
+
+export async function handleSyncStatus(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const { data, error } = await getActiveSyncRun(client);
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ running: false, error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({
+    running: data != null,
+    activeRun: data
+      ? {
+          id: data.id,
+          started_at: data.started_at,
+          project_id: data.project_id,
+        }
+      : null,
+  }));
+}
+
+export async function handleSyncHistory(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId") ?? undefined;
+  const limitStr = params.get("limit");
+  const limit = limitStr ? Math.min(Math.max(parseInt(limitStr, 10) || 20, 1), 100) : undefined;
+  const result = await getSyncHistory(client, { projectId, limit });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
     return;
   }
   res.writeHead(200);

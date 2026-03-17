@@ -1,146 +1,149 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { computed, onMounted, h } from "vue";
 import { useDark } from "@vueuse/core";
-import type { StateResponse, SyncResult } from "./types";
-import CountCards from "./components/CountCards.vue";
-import LatestTables from "./components/LatestTables.vue";
-import { NConfigProvider, darkTheme, lightTheme, NH1, NH3, NCard, NButton, NSpin, NAlert, NSpace, NCode } from "naive-ui";
-import { MoonIcon, SunIcon } from "lucide-vue-next";
+import { useRoute, useRouter } from "vue-router";
+import { NConfigProvider, NButton, NSpace, NSelect, NMessageProvider, NCard } from "naive-ui";
+import type { SelectOption } from "naive-ui";
+import { darkTheme, lightTheme } from "naive-ui";
+import { MoonIcon, SunIcon, LayoutDashboardIcon, TableIcon, RefreshCwIcon } from "lucide-vue-next";
+import { useProjectStore } from "./stores/project";
 
-// VueUse: dark theme by default, persisted in localStorage (vueuse-color-scheme)
 const isDark = useDark();
 isDark.value = true;
 
 const naiveTheme = computed(() => (isDark.value ? darkTheme : lightTheme));
 
-const state = ref<StateResponse | null>(null);
-const stateError = ref("");
-const loading = ref(true);
-const syncing = ref(false);
-const syncResult = ref<SyncResult | null>(null);
+const route = useRoute();
+const router = useRouter();
+const isTables = computed(() => route.path === "/tables");
+const isHome = computed(() => route.path === "/");
+const isSync = computed(() => route.path === "/sync");
 
-async function loadState(latestLimit = 10) {
-  stateError.value = "";
-  loading.value = true;
-  try {
-    const r = await fetch(`/api/supabase-state?latest=${latestLimit}`);
-    const data = await r.json();
-    if (!r.ok) {
-      state.value = null;
-      stateError.value = data.error ?? "Failed to load state";
-      return;
-    }
-    state.value = data;
-  } catch (e) {
-    state.value = null;
-    stateError.value = e instanceof Error ? e.message : "Request failed";
-  } finally {
-    loading.value = false;
-  }
+const projectStore = useProjectStore();
+
+const projectOptions = computed<SelectOption[]>(() =>
+  projectStore.projects.map((p) => ({ label: p.name, value: p.id }))
+);
+
+const selectedProjectId = computed({
+  get: () => projectStore.selectedProjectId,
+  set: (id: string | null) => projectStore.selectProject(id),
+});
+
+function renderProjectLabel(option: SelectOption) {
+  const proj = projectStore.projects.find((p) => p.id === option.value);
+  return h("div", { style: "display:flex;align-items:center;gap:8px" }, [
+    h("span", {
+      style: `width:8px;height:8px;border-radius:50%;background:${proj?.api_key_set ? "#18a058" : "#d03050"};flex-shrink:0`,
+    }),
+    h("span", {}, option.label as string),
+    proj?.description
+      ? h("span", { style: "opacity:.5;font-size:.85em;margin-left:4px" }, proj.description)
+      : null,
+  ].filter(Boolean) as ReturnType<typeof h>[]);
 }
 
-async function runSync() {
-  stateError.value = "";
-  syncResult.value = null;
-  syncing.value = true;
-  try {
-    const r = await fetch("/api/supabase-sync", { method: "POST" });
-    const data: SyncResult = await r.json();
-    syncResult.value = data;
-    if (r.ok) await loadState();
-    else stateError.value = data.error ?? "Sync failed";
-  } catch (e) {
-    stateError.value = e instanceof Error ? e.message : "Request failed";
-  } finally {
-    syncing.value = false;
-  }
-}
-
-onMounted(() => loadState());
 function toggleTheme() {
   isDark.value = !isDark.value;
 }
+
+onMounted(() => projectStore.loadProjects());
 </script>
 
 <template>
-  <NConfigProvider :theme="naiveTheme">
-    <div class="app">
-      <header class="header">
-        <NH1 class="title">MCP Toolkit</NH1>
-        <NH3 class="subtitle">
-          MCP endpoint: <a href="/api/mcp" target="_blank" rel="noopener">/api/mcp</a>
-        </NH3>
-      </header>
+  <NMessageProvider>
+    <NConfigProvider :theme="naiveTheme">
+      <div class="app">
+        <NCard class="header-card">
+          <header class="header">
+            <div class="header-project">
+              <NSelect
+                v-model:value="selectedProjectId"
+                :options="projectOptions"
+                :loading="projectStore.loading"
+                :render-label="renderProjectLabel"
+                placeholder="Select project…"
+                clearable
+                size="small"
+                style="width: 220px"
+              />
+            </div>
+            <div class="nav-row">
+              <NSpace>
+                <NButton quaternary :type="isHome ? 'primary' : undefined" size="small" @click="router.push('/')">
+                  <LayoutDashboardIcon :size="14" style="margin-right: 4px" />
+                  Home
+                </NButton>
+                <NButton quaternary :type="isTables ? 'primary' : undefined" size="small" @click="router.push('/tables')">
+                  <TableIcon :size="14" style="margin-right: 4px" />
+                  Tables
+                </NButton>
+                <NButton quaternary :type="isSync ? 'primary' : undefined" size="small" @click="router.push('/sync')">
+                  <RefreshCwIcon :size="14" style="margin-right: 4px" />
+                  Sync
+                </NButton>
+                <NButton quaternary @click="toggleTheme()" size="small">
+                  <SunIcon :size="14" v-if="isDark" />
+                  <MoonIcon :size="14" v-else />
+                </NButton>
+              </NSpace>
+            </div>
+          </header>
+        </NCard>
 
-      <main class="main">
-        <NCard title="Supabase state" class="section">
-          <template #header-extra>
-            <NSpace>
-              <NButton @click="toggleTheme()">
-              
-                <SunIcon :size="12" v-if="isDark" />
-                <MoonIcon :size="12" v-else />
-              </NButton>
-              <NButton :loading="loading" @click="loadState()">Refresh</NButton>
-              <NButton type="primary" :loading="syncing" @click="runSync()">
-                Sync from source
-              </NButton>
-            </NSpace>
-          </template>
-
-          <NSpin :show="loading">
-            <NAlert v-if="stateError" type="error" class="mb">
-              {{ stateError }}
+        <main class="main">
+          <template v-if="!projectStore.selectedProjectId">
+            <img src="https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjV0cTJibmdkZmJ0YmZ5ODJoa3BqMHlibTU1eTBmdmpleW5lbmlscyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/a3kvBNAcxPv9TdEnkq/giphy.gif" alt="No project selected" />
+            <NAlert type="info" class="no-project-alert">
+              Select a project in the header to browse its data.
             </NAlert>
-            <CountCards v-if="state?.counts" :counts="state.counts" />
-            <LatestTables v-if="state?.latest" :latest="state.latest" :counts="state?.counts" />
-            <p v-if="state?.latestError" class="muted small">
-              Latest rows: {{ state.latestError }}
-            </p>
-          </NSpin>
-        </NCard>
-
-        <NCard v-if="syncResult" title="Last sync result" class="section">
-          <NCode :code="JSON.stringify(syncResult, null, 2)" language="json" word-wrap />
-        </NCard>
-      </main>
-    </div>
-  </NConfigProvider>
+          </template>
+          <template v-else>
+            <router-view />
+          </template>
+        </main>
+      </div>
+    </NConfigProvider>
+  </NMessageProvider>
 </template>
 
 <style scoped>
+.header-card {
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
 .app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.header {
+  padding: 0.5rem 1.5rem 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0 auto;
+}
+
+.header-project {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.nav-row {
+  display: flex;
+  align-items: center;
+}
+
+.main {
+  flex: 1;
   max-width: 1600px;
   margin: 0 auto;
   padding: 2rem 1.5rem;
-}
-.header {
-  margin-bottom: 2rem;
-}
-.title {
-  font-size: 1.75rem;
-  font-weight: 600;
-  margin: 0 0 0.25rem 0;
-}
-.subtitle {
-  margin: 0;
-  opacity: 0.8;
-  font-size: 0.95rem;
-}
-.main {
-  display: flex;
-  flex-direction: column;
-  gap: 1.5rem;
-}
-.section {
-  border-radius: 12px;
-}
-.mb {
-  margin-bottom: 1rem;
-}
-.muted.small {
-  opacity: 0.7;
-  font-size: 0.85rem;
-  margin: 0.5rem 0 0 0;
+  width: 100%;
 }
 </style>

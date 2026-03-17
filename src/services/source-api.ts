@@ -1,45 +1,77 @@
 /**
  * Fetches data from the same external API that main/ uses (GetSales-style).
- * Requires SOURCE_API_BASE_URL and SOURCE_API_KEY env vars.
+ * All fetch functions accept optional ApiCredentials; env vars are used as fallback.
  */
+
+export interface ApiCredentials {
+  baseUrl: string;
+  apiKey: string;
+}
 
 const CONTACTS_PATH = "/leads/api/leads/search";
 const LINKEDIN_MESSAGES_PATH = "/flows/api/linkedin-messages";
 const SENDER_PROFILES_PATH = "/flows/api/sender-profiles";
 
-const PAGE_SIZE = 100;
+const PAGE_SIZE = 500;
 const DELAY_MS = 800;
+const MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1000;
+const LOG_PREFIX = "[source-api]";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function getConfig(): { baseUrl: string; apiKey: string } | null {
-  const baseUrl = process.env.SOURCE_API_BASE_URL?.replace(/\/$/, "");
-  const apiKey = process.env.SOURCE_API_KEY;
+function resolveCredentials(override?: ApiCredentials): { baseUrl: string; apiKey: string } | null {
+  const baseUrl = (override?.baseUrl ?? process.env.SOURCE_API_BASE_URL)?.replace(/\/$/, "");
+  const apiKey = override?.apiKey ?? process.env.SOURCE_API_KEY;
   if (!baseUrl || !apiKey) return null;
   return { baseUrl, apiKey };
 }
 
 async function fetchJson<T>(
   url: string,
+  apiKey: string,
   options: { method?: string; body?: string; headers?: Record<string, string> }
 ): Promise<T> {
   const { method = "GET", body, headers = {} } = options;
-  const res = await fetch(url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${process.env.SOURCE_API_KEY}`,
-      ...headers,
-    },
-    ...(body && { body }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Source API ${res.status}: ${text}`);
+  let lastError: Error | null = null;
+
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+          ...headers,
+        },
+        ...(body && { body }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        const errMsg = `Source API ${method} ${url} responded ${res.status} ${res.statusText}: ${text}`;
+        if (res.status >= 500 || res.status === 429) {
+          lastError = new Error(errMsg);
+          const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+          console.warn(`${LOG_PREFIX} attempt ${attempt}/${MAX_RETRIES} failed (HTTP ${res.status}), retrying in ${delay}ms… URL: ${url}`);
+          await sleep(delay);
+          continue;
+        }
+        throw new Error(errMsg);
+      }
+      return res.json() as Promise<T>;
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
+      if (attempt < MAX_RETRIES) {
+        const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        console.warn(`${LOG_PREFIX} attempt ${attempt}/${MAX_RETRIES} failed: ${lastError.message}. Retrying in ${delay}ms… URL: ${url}`);
+        await sleep(delay);
+      }
+    }
   }
-  return res.json() as Promise<T>;
+  console.error(`${LOG_PREFIX} all ${MAX_RETRIES} attempts failed for ${method} ${url}. Last error: ${lastError?.message}`);
+  throw lastError ?? new Error(`fetchJson failed after ${MAX_RETRIES} retries`);
 }
 
 /** Contact search item: API can return { lead } or flat lead at root. */
@@ -50,6 +82,8 @@ function unwrapContact(item: ContactItem): Record<string, unknown> {
   if (item.lead && typeof item.lead === "object") return { ...item.lead };
   return { ...item };
 }
+
+export type FetchLogger = (msg: string, data?: Record<string, unknown>) => Promise<void>;
 
 export interface FetchContactsResult {
   data: Record<string, unknown>[];
@@ -69,8 +103,8 @@ function isAtOrOlder(rowCreatedAtVal: string | null, sinceCreatedAt: string | nu
   return rowCreatedAtVal <= sinceCreatedAt;
 }
 
-export async function fetchAllContacts(): Promise<FetchContactsResult> {
-  return fetchContactsIncremental(null);
+export async function fetchAllContacts(credentials?: ApiCredentials, onLog?: FetchLogger): Promise<FetchContactsResult> {
+  return fetchContactsIncremental(null, credentials, onLog);
 }
 
 /**
@@ -78,9 +112,11 @@ export async function fetchAllContacts(): Promise<FetchContactsResult> {
  * If sinceCreatedAt is null, fetches all. Returns only rows with created_at > sinceCreatedAt.
  */
 export async function fetchContactsIncremental(
-  sinceCreatedAt: string | null
+  sinceCreatedAt: string | null,
+  credentials?: ApiCredentials,
+  onLog?: FetchLogger
 ): Promise<FetchContactsResult> {
-  const config = getConfig();
+  const config = resolveCredentials(credentials);
   if (!config) return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
   const all: Record<string, unknown>[] = [];
   let offset = 0;
@@ -94,12 +130,15 @@ export async function fetchContactsIncremental(
         order_field: "created_at",
         order_type: "desc",
       });
-      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, {
+      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config.apiKey, {
         method: "POST",
         body,
       });
       const raw = res.data ?? [];
       const page = raw.map(unwrapContact);
+      const preview = page.slice(0, 10).map((r) => r.name ?? r.first_name ?? r.uuid ?? "?");
+      const logMsg = `contacts: page at offset=${offset}, got ${page.length} rows (total so far: ${all.length + page.length})`;
+      if (onLog) await onLog(logMsg, { offset, pageSize: page.length, totalSoFar: all.length + page.length, head10: preview });
       let shouldStop = false;
       for (const row of page) {
         const at = rowCreatedAt(row);
@@ -115,6 +154,7 @@ export async function fetchContactsIncremental(
       offset += PAGE_SIZE;
       await sleep(DELAY_MS);
     }
+    if (onLog) await onLog(`contacts: fetch complete`, { totalRows: all.length });
     return { data: all, error: null };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -127,8 +167,8 @@ export interface FetchLinkedInMessagesResult {
   error: string | null;
 }
 
-export async function fetchAllLinkedInMessages(): Promise<FetchLinkedInMessagesResult> {
-  return fetchLinkedInMessagesIncremental(null);
+export async function fetchAllLinkedInMessages(credentials?: ApiCredentials, onLog?: FetchLogger): Promise<FetchLinkedInMessagesResult> {
+  return fetchLinkedInMessagesIncremental(null, credentials, onLog);
 }
 
 /**
@@ -136,9 +176,11 @@ export async function fetchAllLinkedInMessages(): Promise<FetchLinkedInMessagesR
  * If sinceCreatedAt is null, fetches all. Returns only rows with created_at > sinceCreatedAt.
  */
 export async function fetchLinkedInMessagesIncremental(
-  sinceCreatedAt: string | null
+  sinceCreatedAt: string | null,
+  credentials?: ApiCredentials,
+  onLog?: FetchLogger
 ): Promise<FetchLinkedInMessagesResult> {
-  const config = getConfig();
+  const config = resolveCredentials(credentials);
   if (!config) return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
   const all: Record<string, unknown>[] = [];
   let offset = 0;
@@ -149,8 +191,14 @@ export async function fetchLinkedInMessagesIncremental(
         data?: Record<string, unknown>[];
         has_more?: boolean;
         total?: number;
-      }>(url, { method: "GET" });
+      }>(url, config.apiKey, { method: "GET" });
       const page = res.data ?? [];
+      const preview = page.slice(0, 10).map((r) => {
+        const text = r.text;
+        return typeof text === "string" ? text.slice(0, 50) : (r.uuid ?? "?");
+      });
+      const logMsg = `linkedin_messages: page at offset=${offset}, got ${page.length} rows (total so far: ${all.length + page.length})`;
+      if (onLog) await onLog(logMsg, { offset, pageSize: page.length, totalSoFar: all.length + page.length, head10: preview });
       let shouldStop = false;
       for (const row of page) {
         const at = rowCreatedAt(row);
@@ -166,6 +214,7 @@ export async function fetchLinkedInMessagesIncremental(
       offset += PAGE_SIZE;
       await sleep(DELAY_MS);
     }
+    if (onLog) await onLog(`linkedin_messages: fetch complete`, { totalRows: all.length });
     return { data: all, error: null };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
@@ -178,8 +227,8 @@ export interface FetchSendersResult {
   error: string | null;
 }
 
-export async function fetchAllSenders(): Promise<FetchSendersResult> {
-  return fetchSendersIncremental(null);
+export async function fetchAllSenders(credentials?: ApiCredentials, onLog?: FetchLogger): Promise<FetchSendersResult> {
+  return fetchSendersIncremental(null, credentials, onLog);
 }
 
 /**
@@ -187,9 +236,11 @@ export async function fetchAllSenders(): Promise<FetchSendersResult> {
  * If sinceCreatedAt is null, fetches all. Returns only rows with created_at > sinceCreatedAt.
  */
 export async function fetchSendersIncremental(
-  sinceCreatedAt: string | null
+  sinceCreatedAt: string | null,
+  credentials?: ApiCredentials,
+  onLog?: FetchLogger
 ): Promise<FetchSendersResult> {
-  const config = getConfig();
+  const config = resolveCredentials(credentials);
   if (!config) return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
   const all: Record<string, unknown>[] = [];
   let offset = 0;
@@ -199,8 +250,14 @@ export async function fetchSendersIncremental(
       const res = await fetchJson<{
         data?: Record<string, unknown>[];
         has_more?: boolean;
-      }>(url, { method: "GET" });
+      }>(url, config.apiKey, { method: "GET" });
       const page = res.data ?? [];
+      const preview = page.slice(0, 10).map((r) => {
+        const name = [r.first_name, r.last_name].filter(Boolean).join(" ");
+        return name || r.uuid || "?";
+      });
+      const logMsg = `senders: page at offset=${offset}, got ${page.length} rows (total so far: ${all.length + page.length})`;
+      if (onLog) await onLog(logMsg, { offset, pageSize: page.length, totalSoFar: all.length + page.length, head10: preview });
       let shouldStop = false;
       for (const row of page) {
         const at = rowCreatedAt(row);
@@ -216,6 +273,7 @@ export async function fetchSendersIncremental(
       offset += PAGE_SIZE;
       await sleep(DELAY_MS);
     }
+    if (onLog) await onLog(`senders: fetch complete`, { totalRows: all.length });
     return { data: all, error: null };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);

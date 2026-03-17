@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import { useUrlSearchParams, useDebounceFn } from "@vueuse/core";
-import type { LatestRows, TableCounts } from "../types";
 import {
   NTabs,
   NTabPane,
@@ -17,12 +16,12 @@ import LinkedinMessagesTable from "./LinkedinMessagesTable.vue";
 import SendersTable from "./SendersTable.vue";
 import ConversationModal from "./ConversationModal.vue";
 
-const props = defineProps<{ latest: LatestRows; counts?: TableCounts }>();
+const props = defineProps<{ projectId: string }>();
 
 const PAGE_SIZES = [10, 25, 50, 100];
 const DEFAULT_PAGE_SIZE = 25;
 
-type TableKey = keyof LatestRows;
+type TableKey = "contacts" | "linkedin_messages" | "senders";
 
 const tabs: { key: TableKey; label: string }[] = [
   { key: "contacts", label: "Contacts" },
@@ -55,10 +54,10 @@ const DEFAULT_VISIBLE_COLUMNS: Record<TableKey, string[]> = {
 
 const STORAGE_KEY_PREFIX = "mcp-toolkit/table-visible-columns";
 
-function getVisibleColumnsFromStorage(table: TableKey): string[] | null {
+function getVisibleColumnsFromStorage(table: string): string[] | null {
   if (typeof localStorage === "undefined") return null;
   try {
-    const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}/${table}`);
+    const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}/${String(table)}`);
     if (raw == null) return null;
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) && parsed.every((x) => typeof x === "string") ? parsed : null;
@@ -67,24 +66,24 @@ function getVisibleColumnsFromStorage(table: TableKey): string[] | null {
   }
 }
 
-function setVisibleColumnsInStorage(table: TableKey, cols: string[]) {
+function setVisibleColumnsInStorage(table: string, cols: string[]) {
   if (typeof localStorage === "undefined") return;
   try {
-    localStorage.setItem(`${STORAGE_KEY_PREFIX}/${table}`, JSON.stringify(cols));
+    localStorage.setItem(`${STORAGE_KEY_PREFIX}/${String(table)}`, JSON.stringify(cols));
   } catch {
     /* ignore */
   }
 }
 
-const activeTab = ref<TableKey>(
-  validTableKeys.includes((params.table as TableKey) ?? "") ? (params.table as TableKey) : "contacts"
+const activeTab = ref<string>(
+  validTableKeys.includes((params.table as TableKey) ?? "") ? (params.table as string) : "contacts"
 );
-const visibleColumnKeysByTable = ref<Partial<Record<TableKey, string[]>>>({});
-const filterStateByTable = ref<Partial<Record<TableKey, DataTableFilterState>>>({});
-const pageByTable = ref<Partial<Record<TableKey, number>>>({});
-const pageSizeByTable = ref<Partial<Record<TableKey, number>>>({});
-const searchByTable = ref<Partial<Record<TableKey, string>>>({});
-const searchInputByTable = ref<Partial<Record<TableKey, string>>>({});
+const visibleColumnKeysByTable = ref<Record<string, string[]>>({});
+const filterStateByTable = ref<Record<string, DataTableFilterState>>({});
+const pageByTable = ref<Record<string, number>>({});
+const pageSizeByTable = ref<Record<string, number>>({});
+const searchByTable = ref<Record<string, string>>({});
+const searchInputByTable = ref<Record<string, string>>({});
 
 const visibleColumnKeys = computed({
   get: () => visibleColumnKeysByTable.value[activeTab.value] ?? [],
@@ -137,8 +136,8 @@ const searchQuery = computed({
 
 function parseUrlState() {
   const table = params.table;
-  if (table && validTableKeys.includes(table as TableKey)) {
-    activeTab.value = table as TableKey;
+  if (table && validTableKeys.includes(String(table) as TableKey)) {
+    activeTab.value = String(table);
   }
   const tab = activeTab.value;
   try {
@@ -153,7 +152,7 @@ function parseUrlState() {
   const nextCols = { ...visibleColumnKeysByTable.value };
   for (const t of validTableKeys) {
     if (nextCols[t] === undefined) {
-      nextCols[t] = getVisibleColumnsFromStorage(t as TableKey) ?? DEFAULT_VISIBLE_COLUMNS[t as TableKey];
+      nextCols[t] = getVisibleColumnsFromStorage(t) ?? DEFAULT_VISIBLE_COLUMNS[t];
     }
   }
   visibleColumnKeysByTable.value = nextCols;
@@ -200,7 +199,7 @@ function parseUrlState() {
 }
 
 function writeUrlState() {
-  params.table = activeTab.value;
+  params.table = String(activeTab.value);
   const cols = visibleColumnKeys.value;
   params.cols = cols.length > 0 ? cols.join(",") : "";
   const f = filterState.value;
@@ -248,11 +247,10 @@ watch(
   [activeTab, visibleColumnKeysByTable, filterStateByTable, pageByTable, pageSizeByTable, searchByTable],
   () => {
     writeUrlState();
-    visibleColumnKeysByTable.value &&
-      (validTableKeys as TableKey[]).forEach((t) => {
-        const cols = visibleColumnKeysByTable.value[t];
-        if (cols !== undefined) setVisibleColumnsInStorage(t, cols);
-      });
+    validTableKeys.forEach((t) => {
+      const cols = visibleColumnKeysByTable.value[t];
+      if (cols !== undefined) setVisibleColumnsInStorage(t, cols);
+    });
   },
   { deep: true }
 );
@@ -279,11 +277,13 @@ async function fetchTableData() {
   tableDataLoading.value = true;
   try {
     const filters = filtersToApiFormat(filterState.value);
+    // Always scope to current project
+    if (props.projectId) filters.project_id = [props.projectId];
     const page = currentPage.value;
     const pageSize = currentPageSize.value;
     const offset = (page - 1) * pageSize;
     const q = new URLSearchParams({
-      table: activeTab.value,
+      table: String(activeTab.value),
       limit: String(pageSize),
       offset: String(offset),
     });
@@ -317,6 +317,18 @@ watch(
   { immediate: true, deep: true }
 );
 
+// Reset pagination and refetch when project changes
+watch(
+  () => props.projectId,
+  () => {
+    pageByTable.value = {};
+    searchByTable.value = {};
+    filterStateByTable.value = {};
+    tableData.value = [];
+    fetchTableData();
+  }
+);
+
 function onUpdatePage(page: number) {
   currentPage.value = page;
 }
@@ -330,10 +342,7 @@ function onUpdateFilters(filters: DataTableFilterState) {
 }
 
 // --- Column visibility (for Columns popover) ---
-const currentRows = computed(() => {
-  if (tableData.value.length > 0) return tableData.value;
-  return (props.latest[activeTab.value] ?? []) as Record<string, unknown>[];
-});
+const currentRows = computed(() => tableData.value);
 const allKeys = computed(() => {
   const set = new Set<string>();
   currentRows.value.forEach((r) => Object.keys(r).forEach((k) => set.add(k)));
@@ -602,134 +611,65 @@ function onFindConversationBySender(row: Record<string, unknown>) {
 </script>
 
 <template>
-  <div class="latest-tables">
-    <div class="latest-header">
-      <h3 class="latest-title">Latest rows (newest first)</h3>
-    </div>
-    <NTabs v-model:value="activeTab" type="line" size="medium">
-      <template #suffix>
-        <NSpace align="center" :size="12">
-        <NInput
-          v-model:value="searchQuery"
-          type="text"
-          placeholder="Search…"
-          clearable
-          size="small"
-          style="width: 200px"
-        />
-        <NPopover trigger="click" placement="bottom-end">
-          <template #trigger>
-            <NButton quaternary size="small">Columns</NButton>
-          </template>
-        <div class="columns-popover">
-          <NButton quaternary size="tiny" @click="setAllColumnsVisible">Show all</NButton>
-          <NSpace vertical :size="4" style="margin-top: 8px">
-            <NCheckbox
-              v-for="key in allKeys"
-              :key="key"
-              :checked="effectiveVisibleKeys.includes(key)"
-              @update:checked="(v: boolean) => toggleColumn(key, v)"
-            >
-              {{ key }}
-            </NCheckbox>
+  <NCard>
+    <div class="latest-tables">
+      <NTabs v-model:value="activeTab" type="line" size="medium">
+        <template #suffix>
+          <NSpace align="center" :size="12">
+            <NInput v-model:value="searchQuery" type="text" placeholder="Search…" clearable size="small"
+              style="width: 200px" />
+            <NPopover trigger="click" placement="bottom-end">
+              <template #trigger>
+                <NButton quaternary size="small">Columns</NButton>
+              </template>
+              <div class="columns-popover">
+                <NButton quaternary size="tiny" @click="setAllColumnsVisible">Show all</NButton>
+                <NSpace vertical :size="4" style="margin-top: 8px">
+                  <NCheckbox v-for="key in allKeys" :key="key" :checked="effectiveVisibleKeys.includes(key)"
+                    @update:checked="(v: boolean) => toggleColumn(key, v)">
+                    {{ key }}
+                  </NCheckbox>
+                </NSpace>
+              </div>
+            </NPopover>
           </NSpace>
-        </div>
-      </NPopover>
-      </NSpace>
-       </template>
-      <NTabPane
-        v-for="t in tabs"
-        :key="t.key"
-        :name="t.key"
-        :tab="`${t.label} (${props.counts?.[t.key] ?? '—'})`"
-      >
-        <ContactsTable
-          v-if="activeTab === 'contacts'"
-          :data="tableData"
-          :loading="tableDataLoading"
-          :error="tableDataError"
-          :filter-state="filterState"
-          :visible-column-keys="visibleColumnKeys"
-          :search-term="searchByTable.contacts ?? ''"
-          :total-item-count="totalItemCount"
-          :page="currentPage"
-          :page-size="currentPageSize"
-          :page-sizes="PAGE_SIZES"
-          @update:filters="onUpdateFilters"
-          @update:page="onUpdatePage"
-          @update:page-size="onUpdatePageSize"
-          @action="onFindConversationByContact"
-          @go-to-messages="onGoToLinkedinMessagesFromContact"
-        />
-        <LinkedinMessagesTable
-          v-else-if="activeTab === 'linkedin_messages'"
-          :data="tableData"
-          :loading="tableDataLoading"
-          :error="tableDataError"
-          :filter-state="filterState"
-          :visible-column-keys="visibleColumnKeys"
-          :search-term="searchByTable.linkedin_messages ?? ''"
-          :total-item-count="totalItemCount"
-          :page="currentPage"
-          :page-size="currentPageSize"
-          :page-sizes="PAGE_SIZES"
-          @update:filters="onUpdateFilters"
-          @update:page="onUpdatePage"
-          @update:page-size="onUpdatePageSize"
-          @action="onFindConversationByMessage"
-          @go-to-contact="onGoToContact"
-          @go-to-sender="onGoToSender"
-        />
-        <SendersTable
-          v-else-if="activeTab === 'senders'"
-          :data="tableData"
-          :loading="tableDataLoading"
-          :error="tableDataError"
-          :filter-state="filterState"
-          :visible-column-keys="visibleColumnKeys"
-          :search-term="searchByTable.senders ?? ''"
-          :total-item-count="totalItemCount"
-          :page="currentPage"
-          :page-size="currentPageSize"
-          :page-sizes="PAGE_SIZES"
-          @update:filters="onUpdateFilters"
-          @update:page="onUpdatePage"
-          @update:page-size="onUpdatePageSize"
-          @action="onFindConversationBySender"
-          @go-to-messages="onGoToLinkedinMessagesFromSender"
-        />
-      </NTabPane>
-    </NTabs>
+        </template>
+        <NTabPane v-for="t in tabs" :key="t.key" :name="t.key"
+          :tab="t.label">
+          <ContactsTable v-if="activeTab === 'contacts'" :data="tableData" :loading="tableDataLoading"
+            :error="tableDataError" :filter-state="filterState" :visible-column-keys="visibleColumnKeys"
+            :search-term="searchByTable.contacts ?? ''" :total-item-count="totalItemCount" :page="currentPage"
+            :page-size="currentPageSize" :page-sizes="PAGE_SIZES" @update:filters="onUpdateFilters"
+            @update:page="onUpdatePage" @update:page-size="onUpdatePageSize" @action="onFindConversationByContact"
+            @go-to-messages="onGoToLinkedinMessagesFromContact" />
+          <LinkedinMessagesTable v-else-if="activeTab === 'linkedin_messages'" :data="tableData"
+            :loading="tableDataLoading" :error="tableDataError" :filter-state="filterState"
+            :visible-column-keys="visibleColumnKeys" :search-term="searchByTable.linkedin_messages ?? ''"
+            :total-item-count="totalItemCount" :page="currentPage" :page-size="currentPageSize" :page-sizes="PAGE_SIZES"
+            @update:filters="onUpdateFilters" @update:page="onUpdatePage" @update:page-size="onUpdatePageSize"
+            @action="onFindConversationByMessage" @go-to-contact="onGoToContact" @go-to-sender="onGoToSender" />
+          <SendersTable v-else-if="activeTab === 'senders'" :data="tableData" :loading="tableDataLoading"
+            :error="tableDataError" :filter-state="filterState" :visible-column-keys="visibleColumnKeys"
+            :search-term="searchByTable.senders ?? ''" :total-item-count="totalItemCount" :page="currentPage"
+            :page-size="currentPageSize" :page-sizes="PAGE_SIZES" @update:filters="onUpdateFilters"
+            @update:page="onUpdatePage" @update:page-size="onUpdatePageSize" @action="onFindConversationBySender"
+            @go-to-messages="onGoToLinkedinMessagesFromSender" />
+        </NTabPane>
+      </NTabs>
 
-    <ConversationModal
-      :show="conversationModalOpen"
-      :loading="conversationLoading"
-      :error="conversationError"
-      :contact="conversationData.contact"
-      :messages="conversationData.messages"
-      :cursor-workflow-options="cursorWorkflowOptions"
-      @update:show="conversationModalOpen = $event"
-      @open-in-cursor="openInCursor"
-    />
-  </div>
+      <ConversationModal :show="conversationModalOpen" :loading="conversationLoading" :error="conversationError"
+        :contact="conversationData.contact" :messages="conversationData.messages"
+        :cursor-workflow-options="cursorWorkflowOptions" @update:show="conversationModalOpen = $event"
+        @open-in-cursor="openInCursor" />
+    </div>
+  </NCard>
 </template>
 
 <style scoped>
 .latest-tables {
   margin-top: 0.5rem;
 }
-.latest-header {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
-}
-.latest-title {
-  font-size: 0.95rem;
-  font-weight: 600;
-  margin: 0;
-  opacity: 0.85;
-}
+
 .columns-popover {
   padding: 0.25rem 0;
   min-width: 180px;
