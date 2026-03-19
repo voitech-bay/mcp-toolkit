@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, h } from "vue";
+import { computed, h } from "vue";
 import { useDark } from "@vueuse/core";
 import { useRoute, useRouter } from "vue-router";
 import { NConfigProvider, NButton, NSpace, NSelect, NMessageProvider, NCard } from "naive-ui";
 import type { SelectOption } from "naive-ui";
 import { darkTheme, lightTheme } from "naive-ui";
-import { MoonIcon, SunIcon, LayoutDashboardIcon, TableIcon, RefreshCwIcon } from "lucide-vue-next";
+import { MoonIcon, SunIcon, LayoutDashboardIcon, TableIcon, RefreshCwIcon, BuildingIcon, LightbulbIcon, NetworkIcon, UsersIcon, BookmarkIcon, MessageCircleIcon } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 
 const isDark = useDark();
@@ -18,6 +18,12 @@ const router = useRouter();
 const isTables = computed(() => route.path === "/tables");
 const isHome = computed(() => route.path === "/");
 const isSync = computed(() => route.path === "/sync");
+const isCompanies = computed(() => route.path === "/companies");
+const isContacts = computed(() => route.path === "/contacts");
+const isHypotheses = computed(() => route.path === "/hypotheses");
+const isContext = computed(() => route.path === "/context");
+const isContextSnapshots = computed(() => route.path === "/context-snapshots");
+const isConversations = computed(() => route.path === "/conversations");
 
 const projectStore = useProjectStore();
 
@@ -47,7 +53,7 @@ function toggleTheme() {
   isDark.value = !isDark.value;
 }
 
-onMounted(() => projectStore.loadProjects());
+projectStore.loadProjects()
 </script>
 
 <template>
@@ -81,6 +87,30 @@ onMounted(() => projectStore.loadProjects());
                 <NButton quaternary :type="isSync ? 'primary' : undefined" size="small" @click="router.push('/sync')">
                   <RefreshCwIcon :size="14" style="margin-right: 4px" />
                   Sync
+                </NButton>
+                <NButton quaternary :type="isCompanies ? 'primary' : undefined" size="small" @click="router.push('/companies')">
+                  <BuildingIcon :size="14" style="margin-right: 4px" />
+                  Companies
+                </NButton>
+                <NButton quaternary :type="isContacts ? 'primary' : undefined" size="small" @click="router.push('/contacts')">
+                  <UsersIcon :size="14" style="margin-right: 4px" />
+                  Contacts
+                </NButton>
+                <NButton quaternary :type="isHypotheses ? 'primary' : undefined" size="small" @click="router.push('/hypotheses')">
+                  <LightbulbIcon :size="14" style="margin-right: 4px" />
+                  Hypotheses
+                </NButton>
+                <NButton quaternary :type="isContext ? 'primary' : undefined" size="small" @click="router.push('/context')">
+                  <NetworkIcon :size="14" style="margin-right: 4px" />
+                  Context
+                </NButton>
+                <NButton quaternary :type="isContextSnapshots ? 'primary' : undefined" size="small" @click="router.push('/context-snapshots')">
+                  <BookmarkIcon :size="14" style="margin-right: 4px" />
+                  Saved
+                </NButton>
+                <NButton quaternary :type="isConversations ? 'primary' : undefined" size="small" @click="router.push('/conversations')">
+                  <MessageCircleIcon :size="14" style="margin-right: 4px" />
+                  Conversations
                 </NButton>
                 <NButton quaternary @click="toggleTheme()" size="small">
                   <SunIcon :size="14" v-if="isDark" />
@@ -143,7 +173,6 @@ onMounted(() => projectStore.loadProjects());
   flex: 1;
   max-width: 1600px;
   margin: 0 auto;
-  padding: 2rem 1.5rem;
   width: 100%;
 }
 </style>

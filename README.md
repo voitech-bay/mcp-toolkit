@@ -10,8 +10,8 @@ Single MCP server merging **Supabase messages** and **Company enrichment** tools
 - **get_conversation_by_contact_name** – Find contact by name, return that contact + full LinkedIn conversation (by lead_uuid)
 - **get_conversation_by_sender** – All LinkedIn messages (all conversations) for a sender (by sender_profile_uuid)
 - **get_conversation_by_message** – Full conversation thread by message id or by conversation UUID
-- **get_company_root_context** – Get root context for a company by name (table CompaniesContext)
-- **set_company_root_context** – Create or update root context for a company by name (table CompaniesContext)
+- **get_company_root_context** – Get root context for a company by company_id (table CompaniesContext)
+- **set_company_root_context** – Create or update root context for a company by company_id (table CompaniesContext)
 - **search_companies** – Apollo organization search
 - **search_people** – Apollo people search
 - **search_lookalike_companies** – Ocean.io lookalike companies
@@ -61,20 +61,20 @@ Optional: `"messageLimit": 500`.
 **4. Company root context (get)**
 
 ```json
-{ "name": "get_company_root_context", "arguments": { "companyName": "Acme Inc" } }
+{ "name": "get_company_root_context", "arguments": { "companyId": "550e8400-e29b-41d4-a716-446655440000" } }
 ```
 
-Returns the row (id, name, rootContext, created_at) or indicates not found.
+Returns the row (id, company_id, rootContext, created_at) or indicates not found. `companyId` is the company UUID (companies.id).
 
 **5. Company root context (set)**
 
-Create or update by company name; if the name exists the row is updated, otherwise a new row is inserted:
+Create or update by company_id; if a row exists it is updated, otherwise a new row is inserted:
 
 ```json
-{ "name": "set_company_root_context", "arguments": { "companyName": "Acme Inc", "rootContext": "Your context text here..." } }
+{ "name": "set_company_root_context", "arguments": { "companyId": "550e8400-e29b-41d4-a716-446655440000", "rootContext": "Your context text here..." } }
 ```
 
-Use `"rootContext": null` to clear. Requires Supabase table `CompaniesContext` (columns: id, created_at, name, rootContext).
+Use `"rootContext": null` to clear. Requires Supabase table `CompaniesContext` (columns: id, created_at, rootContext, company_id).
 
 ### Deeplinks (app URLs for Cursor / sharing)
 
@@ -105,7 +105,7 @@ cp .env.example .env   # fill in keys
   `npm run dev:frontend` — Vite dev server with hot reload. Proxies `/api` to `http://localhost:3001` by default; run `npm run dev:api` in another terminal for the local API (or `npm run dev:http` for MCP at 3000). After `npm run build`, the app is in `public/` (built from `frontend/`).
 
 - **Local API (mirrors Vercel routes):**  
-  `npm run dev:api` — HTTP server at `http://localhost:3001` with GET/POST `/api/supabase-state`, `/api/supabase-table-query`, `/api/conversation`, **GET/POST `/api/company-context`** (company context by name: GET `?name=...`, POST body `{ "name", "rootContext" }`).
+  `npm run dev:api` — HTTP server at `http://localhost:3001` with GET/POST `/api/supabase-state`, `/api/supabase-table-query`, `/api/conversation`, **GET/POST `/api/company-context`** (company context by id: GET `?company_id=...`, POST body `{ "company_id", "rootContext" }`). **GET/POST `/api/contact-context`** (contact context: GET `?contact_id=...`, POST body `{ "contact_id", "rootContext" }`).
 
 ## Deploy to Vercel
 

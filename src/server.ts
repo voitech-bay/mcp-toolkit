@@ -10,6 +10,8 @@ import { registerGetConversationByMessageTool } from "./tools/get-conversation-b
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
 import { registerGetCompanyRootContextTool } from "./tools/get-company-root-context.js";
 import { registerSetCompanyRootContextTool } from "./tools/set-company-root-context.js";
+import { registerBuildReplyContextPromptTool } from "./tools/build-reply-context-prompt.js";
+import { registerGetReplyContextSnapshotTool } from "./tools/get-reply-context-snapshot.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -23,6 +25,8 @@ function createMcpServer(): McpServer {
   // registerGetConversationBySenderTool(server);
   // registerGetConversationByMessageTool(server);
   registerCompanyEnrichmentTools(server);
+  registerBuildReplyContextPromptTool(server);
+  registerGetReplyContextSnapshotTool(server);
   // registerGetCompanyRootContextTool(server);
   // registerSetCompanyRootContextTool(server);
   return server;

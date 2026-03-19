@@ -128,7 +128,6 @@ async function saveCredentials() {
     if (!r.ok) throw new Error(data.error ?? "Failed to save credentials");
     message.success("Credentials saved");
     credApiKey.value = "";
-    await projectStore.loadProjects();
     await loadPreflight();
   } catch (e) {
     message.error(e instanceof Error ? e.message : "Failed to save credentials");
@@ -237,7 +236,6 @@ watch(selectedProjectId, async (id) => {
 });
 
 onMounted(async () => {
-  if (projectStore.projects.length === 0) await projectStore.loadProjects();
   if (selectedProjectId.value) {
     credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
     await Promise.all([loadPreflight(), loadHistory()]);

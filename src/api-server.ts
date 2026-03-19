@@ -14,11 +14,33 @@ import {
   handleConversation,
   handleGetCompanyContext,
   handleSetCompanyContext,
+  handleGetCompanyContextCounts,
+  handleGetContactContext,
+  handleSetContactContext,
+  handleGetContactContextCounts,
   handleGetProjects,
   handleUpdateProjectCredentials,
   handleSyncPreflight,
   handleSyncStatus,
   handleSyncHistory,
+  handleGetAllCompanies,
+  handleAddCompaniesToProject,
+  handleGetProjectCompanies,
+  handleGetHypotheses,
+  handleCreateHypothesis,
+  handleUpdateHypothesis,
+  handleDeleteHypothesis,
+  handleGetHypothesisTargets,
+  handleAddHypothesisTargets,
+  handleRemoveHypothesisTargets,
+  handleBuildContext,
+  handleGetContextSnapshots,
+  handleGetConversationsList,
+  handleGetCompanyHypotheses,
+  handleGetContactsByCompany,
+  handleCreateCompany,
+  handlePatchContactCompany,
+  handleGetCompaniesByIds,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 
@@ -31,7 +53,7 @@ const server = createServer(async (req, res) => {
   // Allow frontend dev server (and any origin when testing locally)
   res.setHeader("Access-Control-Allow-Origin", "*");
   if (req.method === "OPTIONS") {
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     res.writeHead(204);
     res.end();
@@ -42,11 +64,77 @@ const server = createServer(async (req, res) => {
   const projectCredentialsMatch = pathname.match(
     /^\/api\/projects\/([^/]+)\/credentials$/
   );
+  // Match /api/hypotheses/:id/targets
+  const hypothesisTargetsMatch = pathname.match(
+    /^\/api\/hypotheses\/([^/]+)\/targets$/
+  );
+  // Match /api/hypotheses/:id  (no trailing segment)
+  const hypothesisIdMatch = !hypothesisTargetsMatch && pathname.match(
+    /^\/api\/hypotheses\/([^/]+)$/
+  );
+  // Match /api/companies/:id/hypotheses
+  const companyHypothesesMatch = pathname.match(
+    /^\/api\/companies\/([^/]+)\/hypotheses$/
+  );
+  // Match /api/contacts/:id — exclude known sub-paths like "by-company"
+  const contactIdMatch =
+    pathname !== "/api/contacts/by-company" &&
+    pathname.match(/^\/api\/contacts\/([^/]+)$/);
 
   try {
     if (projectCredentialsMatch) {
       const projectId = decodeURIComponent(projectCredentialsMatch[1]);
       await handleUpdateProjectCredentials(req, res, projectId);
+      return;
+    }
+
+    if (hypothesisTargetsMatch) {
+      const hypothesisId = decodeURIComponent(hypothesisTargetsMatch[1]);
+      if (req.method === "GET") {
+        await handleGetHypothesisTargets(req, res, hypothesisId);
+      } else if (req.method === "POST") {
+        await handleAddHypothesisTargets(req, res, hypothesisId);
+      } else if (req.method === "DELETE") {
+        await handleRemoveHypothesisTargets(req, res, hypothesisId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (hypothesisIdMatch) {
+      const hypothesisId = decodeURIComponent(hypothesisIdMatch[1]);
+      if (req.method === "PUT") {
+        await handleUpdateHypothesis(req, res, hypothesisId);
+      } else if (req.method === "DELETE") {
+        await handleDeleteHypothesis(req, res, hypothesisId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (companyHypothesesMatch) {
+      const companyId = decodeURIComponent(companyHypothesesMatch[1]);
+      if (req.method === "GET") {
+        await handleGetCompanyHypotheses(req, res, companyId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (contactIdMatch) {
+      const contactId = decodeURIComponent(contactIdMatch[1]);
+      if (req.method === "PATCH") {
+        await handlePatchContactCompany(req, res, contactId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
       return;
     }
 
@@ -68,11 +156,53 @@ const server = createServer(async (req, res) => {
       case "/api/conversation":
         await handleConversation(req, res);
         return;
+      case "/api/conversations":
+        if (req.method === "GET") {
+          await handleGetConversationsList(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contacts/by-company":
+        if (req.method === "GET") {
+          await handleGetContactsByCompany(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/company-context":
         if (req.method === "GET") {
           await handleGetCompanyContext(req, res);
         } else if (req.method === "POST" || req.method === "PUT") {
           await handleSetCompanyContext(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/company-context-counts":
+        if (req.method === "GET") {
+          await handleGetCompanyContextCounts(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contact-context":
+        if (req.method === "GET") {
+          await handleGetContactContext(req, res);
+        } else if (req.method === "POST" || req.method === "PUT") {
+          await handleSetContactContext(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contact-context-counts":
+        if (req.method === "GET") {
+          await handleGetContactContextCounts(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -89,6 +219,55 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/sync-history":
         await handleSyncHistory(req, res);
+        return;
+      case "/api/companies":
+        if (req.method === "GET") {
+          await handleGetAllCompanies(req, res);
+        } else if (req.method === "POST") {
+          await handleCreateCompany(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/companies/by-ids":
+        await handleGetCompaniesByIds(req, res);
+        return;
+      case "/api/project-companies":
+        if (req.method === "GET") {
+          await handleGetProjectCompanies(req, res);
+        } else if (req.method === "POST") {
+          await handleAddCompaniesToProject(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/hypotheses":
+        if (req.method === "GET") {
+          await handleGetHypotheses(req, res);
+        } else if (req.method === "POST") {
+          await handleCreateHypothesis(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/build-context":
+        if (req.method === "POST") {
+          await handleBuildContext(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/context-snapshots":
+        if (req.method === "GET") {
+          await handleGetContextSnapshots(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
         return;
       default:
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -154,10 +333,24 @@ server.listen(PORT, () => {
   console.log("  GET  /api/conversation");
   console.log("  GET  /api/company-context");
   console.log("  POST /api/company-context");
+  console.log("  GET  /api/company-context-counts?company_ids=...");
+  console.log("  GET  /api/contact-context");
+  console.log("  POST /api/contact-context");
+  console.log("  GET  /api/contact-context-counts?contact_ids=...");
   console.log("  GET  /api/projects");
   console.log("  PUT  /api/projects/:id/credentials");
   console.log("  GET  /api/sync-preflight?projectId=<id>");
   console.log("  GET  /api/sync-status");
   console.log("  GET  /api/sync-history");
+  console.log("  GET  /api/project-companies?projectId=<id>");
+  console.log("  GET  /api/hypotheses?projectId=<id>");
+  console.log("  POST /api/hypotheses");
+  console.log("  PUT  /api/hypotheses/:id");
+  console.log("  DELETE /api/hypotheses/:id");
+  console.log("  GET  /api/hypotheses/:id/targets");
+  console.log("  POST /api/hypotheses/:id/targets");
+  console.log("  DELETE /api/hypotheses/:id/targets");
+  console.log("  POST /api/build-context");
+  console.log("  GET  /api/context-snapshots?projectId=<id>");
   console.log("  WS   /api/sync-ws?runId=<id>");
 });

@@ -8,6 +8,7 @@ export const SENDERS_TABLE = "Senders";
 export const CONTACTS_TABLE = "Contacts";
 /** Core companies table; domain is unique. Contacts link via company_id. */
 export const COMPANIES_TABLE = "companies";
+export const CONTEXT_SNAPSHOTS_TABLE = "ContextSnapshots";
 
 // --- Projects (table: Projects) ---
 
@@ -634,69 +635,231 @@ export async function getConversation(
 }
 
 // --- CompaniesContext (table: CompaniesContext) ---
+// Table: id, created_at, rootContext, company_id (FK to companies.id).
 
 export const COMPANIES_CONTEXT_TABLE = "CompaniesContext";
 
 export interface CompanyContextRow {
   id: string;
   created_at: string;
-  name: string | null;
   rootContext: string | null;
+  company_id: string | null;
 }
 
 /**
- * Get company context by name (case-sensitive exact match).
+ * List company context entries by company_id.
  */
-export async function getCompanyContextByName(
+export async function listCompanyContextsByCompanyId(
   client: SupabaseClient,
-  companyName: string
-): Promise<{ data: CompanyContextRow | null; error: string | null }> {
-  const trimmed = companyName?.trim();
-  if (!trimmed) {
-    return { data: null, error: "companyName is required." };
-  }
+  companyId: string
+): Promise<{ data: CompanyContextRow[]; error: string | null }> {
+  const id = companyId?.trim();
+  if (!id) return { data: [], error: "company_id is required." };
   const { data, error } = await client
     .from(COMPANIES_CONTEXT_TABLE)
     .select("*")
-    .eq("name", trimmed)
-    .limit(1)
-    .maybeSingle();
-  if (error) return { data: null, error: error.message };
-  return { data: data as CompanyContextRow | null, error: null };
+    .eq("company_id", id)
+    .order("created_at", { ascending: false });
+  if (error) return { data: [], error: error.message };
+  return { data: (data as CompanyContextRow[] | null) ?? [], error: null };
 }
 
 /**
- * Set root context for a company. If a row with the given name exists, update it;
- * otherwise insert a new row.
+ * Get latest company context entry by company_id.
+ */
+export async function getCompanyContextByCompanyId(
+  client: SupabaseClient,
+  companyId: string
+): Promise<{ data: CompanyContextRow | null; error: string | null }> {
+  const list = await listCompanyContextsByCompanyId(client, companyId);
+  if (list.error) return { data: null, error: list.error };
+  return { data: list.data[0] ?? null, error: null };
+}
+
+/**
+ * Add a new company context entry row. company_id is required.
+ */
+export async function addCompanyContextEntry(
+  client: SupabaseClient,
+  companyId: string,
+  rootContext: string | null
+): Promise<{ data: CompanyContextRow | null; error: string | null }> {
+  const id = companyId?.trim();
+  if (!id) return { data: null, error: "company_id is required." };
+  const payload = { company_id: id, rootContext: rootContext ?? null };
+  const { data, error } = await client
+    .from(COMPANIES_CONTEXT_TABLE)
+    .insert(payload)
+    .select()
+    .single();
+  if (error) return { data: null, error: error.message };
+  return { data: data as CompanyContextRow, error: null };
+}
+
+/**
+ * Set root context for a company: update latest row if present, otherwise insert.
+ * Prefer addCompanyContextEntry for multi-context.
  */
 export async function setCompanyRootContext(
   client: SupabaseClient,
-  companyName: string,
+  companyId: string,
   rootContext: string | null
 ): Promise<{ data: CompanyContextRow | null; error: string | null }> {
-  const trimmed = companyName?.trim();
-  if (!trimmed) {
-    return { data: null, error: "companyName is required." };
-  }
-  const existing = await getCompanyContextByName(client, trimmed);
-  if (existing.error) return { data: null, error: existing.error };
-  if (existing.data) {
+  const id = companyId?.trim();
+  if (!id) return { data: null, error: "company_id is required." };
+  const list = await listCompanyContextsByCompanyId(client, id);
+  if (list.error) return { data: null, error: list.error };
+  const latest = list.data[0];
+  if (latest?.id) {
     const { data, error } = await client
       .from(COMPANIES_CONTEXT_TABLE)
       .update({ rootContext: rootContext ?? null })
-      .eq("id", existing.data.id)
+      .eq("id", latest.id)
       .select()
       .single();
     if (error) return { data: null, error: error.message };
     return { data: data as CompanyContextRow, error: null };
   }
+  return await addCompanyContextEntry(client, id, rootContext);
+}
+
+/**
+ * Get context counts for many companies in one query. Returns Record<company_id, count>.
+ * IDs not present in the table get count 0.
+ */
+export async function getCompanyContextCounts(
+  client: SupabaseClient,
+  companyIds: string[]
+): Promise<{ data: Record<string, number>; error: string | null }> {
+  const ids = companyIds.map((id) => id?.trim()).filter(Boolean);
+  const result: Record<string, number> = Object.fromEntries(ids.map((id) => [id, 0]));
+  if (ids.length === 0) return { data: result, error: null };
   const { data, error } = await client
     .from(COMPANIES_CONTEXT_TABLE)
-    .insert({ name: trimmed, rootContext: rootContext ?? null })
+    .select("company_id")
+    .in("company_id", ids);
+  if (error) return { data: result, error: error.message };
+  const rows = (data as { company_id: string | null }[] | null) ?? [];
+  for (const row of rows) {
+    if (row.company_id != null && row.company_id in result) {
+      result[row.company_id] += 1;
+    }
+  }
+  return { data: result, error: null };
+}
+
+// --- ContactsContext (table: ContactsContext) ---
+// Table: id, created_at, rootContext, contact_id (FK to Contacts.uuid).
+
+export const CONTACTS_CONTEXT_TABLE = "ContactsContext";
+
+export interface ContactContextRow {
+  id: string;
+  created_at: string;
+  rootContext: string | null;
+  contact_id: string | null;
+}
+
+/**
+ * List contact context entries by contact_id (Contacts.uuid).
+ */
+export async function listContactContextsByContactId(
+  client: SupabaseClient,
+  contactId: string
+): Promise<{ data: ContactContextRow[]; error: string | null }> {
+  const id = contactId?.trim();
+  if (!id) return { data: [], error: "contact_id is required." };
+  const { data, error } = await client
+    .from(CONTACTS_CONTEXT_TABLE)
+    .select("*")
+    .eq("contact_id", id)
+    .order("created_at", { ascending: false });
+  if (error) return { data: [], error: error.message };
+  return { data: (data as ContactContextRow[] | null) ?? [], error: null };
+}
+
+/**
+ * Get latest contact context entry by contact_id.
+ */
+export async function getContactContextByContactId(
+  client: SupabaseClient,
+  contactId: string
+): Promise<{ data: ContactContextRow | null; error: string | null }> {
+  const list = await listContactContextsByContactId(client, contactId);
+  if (list.error) return { data: null, error: list.error };
+  return { data: list.data[0] ?? null, error: null };
+}
+
+/**
+ * Add a new contact context entry row. contact_id is required.
+ */
+export async function addContactContextEntry(
+  client: SupabaseClient,
+  contactId: string,
+  rootContext: string | null
+): Promise<{ data: ContactContextRow | null; error: string | null }> {
+  const id = contactId?.trim();
+  if (!id) return { data: null, error: "contact_id is required." };
+  const payload = { contact_id: id, rootContext: rootContext ?? null };
+  const { data, error } = await client
+    .from(CONTACTS_CONTEXT_TABLE)
+    .insert(payload)
     .select()
     .single();
   if (error) return { data: null, error: error.message };
-  return { data: data as CompanyContextRow, error: null };
+  return { data: data as ContactContextRow, error: null };
+}
+
+/**
+ * Set root context for a contact: update latest row if present, otherwise insert.
+ * Prefer addContactContextEntry for multi-context.
+ */
+export async function setContactRootContext(
+  client: SupabaseClient,
+  contactId: string,
+  rootContext: string | null
+): Promise<{ data: ContactContextRow | null; error: string | null }> {
+  const id = contactId?.trim();
+  if (!id) return { data: null, error: "contact_id is required." };
+  const list = await listContactContextsByContactId(client, id);
+  if (list.error) return { data: null, error: list.error };
+  const latest = list.data[0];
+  if (latest?.id) {
+    const { data, error } = await client
+      .from(CONTACTS_CONTEXT_TABLE)
+      .update({ rootContext: rootContext ?? null })
+      .eq("id", latest.id)
+      .select()
+      .single();
+    if (error) return { data: null, error: error.message };
+    return { data: data as ContactContextRow, error: null };
+  }
+  return await addContactContextEntry(client, id, rootContext);
+}
+
+/**
+ * Get context counts for many contacts in one query. Returns Record<contact_id, count>.
+ * IDs not present in the table get count 0.
+ */
+export async function getContactContextCounts(
+  client: SupabaseClient,
+  contactIds: string[]
+): Promise<{ data: Record<string, number>; error: string | null }> {
+  const ids = contactIds.map((id) => id?.trim()).filter(Boolean);
+  const result: Record<string, number> = Object.fromEntries(ids.map((id) => [id, 0]));
+  if (ids.length === 0) return { data: result, error: null };
+  const { data, error } = await client
+    .from(CONTACTS_CONTEXT_TABLE)
+    .select("contact_id")
+    .in("contact_id", ids);
+  if (error) return { data: result, error: error.message };
+  const rows = (data as { contact_id: string | null }[] | null) ?? [];
+  for (const row of rows) {
+    if (row.contact_id != null && row.contact_id in result) {
+      result[row.contact_id] += 1;
+    }
+  }
+  return { data: result, error: null };
 }
 
 // --- Senders (table: Senders) ---
@@ -975,6 +1138,495 @@ export async function getLatestCreatedAt(
   return { latest, error: null };
 }
 
+// --- All companies (global browse, with per-project membership flag) ---
+
+export interface AllCompanyRow {
+  id: string;
+  name: string | null;
+  domain: string;
+  linkedin_url: string | null;
+  created_at: string;
+  in_project: boolean;
+  project_company_id: string | null;
+}
+
+/**
+ * Create a new company row. Returns the created company id.
+ */
+export async function createCompany(
+  client: SupabaseClient,
+  payload: { name: string; domain?: string | null }
+): Promise<{ id: string | null; error: string | null }> {
+  const { data, error } = await client
+    .from(COMPANIES_TABLE)
+    .insert({ name: payload.name, domain: payload.domain ?? null })
+    .select("id")
+    .single();
+  if (error) return { id: null, error: error.message };
+  return { id: (data as Record<string, unknown>).id as string, error: null };
+}
+
+/**
+ * Fetch minimal company info (id, name, domain) for a given list of company UUIDs.
+ * Useful for resolving names of companies referenced by contacts without loading all companies.
+ */
+export async function getCompaniesByIds(
+  client: SupabaseClient,
+  ids: string[]
+): Promise<{ data: Array<{ id: string; name: string | null; domain: string | null }>; error: string | null }> {
+  const unique = [...new Set(ids)].filter(Boolean);
+  if (unique.length === 0) return { data: [], error: null };
+  const { data, error } = await client
+    .from(COMPANIES_TABLE)
+    .select("id, name, domain")
+    .in("id", unique);
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as Array<{ id: string; name: string | null; domain: string | null }>, error: null };
+}
+
+/** LinkedIn-style profile fields from Contacts (for reply prompts). */
+export interface ContactProfileForPromptRow {
+  uuid: string;
+  headline: string | null;
+  about: string | null;
+  experience: unknown;
+  posts: unknown;
+}
+
+/**
+ * Batch-load profile fields used when building reply context (headline, about, experience, posts).
+ * `experience` and `posts` are typically JSON/array payloads from enrichment sync.
+ */
+export async function getContactsProfileForPromptByUuids(
+  client: SupabaseClient,
+  uuids: string[]
+): Promise<{ data: ContactProfileForPromptRow[]; error: string | null }> {
+  const unique = [...new Set(uuids)].filter(Boolean);
+  if (unique.length === 0) return { data: [], error: null };
+  const { data, error } = await client
+    .from(CONTACTS_TABLE)
+    .select("uuid, headline, about, experience, posts")
+    .in("uuid", unique);
+  if (error) return { data: [], error: error.message };
+  return {
+    data: (data ?? []) as ContactProfileForPromptRow[],
+    error: null,
+  };
+}
+
+/**
+ * Set company_id (and optionally company_name) on a contact row.
+ */
+export async function updateContactCompany(
+  client: SupabaseClient,
+  contactId: string,
+  companyId: string,
+  companyName: string | null
+): Promise<{ error: string | null }> {
+  const update: Record<string, unknown> = { company_id: companyId };
+  if (companyName != null) update.company_name = companyName;
+  const { error } = await client
+    .from(CONTACTS_TABLE)
+    .update(update)
+    .eq("uuid", contactId);
+  return { error: error?.message ?? null };
+}
+
+/**
+ * List all companies with optional search and pagination.
+ * When projectId is supplied, each row carries `in_project` and `project_company_id`
+ * so the UI can show which companies are already connected to the project.
+ */
+export async function getAllCompanies(
+  client: SupabaseClient,
+  options?: { search?: string | null; limit?: number; offset?: number; projectId?: string | null }
+): Promise<{ data: AllCompanyRow[]; total: number; error: string | null }> {
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
+  const offset = Math.max(options?.offset ?? 0, 0);
+
+  let query = client
+    .from(COMPANIES_TABLE)
+    .select("*", { count: "exact" })
+    .order("name", { ascending: true })
+    .range(offset, offset + limit - 1);
+
+  const search = options?.search?.trim() ?? "";
+  if (search.length > 0) {
+    const escaped = search.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+    const pattern = `%${escaped}%`;
+    query = query.or(`name.ilike.${pattern},domain.ilike.${pattern}`);
+  }
+
+  const { data, error, count } = await query;
+  if (error) return { data: [], total: 0, error: error.message };
+
+  // Build project membership map (company_id -> project_company_id)
+  const pcMap: Record<string, string> = {};
+  if (options?.projectId && (data ?? []).length > 0) {
+    const companyIds = (data as Array<Record<string, unknown>>).map((r) => r.id as string);
+    const { data: pcData } = await client
+      .from(PROJECT_COMPANIES_TABLE)
+      .select("id, company_id")
+      .eq("project_id", options.projectId)
+      .in("company_id", companyIds);
+    for (const pc of (pcData ?? []) as Array<Record<string, unknown>>) {
+      pcMap[pc.company_id as string] = pc.id as string;
+    }
+  }
+
+  const rows: AllCompanyRow[] = ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+    id: r.id as string,
+    name: (r.name as string) ?? null,
+    domain: r.domain as string,
+    linkedin_url: (r.linkedin_url as string) ?? null,
+    created_at: r.created_at as string,
+    in_project: r.id as string in pcMap,
+    project_company_id: pcMap[r.id as string] ?? null,
+  }));
+
+  return { data: rows, total: count ?? 0, error: null };
+}
+
+/**
+ * Add companies to a project (bulk). Skips any already linked.
+ * Returns the newly created project_company rows.
+ */
+export async function addCompaniesToProject(
+  client: SupabaseClient,
+  projectId: string,
+  companyIds: string[]
+): Promise<{ data: Array<{ id: string; company_id: string }>; error: string | null }> {
+  if (companyIds.length === 0) return { data: [], error: null };
+
+  // Find which ones are already linked
+  const { data: existing } = await client
+    .from(PROJECT_COMPANIES_TABLE)
+    .select("company_id")
+    .eq("project_id", projectId)
+    .in("company_id", companyIds);
+
+  const existingIds = new Set((existing ?? []).map((r: Record<string, unknown>) => r.company_id as string));
+  const toInsert = companyIds.filter((id) => !existingIds.has(id));
+
+  if (toInsert.length === 0) return { data: [], error: null };
+
+  const rows = toInsert.map((cid) => ({ project_id: projectId, company_id: cid }));
+  const { data, error } = await client
+    .from(PROJECT_COMPANIES_TABLE)
+    .insert(rows)
+    .select("id, company_id");
+
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as Array<{ id: string; company_id: string }>, error: null };
+}
+
+// --- project_companies, hypotheses, hypothesis_targets ---
+
+export const PROJECT_COMPANIES_TABLE = "project_companies";
+export const HYPOTHESES_TABLE = "hypotheses";
+export const HYPOTHESIS_TARGETS_TABLE = "hypothesis_targets";
+
+export interface ProjectCompanyContact {
+  first_name: string | null;
+  last_name: string | null;
+  position: string | null;
+  project_id: string | null;
+}
+
+export interface ProjectCompanyRow {
+  project_company_id: string;
+  company_id: string;
+  status: string | null;
+  created_at: string;
+  name: string | null;
+  domain: string | null;
+  linkedin_url: string | null;
+  hypotheses: Array<{ id: string; name: string }>;
+  contact_count: number;
+  contacts_preview: ProjectCompanyContact[];
+}
+
+/**
+ * List companies in a project (joining project_companies -> companies).
+ * Also joins hypothesis_targets -> hypotheses to return which hypotheses each company appears in.
+ * Supports optional search (name/domain ilike) and pagination with total count.
+ */
+export async function getProjectCompanies(
+  client: SupabaseClient,
+  projectId: string,
+  options?: { search?: string | null; limit?: number; offset?: number; companyId?: string | null }
+): Promise<{ data: ProjectCompanyRow[]; total: number; error: string | null }> {
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
+  const offset = Math.max(options?.offset ?? 0, 0);
+
+  let query = client
+    .from(PROJECT_COMPANIES_TABLE)
+    .select(
+      `id, status, created_at, company_id,
+       companies!inner(id, name, domain, linkedin_url),
+       hypothesis_targets(hypothesis_id, hypotheses(id, name))`,
+      { count: "exact" }
+    )
+    .eq("project_id", projectId);
+
+  if (options?.companyId) {
+    query = query.eq("company_id", options.companyId);
+  }
+
+  const search = options?.search?.trim().toLowerCase() ?? "";
+  if (search.length > 0) {
+    const escaped = search.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+    const pattern = `%${escaped}%`;
+    query = query.or(`name.ilike.${pattern},domain.ilike.${pattern}`, {
+      referencedTable: "companies",
+    });
+  }
+
+  query = query.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
+
+  const { data, error, count } = await query;
+  if (error) return { data: [], total: 0, error: error.message };
+
+  const rawRows = (data ?? []) as Array<Record<string, unknown>>;
+
+  // Collect company_ids for the current page to fetch contacts in one query
+  const companyIds = rawRows
+    .map((r) => {
+      const c = r.companies as Record<string, unknown> | null;
+      return (c?.id ?? r.company_id) as string;
+    })
+    .filter(Boolean);
+
+  // Fetch contacts for these companies (up to 10 per company, fetched as a batch)
+  const contactsByCompany: Record<string, ProjectCompanyContact[]> = {};
+  const contactCountByCompany: Record<string, number> = {};
+  if (companyIds.length > 0) {
+    const { data: contactData } = await client
+      .from(CONTACTS_TABLE)
+      .select("company_id, first_name, last_name, position, project_id")
+      .in("company_id", companyIds)
+      .order("created_at", { ascending: false })
+      .limit(companyIds.length * 10); // generous upper bound per page
+
+    for (const c of (contactData ?? []) as Array<Record<string, unknown>>) {
+      const cid = c.company_id as string;
+      if (!contactsByCompany[cid]) contactsByCompany[cid] = [];
+      contactCountByCompany[cid] = (contactCountByCompany[cid] ?? 0) + 1;
+      if (contactsByCompany[cid].length < 10) {
+        contactsByCompany[cid].push({
+          first_name: (c.first_name as string) ?? null,
+          last_name: (c.last_name as string) ?? null,
+          position: (c.position as string) ?? null,
+          project_id: (c.project_id as string) ?? null,
+        });
+      }
+    }
+  }
+
+  const rows: ProjectCompanyRow[] = rawRows.map((row) => {
+    const company = (row.companies as Record<string, unknown> | null) ?? {};
+    const companyId = (company.id ?? row.company_id) as string;
+    const targets = (row.hypothesis_targets as Array<Record<string, unknown>> | null) ?? [];
+    const hypotheses = targets
+      .map((t) => t.hypotheses as Record<string, unknown> | null)
+      .filter((h): h is Record<string, unknown> => h != null && typeof h.id === "string")
+      .map((h) => ({ id: h.id as string, name: h.name as string }));
+    return {
+      project_company_id: row.id as string,
+      company_id: companyId,
+      status: (row.status as string) ?? null,
+      created_at: row.created_at as string,
+      name: (company.name as string) ?? null,
+      domain: (company.domain as string) ?? null,
+      linkedin_url: (company.linkedin_url as string) ?? null,
+      hypotheses,
+      contact_count: contactCountByCompany[companyId] ?? 0,
+      contacts_preview: contactsByCompany[companyId] ?? [],
+    };
+  });
+
+  return { data: rows, total: count ?? 0, error: null };
+}
+
+export interface HypothesisRow {
+  id: string;
+  project_id: string;
+  name: string;
+  description: string | null;
+  target_persona: string | null;
+  created_at: string;
+  target_count: number;
+}
+
+/**
+ * List hypotheses for a project with count of hypothesis_targets per hypothesis.
+ */
+export async function getHypothesesWithCounts(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ data: HypothesisRow[]; error: string | null }> {
+  const { data, error } = await client
+    .from(HYPOTHESES_TABLE)
+    .select("*, hypothesis_targets(count)")
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false });
+
+  if (error) return { data: [], error: error.message };
+
+  const rows: HypothesisRow[] = ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
+    const targets = row.hypothesis_targets as Array<Record<string, unknown>> | null;
+    const target_count =
+      Array.isArray(targets) && targets.length > 0
+        ? (targets[0].count as number) ?? 0
+        : 0;
+    return {
+      id: row.id as string,
+      project_id: row.project_id as string,
+      name: row.name as string,
+      description: (row.description as string) ?? null,
+      target_persona: (row.target_persona as string) ?? null,
+      created_at: row.created_at as string,
+      target_count,
+    };
+  });
+
+  return { data: rows, error: null };
+}
+
+export interface HypothesisTargetRow {
+  id: string;
+  project_company_id: string;
+  score: number | null;
+  company_id: string | null;
+  name: string | null;
+  domain: string | null;
+  linkedin_url: string | null;
+  status: string | null;
+}
+
+/**
+ * List targets for a hypothesis, joined with project_companies -> companies.
+ */
+export async function getHypothesisTargets(
+  client: SupabaseClient,
+  hypothesisId: string
+): Promise<{ data: HypothesisTargetRow[]; error: string | null }> {
+  const { data, error } = await client
+    .from(HYPOTHESIS_TARGETS_TABLE)
+    .select(
+      "id, score, project_company_id, project_companies!inner(id, status, companies!inner(id, name, domain, linkedin_url))"
+    )
+    .eq("hypothesis_id", hypothesisId)
+    .order("score", { ascending: false });
+
+  if (error) return { data: [], error: error.message };
+
+  const rows: HypothesisTargetRow[] = ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
+    const pc = (row.project_companies as Record<string, unknown> | null) ?? {};
+    const company = (pc.companies as Record<string, unknown> | null) ?? {};
+    return {
+      id: row.id as string,
+      project_company_id: row.project_company_id as string,
+      score: (row.score as number) ?? null,
+      company_id: (company.id as string) ?? null,
+      name: (company.name as string) ?? null,
+      domain: (company.domain as string) ?? null,
+      linkedin_url: (company.linkedin_url as string) ?? null,
+      status: (pc.status as string) ?? null,
+    };
+  });
+
+  return { data: rows, error: null };
+}
+
+/**
+ * Create a new hypothesis for a project.
+ */
+export async function createHypothesis(
+  client: SupabaseClient,
+  payload: {
+    projectId: string;
+    name: string;
+    description?: string | null;
+    targetPersona?: string | null;
+  }
+): Promise<{ data: { id: string } | null; error: string | null }> {
+  const { data, error } = await client
+    .from(HYPOTHESES_TABLE)
+    .insert({
+      project_id: payload.projectId,
+      name: payload.name,
+      description: payload.description ?? null,
+      target_persona: payload.targetPersona ?? null,
+    })
+    .select("id")
+    .single();
+  if (error) return { data: null, error: error.message };
+  return { data: { id: (data as Record<string, unknown>).id as string }, error: null };
+}
+
+/**
+ * Update fields on an existing hypothesis.
+ */
+export async function updateHypothesis(
+  client: SupabaseClient,
+  id: string,
+  payload: { name?: string; description?: string | null; targetPersona?: string | null }
+): Promise<{ error: string | null }> {
+  const update: Record<string, unknown> = {};
+  if (payload.name !== undefined) update.name = payload.name;
+  if (payload.description !== undefined) update.description = payload.description;
+  if (payload.targetPersona !== undefined) update.target_persona = payload.targetPersona;
+  if (Object.keys(update).length === 0) return { error: null };
+  const { error } = await client.from(HYPOTHESES_TABLE).update(update).eq("id", id);
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Delete a hypothesis (cascade deletes hypothesis_targets if configured in DB, otherwise manual cleanup needed).
+ */
+export async function deleteHypothesis(
+  client: SupabaseClient,
+  id: string
+): Promise<{ error: string | null }> {
+  const { error } = await client.from(HYPOTHESES_TABLE).delete().eq("id", id);
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Bulk add project companies to a hypothesis as targets with an optional score.
+ */
+export async function addCompaniesToHypothesis(
+  client: SupabaseClient,
+  payload: { hypothesisId: string; projectCompanyIds: string[]; score?: number | null }
+): Promise<{ error: string | null }> {
+  if (payload.projectCompanyIds.length === 0) return { error: null };
+  const rows = payload.projectCompanyIds.map((pcId) => ({
+    hypothesis_id: payload.hypothesisId,
+    project_company_id: pcId,
+    score: payload.score ?? null,
+  }));
+  const { error } = await client.from(HYPOTHESIS_TARGETS_TABLE).insert(rows);
+  return { error: error?.message ?? null };
+}
+
+/**
+ * Remove project companies from a hypothesis (delete hypothesis_targets rows).
+ */
+export async function removeCompaniesFromHypothesis(
+  client: SupabaseClient,
+  payload: { hypothesisId: string; projectCompanyIds: string[] }
+): Promise<{ error: string | null }> {
+  const ids = [...new Set(payload.projectCompanyIds)].filter(Boolean);
+  if (ids.length === 0) return { error: null };
+  const { error } = await client
+    .from(HYPOTHESIS_TARGETS_TABLE)
+    .delete()
+    .eq("hypothesis_id", payload.hypothesisId)
+    .in("project_company_id", ids);
+  return { error: error?.message ?? null };
+}
+
 export async function getTableCounts(
   client: SupabaseClient
 ): Promise<{ counts: TableCounts; error: string | null }> {
@@ -1110,4 +1762,371 @@ export async function queryTableWithFilters(
   const { data, error, count } = await query;
   if (error) return { data: [], total: 0, error: error.message };
   return { data: data ?? [], total: count ?? 0, error: null };
+}
+
+// ── Conversations List ───────────────────────────────────────────────────────
+
+export interface ConversationListItem {
+  conversationUuid: string;
+  leadUuid: string | null;
+  senderProfileUuid: string | null;
+  senderDisplayName: string;
+  receiverDisplayName: string;
+  receiverTitle: string | null;
+  receiverCompanyName: string | null;
+  receiverAvatarUrl: string | null;
+  receiverCompanyId: string | null;
+  lastMessageText: string | null;
+  lastMessageAt: string | null;
+  messageCount: number;
+  inboxCount: number;
+  outboxCount: number;
+  /** True when the chronologically last message was sent by us (outbox). */
+  lastMessageIsOutbox: boolean;
+  /** Number of hypotheses the receiver's company appears in (for this project). */
+  hypothesisCount: number;
+}
+
+export async function getConversationsList(
+  client: SupabaseClient,
+  projectId: string,
+  options?: { limit?: number; offset?: number }
+): Promise<{ data: ConversationListItem[]; error: string | null }> {
+  const fetchLimit = 2000;
+
+  const { data: messages, error: msgErr } = await client
+    .from(LINKEDIN_MESSAGES_TABLE)
+    .select("linkedin_conversation_uuid, lead_uuid, sender_profile_uuid, text, sent_at, type, linkedin_type")
+    .eq("project_id", projectId)
+    .order("sent_at", { ascending: false })
+    .limit(fetchLimit);
+
+  if (msgErr) return { data: [], error: msgErr.message };
+
+  const rawMessages = (messages ?? []) as Array<Record<string, unknown>>;
+
+  // Group by conversation uuid
+  const grouped = new Map<string, {
+    lead_uuid: string | null;
+    sender_profile_uuid: string | null;
+    msgs: Array<Record<string, unknown>>;
+  }>();
+
+  for (const msg of rawMessages) {
+    const convId = msg["linkedin_conversation_uuid"] as string | null;
+    if (!convId) continue;
+    if (!grouped.has(convId)) {
+      grouped.set(convId, {
+        lead_uuid: (msg["lead_uuid"] as string | null) ?? null,
+        sender_profile_uuid: (msg["sender_profile_uuid"] as string | null) ?? null,
+        msgs: [],
+      });
+    }
+    grouped.get(convId)!.msgs.push(msg);
+  }
+
+  // Collect unique lead_uuids and sender_profile_uuids for batch fetching
+  const leadUuids = [...new Set([...grouped.values()].map((g) => g.lead_uuid).filter(Boolean) as string[])];
+  const senderUuids = [...new Set([...grouped.values()].map((g) => g.sender_profile_uuid).filter(Boolean) as string[])];
+
+  const contactMap = new Map<string, Record<string, unknown>>();
+  const senderMap = new Map<string, Record<string, unknown>>();
+
+  if (leadUuids.length > 0) {
+    const { data: contacts } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_id")
+      .in("uuid", leadUuids);
+    for (const c of (contacts ?? []) as Array<Record<string, unknown>>) {
+      if (c.uuid) contactMap.set(c.uuid as string, c);
+    }
+  }
+
+  if (senderUuids.length > 0) {
+    const { data: senders } = await client
+      .from(SENDERS_TABLE)
+      .select("uuid, first_name, last_name, label")
+      .in("uuid", senderUuids);
+    for (const s of (senders ?? []) as Array<Record<string, unknown>>) {
+      if (s.uuid) senderMap.set(s.uuid as string, s);
+    }
+  }
+
+  // Collect unique company_ids to batch-resolve hypothesis counts
+  const companyIds = [...new Set(
+    [...contactMap.values()]
+      .map((c) => c.company_id as string | null)
+      .filter(Boolean) as string[]
+  )];
+
+  // Map company_id → number of hypotheses it belongs to (in this project)
+  const hypothesisCountByCompany = new Map<string, number>();
+  if (companyIds.length > 0) {
+    const { data: pcRows } = await client
+      .from(PROJECT_COMPANIES_TABLE)
+      .select("company_id, hypothesis_targets(count)")
+      .eq("project_id", projectId)
+      .in("company_id", companyIds);
+
+    for (const row of (pcRows ?? []) as Array<Record<string, unknown>>) {
+      const cid = row.company_id as string;
+      const targets = row.hypothesis_targets as Array<Record<string, unknown>> | null;
+      const cnt = Array.isArray(targets) && targets.length > 0
+        ? (targets[0].count as number) ?? 0
+        : 0;
+      const existing = hypothesisCountByCompany.get(cid) ?? 0;
+      hypothesisCountByCompany.set(cid, existing + cnt);
+    }
+  }
+
+  function displayName(c: Record<string, unknown> | null, fallback: string): string {
+    if (!c) return fallback;
+    if (typeof c.name === "string" && c.name.trim()) return c.name.trim();
+    const f = typeof c.first_name === "string" ? c.first_name.trim() : "";
+    const l = typeof c.last_name === "string" ? c.last_name.trim() : "";
+    if (f || l) return [f, l].filter(Boolean).join(" ");
+    if (typeof c.label === "string" && c.label.trim()) return c.label.trim();
+    return fallback;
+  }
+
+  const allItems: ConversationListItem[] = [];
+  for (const [convId, group] of grouped.entries()) {
+    const { msgs } = group;
+    let inboxCount = 0;
+    let outboxCount = 0;
+    let lastMsg: Record<string, unknown> | null = null;
+    let lastAt: string | null = null;
+
+    for (const m of msgs) {
+      const t = String(m["type"] ?? m["linkedin_type"] ?? "").toLowerCase();
+      if (t === "inbox") inboxCount++;
+      else if (t === "outbox") outboxCount++;
+      const at = m["sent_at"] as string | null;
+      if (at && (!lastAt || at > lastAt)) {
+        lastAt = at;
+        lastMsg = m;
+      }
+    }
+
+    const lastMsgType = lastMsg
+      ? String(lastMsg["type"] ?? lastMsg["linkedin_type"] ?? "").toLowerCase()
+      : "";
+
+    const contact = group.lead_uuid ? contactMap.get(group.lead_uuid) ?? null : null;
+    const sender = group.sender_profile_uuid ? senderMap.get(group.sender_profile_uuid) ?? null : null;
+    const companyId = contact ? ((contact.company_id as string | null) ?? null) : null;
+
+    allItems.push({
+      conversationUuid: convId,
+      leadUuid: group.lead_uuid,
+      senderProfileUuid: group.sender_profile_uuid,
+      senderDisplayName: displayName(sender, "Unknown Sender"),
+      receiverDisplayName: displayName(contact, group.lead_uuid ? group.lead_uuid.slice(0, 8) + "…" : "Unknown"),
+      receiverTitle: contact ? ((contact.position as string | null) ?? null) : null,
+      receiverCompanyName: contact ? ((contact.company_name as string | null) ?? null) : null,
+      receiverAvatarUrl: contact ? ((contact.avatar_url as string | null) ?? null) : null,
+      receiverCompanyId: companyId,
+      lastMessageText: lastMsg ? ((lastMsg.text as string | null) ?? null) : null,
+      lastMessageAt: lastAt,
+      messageCount: msgs.length,
+      inboxCount,
+      outboxCount,
+      lastMessageIsOutbox: lastMsgType === "outbox",
+      hypothesisCount: companyId ? (hypothesisCountByCompany.get(companyId) ?? 0) : 0,
+    });
+  }
+
+  // Sort by lastMessageAt desc
+  allItems.sort((a, b) => {
+    const da = a.lastMessageAt ?? "";
+    const db = b.lastMessageAt ?? "";
+    return db.localeCompare(da);
+  });
+
+  const offset = options?.offset ?? 0;
+  const limit = Math.min(options?.limit ?? 50, 200);
+  return { data: allItems.slice(offset, offset + limit), error: null };
+}
+
+// ── Company Hypotheses ────────────────────────────────────────────────────────
+
+export async function getCompanyHypotheses(
+  client: SupabaseClient,
+  companyId: string,
+  projectId: string
+): Promise<{ data: Array<{ id: string; name: string }>; projectCompanyId: string | null; error: string | null }> {
+  // Find project_company row for this company in this project
+  const { data: pcRows, error: pcErr } = await client
+    .from(PROJECT_COMPANIES_TABLE)
+    .select("id")
+    .eq("company_id", companyId)
+    .eq("project_id", projectId)
+    .limit(1);
+
+  if (pcErr) return { data: [], projectCompanyId: null, error: pcErr.message };
+
+  const pc = (pcRows ?? [])[0] as Record<string, unknown> | undefined;
+  if (!pc) return { data: [], projectCompanyId: null, error: null };
+
+  const projectCompanyId = pc.id as string;
+
+  const { data: targets, error: tErr } = await client
+    .from(HYPOTHESIS_TARGETS_TABLE)
+    .select("hypotheses(id, name)")
+    .eq("project_company_id", projectCompanyId);
+
+  if (tErr) return { data: [], projectCompanyId, error: tErr.message };
+
+  const hypotheses = ((targets ?? []) as Array<Record<string, unknown>>)
+    .map((t) => t.hypotheses as Record<string, unknown> | null)
+    .filter((h): h is Record<string, unknown> => h != null && typeof h.id === "string")
+    .map((h) => ({ id: h.id as string, name: h.name as string }));
+
+  return { data: hypotheses, projectCompanyId, error: null };
+}
+
+// ── Contacts by Company ───────────────────────────────────────────────────────
+
+export interface ContactWithConversations {
+  uuid: string;
+  first_name: string | null;
+  last_name: string | null;
+  name: string | null;
+  position: string | null;
+  avatar_url: string | null;
+  company_id: string | null;
+  conversations: Array<{ conversationUuid: string; messageCount: number; lastMessageAt: string | null }>;
+}
+
+export async function getContactsByCompany(
+  client: SupabaseClient,
+  companyId: string,
+  projectId: string
+): Promise<{ data: ContactWithConversations[]; error: string | null }> {
+  const { data: contacts, error: cErr } = await client
+    .from(CONTACTS_TABLE)
+    .select("uuid, first_name, last_name, name, position, avatar_url, company_id")
+    .eq("company_id", companyId)
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false })
+    .limit(50);
+
+  if (cErr) return { data: [], error: cErr.message };
+
+  const contactRows = (contacts ?? []) as Array<Record<string, unknown>>;
+  if (contactRows.length === 0) return { data: [], error: null };
+
+  const leadUuids = contactRows.map((c) => c.uuid as string).filter(Boolean);
+
+  // Fetch messages for all these contacts (to compute conversation groups)
+  const { data: msgs } = await client
+    .from(LINKEDIN_MESSAGES_TABLE)
+    .select("lead_uuid, linkedin_conversation_uuid, sent_at")
+    .in("lead_uuid", leadUuids)
+    .eq("project_id", projectId)
+    .order("sent_at", { ascending: false })
+    .limit(2000);
+
+  // Group by lead_uuid then by conversation_uuid
+  const convsByLead = new Map<string, Map<string, { count: number; lastAt: string | null }>>();
+  for (const m of (msgs ?? []) as Array<Record<string, unknown>>) {
+    const lu = m["lead_uuid"] as string | null;
+    const cu = m["linkedin_conversation_uuid"] as string | null;
+    if (!lu || !cu) continue;
+    if (!convsByLead.has(lu)) convsByLead.set(lu, new Map());
+    const convMap = convsByLead.get(lu)!;
+    if (!convMap.has(cu)) convMap.set(cu, { count: 0, lastAt: null });
+    const entry = convMap.get(cu)!;
+    entry.count++;
+    const at = m["sent_at"] as string | null;
+    if (at && (!entry.lastAt || at > entry.lastAt)) entry.lastAt = at;
+  }
+
+  const result: ContactWithConversations[] = contactRows.map((c) => {
+    const uuid = c.uuid as string;
+    const convMap = convsByLead.get(uuid) ?? new Map();
+    const conversations = [...convMap.entries()]
+      .map(([convId, info]) => ({ conversationUuid: convId, messageCount: info.count, lastMessageAt: info.lastAt }))
+      .sort((a, b) => (b.lastMessageAt ?? "").localeCompare(a.lastMessageAt ?? ""));
+    return {
+      uuid,
+      first_name: (c.first_name as string | null) ?? null,
+      last_name: (c.last_name as string | null) ?? null,
+      name: (c.name as string | null) ?? null,
+      position: (c.position as string | null) ?? null,
+      avatar_url: (c.avatar_url as string | null) ?? null,
+      company_id: (c.company_id as string | null) ?? null,
+      conversations,
+    };
+  });
+
+  return { data: result, error: null };
+}
+
+// ── Context Snapshots ────────────────────────────────────────────────────────
+
+export interface ContextSnapshotRow {
+  id: string;
+  project_id: string;
+  name: string | null;
+  nodes: Record<string, unknown>;
+  context_text: string;
+  created_at: string;
+}
+
+export interface SaveContextSnapshotParams {
+  projectId: string;
+  name?: string | null;
+  nodes: Record<string, unknown>;
+  contextText: string;
+}
+
+export async function getContextSnapshots(
+  client: SupabaseClient,
+  params: { projectId: string; limit?: number; offset?: number }
+): Promise<{ data: ContextSnapshotRow[]; total: number; error: string | null }> {
+  const limit = Math.min(params.limit ?? 50, 200);
+  const offset = params.offset ?? 0;
+  const { data, error, count } = await client
+    .from(CONTEXT_SNAPSHOTS_TABLE)
+    .select("*", { count: "exact" })
+    .eq("project_id", params.projectId)
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) return { data: [], total: 0, error: error.message };
+  return { data: (data ?? []) as ContextSnapshotRow[], total: count ?? 0, error: null };
+}
+
+export async function getContextSnapshotById(
+  client: SupabaseClient,
+  snapshotId: string
+): Promise<{ data: ContextSnapshotRow | null; error: string | null }> {
+  const { data, error } = await client
+    .from(CONTEXT_SNAPSHOTS_TABLE)
+    .select("*")
+    .eq("id", snapshotId)
+    .maybeSingle();
+
+  if (error) return { data: null, error: error.message };
+  return { data: (data as ContextSnapshotRow) ?? null, error: null };
+}
+
+export async function saveContextSnapshot(
+  client: SupabaseClient,
+  params: SaveContextSnapshotParams
+): Promise<{ data: ContextSnapshotRow | null; error: string | null }> {
+  const { data, error } = await client
+    .from(CONTEXT_SNAPSHOTS_TABLE)
+    .insert({
+      project_id: params.projectId,
+      name: params.name ?? null,
+      nodes: params.nodes,
+      context_text: params.contextText,
+    })
+    .select()
+    .single();
+
+  if (error) return { data: null, error: error.message };
+  return { data: data as ContextSnapshotRow, error: null };
 }

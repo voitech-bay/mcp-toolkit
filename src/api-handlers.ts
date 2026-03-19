@@ -8,8 +8,12 @@ import {
   getLatestRows,
   queryTableWithFilters,
   getConversation,
-  getCompanyContextByName,
-  setCompanyRootContext,
+  listCompanyContextsByCompanyId,
+  addCompanyContextEntry,
+  getCompanyContextCounts,
+  listContactContextsByContactId,
+  addContactContextEntry,
+  getContactContextCounts,
   getProjects,
   getProjectById,
   updateProjectCredentials,
@@ -18,9 +22,34 @@ import {
   getActiveSyncRun,
   getSyncHistory,
   createSyncRun,
+  getAllCompanies,
+  addCompaniesToProject,
+  getProjectCompanies,
+  getHypothesesWithCounts,
+  getHypothesisTargets,
+  createHypothesis,
+  updateHypothesis,
+  deleteHypothesis,
+  addCompaniesToHypothesis,
+  removeCompaniesFromHypothesis,
+  getContextSnapshots,
+  saveContextSnapshot,
+  getConversationsList,
+  getCompanyHypotheses,
+  getContactsByCompany,
+  createCompany,
+  updateContactCompany,
+  getCompaniesByIds,
   type TableQueryFilters,
 } from "./services/supabase.js";
+import {
+  buildReplyContextPrompt,
+  generateContextText,
+  type BuildContextNodes,
+} from "./services/reply-context-prompt.js";
 import { syncSupabaseFromSource } from "./services/sync-supabase.js";
+
+export { generateContextText };
 
 /** Read and parse JSON body from request (for POST). */
 async function getParsedBody(req: IncomingMessage): Promise<unknown> {
@@ -251,8 +280,13 @@ export async function handleGetCompanyContext(
     return;
   }
   const params = getQueryParams(req);
-  const name = params.get("name") ?? "";
-  const result = await getCompanyContextByName(client, name);
+  const companyId = params.get("company_id") ?? "";
+  if (!companyId.trim()) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "company_id is required", data: null }));
+    return;
+  }
+  const result = await listCompanyContextsByCompanyId(client, companyId);
   if (result.error) {
     res.writeHead(400);
     res.end(JSON.stringify({ error: result.error, data: null }));
@@ -279,10 +313,152 @@ export async function handleSetCompanyContext(
     res.end(JSON.stringify({ error: "Supabase not configured" }));
     return;
   }
-  const body = (await getParsedBody(req)) as { name?: string; rootContext?: string } | undefined;
-  const name = typeof body?.name === "string" ? body.name : "";
+  const body = (await getParsedBody(req)) as { rootContext?: string; company_id?: string | null } | undefined;
+  const companyId = body?.company_id != null ? (body.company_id === null ? null : String(body.company_id)) : null;
   const rootContext = body?.rootContext !== undefined ? (body.rootContext === null ? null : String(body.rootContext)) : null;
-  const result = await setCompanyRootContext(client, name, rootContext);
+  if (!companyId || !companyId.trim()) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "company_id is required", data: null }));
+    return;
+  }
+  const result = await addCompanyContextEntry(client, companyId, rootContext);
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error, data: null }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** GET /api/company-context-counts?company_ids=id1,id2,id3 → { data: { [id]: count } } */
+export async function handleGetCompanyContextCounts(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const raw = params.get("company_ids") ?? "";
+  const companyIds = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const result = await getCompanyContextCounts(client, companyIds);
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error, data: null }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleGetContactContext(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const contactId = params.get("contact_id") ?? "";
+  if (!contactId.trim()) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "contact_id is required", data: null }));
+    return;
+  }
+  const result = await listContactContextsByContactId(client, contactId);
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error, data: null }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleSetContactContext(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST" && req.method !== "PUT") {
+    res.writeHead(405, { Allow: "POST, PUT" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { rootContext?: string; contact_id?: string | null } | undefined;
+  const contactId = body?.contact_id != null ? (body.contact_id === null ? null : String(body.contact_id)) : null;
+  const rootContext = body?.rootContext !== undefined ? (body.rootContext === null ? null : String(body.rootContext)) : null;
+  if (!contactId || !contactId.trim()) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "contact_id is required", data: null }));
+    return;
+  }
+  const result = await addContactContextEntry(client, contactId, rootContext);
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error, data: null }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** GET /api/contact-context-counts?contact_ids=id1,id2,id3 → { data: { [id]: count } } */
+export async function handleGetContactContextCounts(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const raw = params.get("contact_ids") ?? "";
+  const contactIds = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const result = await getContactContextCounts(client, contactIds);
   if (result.error) {
     res.writeHead(400);
     res.end(JSON.stringify({ error: result.error, data: null }));
@@ -474,4 +650,692 @@ export async function handleSyncHistory(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data }));
+}
+
+// --- Global companies list + project membership ---
+
+export async function handleGetAllCompanies(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId") ?? undefined;
+  const search = params.get("search") ?? undefined;
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await getAllCompanies(client, { search, limit, offset, projectId });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+export async function handleAddCompaniesToProject(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { projectId?: string; companyIds?: string[] } | undefined;
+  if (!body?.projectId || !Array.isArray(body.companyIds) || body.companyIds.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include projectId and non-empty companyIds array" }));
+    return;
+  }
+  const result = await addCompaniesToProject(client, body.projectId, body.companyIds);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ added: result.data.length, data: result.data }));
+}
+
+// --- Companies & Hypotheses endpoints ---
+
+export async function handleGetProjectCompanies(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const search = params.get("search") ?? undefined;
+  const companyId = params.get("companyId") ?? undefined;
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await getProjectCompanies(client, projectId, { search, limit, offset, companyId });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+export async function handleGetHypotheses(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const result = await getHypothesesWithCounts(client, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleCreateHypothesis(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as {
+    projectId?: string;
+    name?: string;
+    description?: string | null;
+    targetPersona?: string | null;
+  } | undefined;
+  if (!body?.projectId || !body?.name) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include projectId and name" }));
+    return;
+  }
+  const result = await createHypothesis(client, {
+    projectId: body.projectId,
+    name: body.name,
+    description: body.description,
+    targetPersona: body.targetPersona,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleUpdateHypothesis(
+  req: IncomingMessage,
+  res: ServerResponse,
+  hypothesisId: string
+): Promise<void> {
+  if (req.method !== "PUT") {
+    res.writeHead(405, { Allow: "PUT" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as {
+    name?: string;
+    description?: string | null;
+    targetPersona?: string | null;
+  } | undefined;
+  if (!body) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const result = await updateHypothesis(client, hypothesisId, {
+    name: body.name,
+    description: body.description,
+    targetPersona: body.targetPersona,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+export async function handleDeleteHypothesis(
+  req: IncomingMessage,
+  res: ServerResponse,
+  hypothesisId: string
+): Promise<void> {
+  if (req.method !== "DELETE") {
+    res.writeHead(405, { Allow: "DELETE" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await deleteHypothesis(client, hypothesisId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+export async function handleGetHypothesisTargets(
+  req: IncomingMessage,
+  res: ServerResponse,
+  hypothesisId: string
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await getHypothesisTargets(client, hypothesisId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleAddHypothesisTargets(
+  req: IncomingMessage,
+  res: ServerResponse,
+  hypothesisId: string
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as {
+    projectCompanyIds?: string[];
+    score?: number | null;
+  } | undefined;
+  if (!body?.projectCompanyIds || !Array.isArray(body.projectCompanyIds) || body.projectCompanyIds.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include non-empty projectCompanyIds array" }));
+    return;
+  }
+  const result = await addCompaniesToHypothesis(client, {
+    hypothesisId,
+    projectCompanyIds: body.projectCompanyIds,
+    score: body.score,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ ok: true, inserted: body.projectCompanyIds.length }));
+}
+
+export async function handleRemoveHypothesisTargets(
+  req: IncomingMessage,
+  res: ServerResponse,
+  hypothesisId: string
+): Promise<void> {
+  if (req.method !== "DELETE") {
+    res.writeHead(405, { Allow: "DELETE" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { projectCompanyIds?: string[] } | undefined;
+  if (!body?.projectCompanyIds || !Array.isArray(body.projectCompanyIds) || body.projectCompanyIds.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include non-empty projectCompanyIds array" }));
+    return;
+  }
+  const result = await removeCompaniesFromHypothesis(client, {
+    hypothesisId,
+    projectCompanyIds: body.projectCompanyIds,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+// ── Context Snapshots list ───────────────────────────────────────────────────
+
+export async function handleGetContextSnapshots(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required" }));
+    return;
+  }
+  const limit = Math.min(parseInt(params.get("limit") ?? "50", 10) || 50, 200);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await getContextSnapshots(client, { projectId, limit, offset });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+// ── Build Context ────────────────────────────────────────────────────────────
+
+export async function handleBuildContext(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  const body = (await getParsedBody(req)) as {
+    projectId?: string;
+    name?: string;
+    selectedNodes?: BuildContextNodes;
+  } | undefined;
+
+  const projectId = body?.projectId?.trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required" }));
+    return;
+  }
+
+  const selectedNodes: BuildContextNodes = {
+    hypotheses: body?.selectedNodes?.hypotheses ?? [],
+    companies: body?.selectedNodes?.companies ?? [],
+    contacts: body?.selectedNodes?.contacts ?? [],
+    conversations: body?.selectedNodes?.conversations ?? [],
+  };
+
+  const contextText = await buildReplyContextPrompt(client, projectId, selectedNodes);
+
+  const result = await saveContextSnapshot(client, {
+    projectId,
+    name: body?.name ?? null,
+    nodes: selectedNodes as unknown as Record<string, unknown>,
+    contextText,
+  });
+
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+
+  res.writeHead(201);
+  res.end(
+    JSON.stringify({
+      data: {
+        id: result.data!.id,
+        context_text: result.data!.context_text,
+        created_at: result.data!.created_at,
+      },
+    })
+  );
+}
+
+// ── Conversations list ────────────────────────────────────────────────────────
+
+export async function handleGetConversationsList(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "50", 10) || 50, 1), 200);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await getConversationsList(client, projectId, { limit, offset });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+// ── Company hypotheses ────────────────────────────────────────────────────────
+
+export async function handleGetCompanyHypotheses(
+  req: IncomingMessage,
+  res: ServerResponse,
+  companyId: string
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const result = await getCompanyHypotheses(client, companyId, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], projectCompanyId: null, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, projectCompanyId: result.projectCompanyId }));
+}
+
+// ── Contacts by company ───────────────────────────────────────────────────────
+
+export async function handleGetContactsByCompany(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const companyId = params.get("companyId");
+  const projectId = params.get("projectId");
+  if (!companyId || !projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query params: companyId and projectId required" }));
+    return;
+  }
+  const result = await getContactsByCompany(client, companyId, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+// ── Create company ────────────────────────────────────────────────────────────
+
+export async function handleCreateCompany(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { name?: string; domain?: string | null } | undefined;
+  if (!body?.name?.trim()) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include name" }));
+    return;
+  }
+  const result = await createCompany(client, { name: body.name.trim(), domain: body.domain ?? null });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ id: result.id }));
+}
+
+// ── Get companies by IDs ─────────────────────────────────────────────────────
+
+export async function handleGetCompaniesByIds(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const ids = params.getAll("ids[]").concat(
+    (params.get("ids") ?? "").split(",").map((s) => s.trim()).filter(Boolean)
+  );
+  const unique = [...new Set(ids)].filter(Boolean);
+  if (unique.length === 0) {
+    res.writeHead(200);
+    res.end(JSON.stringify({ data: [] }));
+    return;
+  }
+  const result = await getCompaniesByIds(client, unique);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+// ── Patch contact company ────────────────────────────────────────────────────
+
+export async function handlePatchContactCompany(
+  req: IncomingMessage,
+  res: ServerResponse,
+  contactId: string
+): Promise<void> {
+  if (req.method !== "PATCH") {
+    res.writeHead(405, { Allow: "PATCH" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { companyId?: string; companyName?: string | null } | undefined;
+  if (!body?.companyId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include companyId" }));
+    return;
+  }
+  const result = await updateContactCompany(client, contactId, body.companyId, body.companyName ?? null);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
 }

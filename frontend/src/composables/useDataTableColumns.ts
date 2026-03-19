@@ -179,7 +179,7 @@ export function useDataTableColumns(
     const actionsColumn = {
       title: "Actions",
       key: "__actions",
-      width: 120,
+      width: 150,
       fixed: "right" as const,
       filter: false,
       render: (row: Record<string, unknown>) => renderAction(row),

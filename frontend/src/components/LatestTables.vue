@@ -508,11 +508,11 @@ const cursorWorkflowOptions = computed((): CursorWorkflowOption[] => {
   if (companyName) {
     options.push({
       label: "MCP: get_company_root_context",
-      prompt: `Use MCP tool get_company_root_context with companyName: "${companyName.replace(/"/g, '\\"')}" to get the company root context.`,
+      prompt: `Use MCP tool get_company_root_context with companyId (companies.id UUID). Company name for reference: "${companyName.replace(/"/g, '\\"')}". Look up company by name if you need the UUID.`,
     });
     options.push({
       label: "MCP: set_company_root_context",
-      prompt: `Use MCP tool set_company_root_context with companyName: "${companyName.replace(/"/g, '\\"')}" and rootContext with the context you want to set.`,
+      prompt: `Use MCP tool set_company_root_context with companyId (companies.id UUID) and rootContext. Company name for reference: "${companyName.replace(/"/g, '\\"')}". Look up company by name if you need the UUID.`,
     });
   }
   options.push(

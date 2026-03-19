@@ -15,6 +15,8 @@ import { registerGetConversationByMessageTool } from "./tools/get-conversation-b
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
 import { registerGetCompanyRootContextTool } from "./tools/get-company-root-context.js";
 import { registerSetCompanyRootContextTool } from "./tools/set-company-root-context.js";
+import { registerBuildReplyContextPromptTool } from "./tools/build-reply-context-prompt.js";
+import { registerGetReplyContextSnapshotTool } from "./tools/get-reply-context-snapshot.js";
 
 const server = new McpServer({
   name: "mcp-toolkit",
@@ -30,6 +32,8 @@ registerGetConversationByMessageTool(server);
 registerCompanyEnrichmentTools(server);
 registerGetCompanyRootContextTool(server);
 registerSetCompanyRootContextTool(server);
+registerBuildReplyContextPromptTool(server);
+registerGetReplyContextSnapshotTool(server);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

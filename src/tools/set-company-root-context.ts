@@ -5,9 +5,9 @@ import { getSupabase, setCompanyRootContext } from "../services/supabase.js";
 export function registerSetCompanyRootContextTool(server: McpServer): void {
   server.tool(
     "set_company_root_context",
-    "Set or update the root context for a company in the CompaniesContext table. If a row with the given company name exists, it is updated; otherwise a new row is created. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).",
+    "Set or update the root context for a company in the CompaniesContext table. Identifies the company by company_id (uuid from companies.id). If a row exists it is updated; otherwise a new row is created. Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).",
     {
-      companyName: z.string().describe("Company name. Used to find existing row (exact match) or as name for a new row."),
+      companyId: z.string().uuid().describe("Company UUID (companies.id)."),
       rootContext: z.string().nullable().describe("The root context text to store. Pass null or omit to clear."),
     },
     async (args) => {
@@ -24,7 +24,7 @@ export function registerSetCompanyRootContextTool(server: McpServer): void {
         };
       }
       const rootContext = args.rootContext ?? null;
-      const result = await setCompanyRootContext(client, args.companyName, rootContext);
+      const result = await setCompanyRootContext(client, args.companyId, rootContext);
       if (result.error) {
         return {
           content: [{ type: "text" as const, text: result.error }],
