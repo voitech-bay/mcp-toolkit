@@ -6,6 +6,9 @@
 import "dotenv/config";
 import { createServer } from "node:http";
 import { URL } from "node:url";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
   handleSupabaseState,
@@ -44,7 +47,61 @@ import {
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 
-const PORT = Number(process.env.API_PORT) || 3000;
+const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const STATIC_ROOT = path.resolve(__dirname, "../public");
+
+const MIME_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+};
+
+const servesStatic = async (pathname: string, res: import("node:http").ServerResponse) => {
+  const decodedPath = decodeURIComponent(pathname);
+  const requested = decodedPath === "/" ? "/index.html" : decodedPath;
+  const resolvedPath = path.resolve(STATIC_ROOT, `.${requested}`);
+
+  // Prevent directory traversal outside static root.
+  if (!resolvedPath.startsWith(STATIC_ROOT)) {
+    return false;
+  }
+
+  let filePath = resolvedPath;
+  try {
+    const stats = await fs.stat(filePath);
+    if (stats.isDirectory()) {
+      filePath = path.join(filePath, "index.html");
+    }
+  } catch {
+    filePath = path.join(STATIC_ROOT, "index.html");
+  }
+
+  try {
+    const body = await fs.readFile(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, {
+      "Content-Type": MIME_TYPES[ext] ?? "application/octet-stream",
+      "Cache-Control": filePath.endsWith("index.html")
+        ? "no-cache"
+        : "public, max-age=31536000, immutable",
+    });
+    res.end(body);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const server = createServer(async (req, res) => {
   const url = req.url ?? "";
@@ -270,6 +327,12 @@ const server = createServer(async (req, res) => {
         }
         return;
       default:
+        if (req.method === "GET" || req.method === "HEAD") {
+          const wasServed = await servesStatic(pathname, res);
+          if (wasServed) {
+            return;
+          }
+        }
         res.writeHead(404, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Not found" }));
     }

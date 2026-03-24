@@ -1766,6 +1766,9 @@ export async function queryTableWithFilters(
 
 // ── Conversations List ───────────────────────────────────────────────────────
 
+/** UI / filter bucket for reply state (matches ConversationsPage tags). */
+export type ConversationReplyTag = "no_response" | "waiting_for_response" | "got_response";
+
 export interface ConversationListItem {
   conversationUuid: string;
   leadUuid: string | null;
@@ -1785,25 +1788,52 @@ export interface ConversationListItem {
   lastMessageIsOutbox: boolean;
   /** Number of hypotheses the receiver's company appears in (for this project). */
   hypothesisCount: number;
+  replyTag: ConversationReplyTag;
 }
+
+function deriveConversationReplyTag(item: {
+  inboxCount: number;
+  outboxCount: number;
+  lastMessageIsOutbox: boolean;
+}): ConversationReplyTag {
+  if (item.outboxCount > 0 && item.inboxCount === 0) return "no_response";
+  if (item.inboxCount > 0 && item.lastMessageIsOutbox) return "waiting_for_response";
+  if (item.inboxCount > 0 && !item.lastMessageIsOutbox) return "got_response";
+  if (item.inboxCount > 0) return "got_response";
+  return "no_response";
+}
+
+const CONV_LIST_PAGE = 1000;
+const CONV_LIST_MAX_PAGES = 200;
 
 export async function getConversationsList(
   client: SupabaseClient,
   projectId: string,
-  options?: { limit?: number; offset?: number }
-): Promise<{ data: ConversationListItem[]; error: string | null }> {
-  const fetchLimit = 2000;
+  options?: {
+    limit?: number;
+    offset?: number;
+    /** Case-insensitive match on receiver/sender name, company, last message text. */
+    search?: string | null;
+    replyTag?: ConversationReplyTag | null;
+  }
+): Promise<{ data: ConversationListItem[]; total: number; error: string | null }> {
+  const rawMessages: Array<Record<string, unknown>> = [];
+  for (let page = 0; page < CONV_LIST_MAX_PAGES; page++) {
+    const from = page * CONV_LIST_PAGE;
+    const to = from + CONV_LIST_PAGE - 1;
+    const { data: chunk, error: msgErr } = await client
+      .from(LINKEDIN_MESSAGES_TABLE)
+      .select("linkedin_conversation_uuid, lead_uuid, sender_profile_uuid, text, sent_at, type, linkedin_type")
+      .eq("project_id", projectId)
+      .order("sent_at", { ascending: true })
+      .range(from, to);
 
-  const { data: messages, error: msgErr } = await client
-    .from(LINKEDIN_MESSAGES_TABLE)
-    .select("linkedin_conversation_uuid, lead_uuid, sender_profile_uuid, text, sent_at, type, linkedin_type")
-    .eq("project_id", projectId)
-    .order("sent_at", { ascending: false })
-    .limit(fetchLimit);
-
-  if (msgErr) return { data: [], error: msgErr.message };
-
-  const rawMessages = (messages ?? []) as Array<Record<string, unknown>>;
+    if (msgErr) return { data: [], total: 0, error: msgErr.message };
+    const rows = (chunk ?? []) as Array<Record<string, unknown>>;
+    if (rows.length === 0) break;
+    rawMessages.push(...rows);
+    if (rows.length < CONV_LIST_PAGE) break;
+  }
 
   // Group by conversation uuid
   const grouped = new Map<string, {
@@ -1916,6 +1946,13 @@ export async function getConversationsList(
     const sender = group.sender_profile_uuid ? senderMap.get(group.sender_profile_uuid) ?? null : null;
     const companyId = contact ? ((contact.company_id as string | null) ?? null) : null;
 
+    const lastMessageIsOutbox = lastMsgType === "outbox";
+    const replyTag = deriveConversationReplyTag({
+      inboxCount,
+      outboxCount,
+      lastMessageIsOutbox,
+    });
+
     allItems.push({
       conversationUuid: convId,
       leadUuid: group.lead_uuid,
@@ -1931,8 +1968,9 @@ export async function getConversationsList(
       messageCount: msgs.length,
       inboxCount,
       outboxCount,
-      lastMessageIsOutbox: lastMsgType === "outbox",
+      lastMessageIsOutbox,
       hypothesisCount: companyId ? (hypothesisCountByCompany.get(companyId) ?? 0) : 0,
+      replyTag,
     });
   }
 
@@ -1943,9 +1981,27 @@ export async function getConversationsList(
     return db.localeCompare(da);
   });
 
+  const searchRaw = typeof options?.search === "string" ? options.search.trim().toLowerCase() : "";
+  let filtered = allItems;
+  if (searchRaw.length > 0) {
+    filtered = allItems.filter(
+      (c) =>
+        c.receiverDisplayName.toLowerCase().includes(searchRaw) ||
+        c.senderDisplayName.toLowerCase().includes(searchRaw) ||
+        (c.receiverCompanyName ?? "").toLowerCase().includes(searchRaw) ||
+        (c.lastMessageText ?? "").toLowerCase().includes(searchRaw)
+    );
+  }
+
+  const tagFilter = options?.replyTag ?? null;
+  if (tagFilter) {
+    filtered = filtered.filter((c) => c.replyTag === tagFilter);
+  }
+
   const offset = options?.offset ?? 0;
   const limit = Math.min(options?.limit ?? 50, 200);
-  return { data: allItems.slice(offset, offset + limit), error: null };
+  const total = filtered.length;
+  return { data: filtered.slice(offset, offset + limit), total, error: null };
 }
 
 // ── Company Hypotheses ────────────────────────────────────────────────────────

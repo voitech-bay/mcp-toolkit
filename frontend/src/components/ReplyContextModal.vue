@@ -605,7 +605,10 @@ async function buildSelectedNodes(): Promise<{
   const companyId = props.contactCompanyId;
   const projectCompanyId = props.companyProjectCompanyId;
 
+  console.log("mode", mode.value, props);
+
   if (mode.value === "company" && companyId && projectId && projectCompanyId) {
+    console.log("company", companyId, projectId, projectCompanyId);
     companies.push({ type: "company", nodeId: `co-${companyId}`, entityId: companyId, projectCompanyId, parentHypothesisNodeId: null, name: props.contactCompanyName, domain: null });
     const r = await fetch(`/api/contacts/by-company?companyId=${encodeURIComponent(companyId)}&projectId=${encodeURIComponent(projectId)}`);
     const j = await r.json();
@@ -657,6 +660,7 @@ async function openInCursor() {
   const projectId = props.projectId;
   if (!projectId) { message.warning("No project selected."); return; }
   const nodes = await buildSelectedNodes();
+  console.log(nodes);
   const total = nodes.hypotheses.length + nodes.companies.length + nodes.contacts.length + nodes.conversations.length;
   if (total === 0) { message.warning("Select at least one context option."); return; }
 

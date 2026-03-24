@@ -35,6 +35,7 @@ import {
   getContextSnapshots,
   saveContextSnapshot,
   getConversationsList,
+  type ConversationReplyTag,
   getCompanyHypotheses,
   getContactsByCompany,
   createCompany,
@@ -1146,14 +1147,25 @@ export async function handleGetConversationsList(
   }
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "50", 10) || 50, 1), 200);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
-  const result = await getConversationsList(client, projectId, { limit, offset });
+  const search = params.get("search")?.trim() ?? "";
+  const replyTagRaw = params.get("replyTag")?.trim() ?? "";
+  const allowedTags = new Set<string>(["no_response", "waiting_for_response", "got_response"]);
+  const replyTag: ConversationReplyTag | null =
+    replyTagRaw && allowedTags.has(replyTagRaw) ? (replyTagRaw as ConversationReplyTag) : null;
+
+  const result = await getConversationsList(client, projectId, {
+    limit,
+    offset,
+    search: search || null,
+    replyTag,
+  });
   if (result.error) {
     res.writeHead(500);
-    res.end(JSON.stringify({ data: [], error: result.error }));
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
     return;
   }
   res.writeHead(200);
-  res.end(JSON.stringify({ data: result.data }));
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
 }
 
 // ── Company hypotheses ────────────────────────────────────────────────────────

@@ -15,6 +15,8 @@ import ReplyContextModal from "../components/ReplyContextModal.vue";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+type ConversationReplyTag = "no_response" | "waiting_for_response" | "got_response";
+
 interface ConversationListItem {
   conversationUuid: string;
   leadUuid: string | null;
@@ -32,6 +34,8 @@ interface ConversationListItem {
   outboxCount: number;
   lastMessageIsOutbox: boolean;
   hypothesisCount: number;
+  /** Set by API; when missing, card falls back to inbox/outbox rules below. */
+  replyTag?: ConversationReplyTag;
 }
 
 interface DialogueMessage {
@@ -97,6 +101,27 @@ function truncate(s: string | null | undefined, n = 80): string {
   return s.length > n ? s.slice(0, n) + "…" : s;
 }
 
+const REPLY_TAGS = new Set<ConversationReplyTag>(["no_response", "waiting_for_response", "got_response"]);
+
+/**
+ * Status for the list card: prefer API `replyTag`, else original inbox/outbox / last-message rules.
+ */
+function replyTagForCard(item: ConversationListItem): ConversationReplyTag {
+  if (item.replyTag && REPLY_TAGS.has(item.replyTag)) return item.replyTag;
+  if (item.outboxCount > 0 && item.inboxCount === 0) return "no_response";
+  if (item.inboxCount > 0 && item.lastMessageIsOutbox) return "waiting_for_response";
+  if (item.inboxCount > 0 && !item.lastMessageIsOutbox) return "got_response";
+  if (item.inboxCount > 0) return "got_response";
+  return "no_response";
+}
+
+function replyStatusBadge(item: ConversationListItem): { type: "error" | "warning" | "success"; label: string } {
+  const t = replyTagForCard(item);
+  if (t === "no_response") return { type: "error", label: "No response" };
+  if (t === "waiting_for_response") return { type: "warning", label: "Waiting for response" };
+  return { type: "success", label: "Got response" };
+}
+
 // ── Resizable panels ──────────────────────────────────────────────────────────
 
 const LS_KEY = "conversations-panel-left-width";
@@ -142,7 +167,8 @@ onBeforeUnmount(() => {
 
 const PAGE_SIZE = 50;
 
-const allConvList = ref<ConversationListItem[]>([]);   // full loaded set (grows with pages)
+const allConvList = ref<ConversationListItem[]>([]);   // accumulated pages (server-filtered)
+const totalConvCount = ref(0);
 const convListLoading = ref(false);
 const convListLoadingMore = ref(false);
 const convListError = ref("");
@@ -150,49 +176,79 @@ const selectedConvUuid = ref<string | null>(null);
 const hasMore = ref(true);
 const currentOffset = ref(0);
 
-// Search
+// Search + tag filters (applied on server)
 const searchInput = ref("");
-const appliedSearch = ref("");
-const debouncedApplySearch = useDebounceFn(() => {
-  appliedSearch.value = searchInput.value.trim().toLowerCase();
+const searchQuery = ref("");
+const debouncedSearchQuery = useDebounceFn(() => {
+  searchQuery.value = searchInput.value.trim();
+  resetAndFetch();
 }, 250);
-watch(searchInput, () => debouncedApplySearch());
+watch(searchInput, () => debouncedSearchQuery());
 
-const convList = computed(() => {
-  const q = appliedSearch.value;
-  if (!q) return allConvList.value;
-  return allConvList.value.filter((c) =>
-    c.receiverDisplayName.toLowerCase().includes(q) ||
-    c.senderDisplayName.toLowerCase().includes(q) ||
-    (c.receiverCompanyName ?? "").toLowerCase().includes(q) ||
-    (c.lastMessageText ?? "").toLowerCase().includes(q)
-  );
+/** Empty string = all statuses (NSelect option typing). */
+const replyTagFilter = ref("");
+
+const replyTagSelectOptions: Array<{ label: string; value: ConversationReplyTag | "" }> = [
+  { label: "All statuses", value: "" },
+  { label: "No response", value: "no_response" },
+  { label: "Waiting for response", value: "waiting_for_response" },
+  { label: "Got response", value: "got_response" },
+];
+
+watch(replyTagFilter, () => {
+  resetAndFetch();
 });
 
 async function fetchConversationsPage(offset: number, append: boolean) {
   const projectId = projectStore.selectedProjectId;
-  if (!projectId) { allConvList.value = []; return; }
+  if (!projectId) {
+    allConvList.value = [];
+    totalConvCount.value = 0;
+    return;
+  }
   if (append) convListLoadingMore.value = true;
   else convListLoading.value = true;
   convListError.value = "";
   try {
-    const r = await fetch(
-      `/api/conversations?projectId=${encodeURIComponent(projectId)}&limit=${PAGE_SIZE}&offset=${offset}`
-    );
-    const j = await r.json();
+    const sp = new URLSearchParams({
+      projectId,
+      limit: String(PAGE_SIZE),
+      offset: String(offset),
+    });
+    if (searchQuery.value) sp.set("search", searchQuery.value);
+    const tag = replyTagFilter.value.trim();
+    if (tag === "no_response" || tag === "waiting_for_response" || tag === "got_response") {
+      sp.set("replyTag", tag);
+    }
+
+    const r = await fetch(`/api/conversations?${sp.toString()}`);
+    const j = await r.json() as {
+      data?: ConversationListItem[];
+      total?: number;
+      error?: string;
+    };
     if (j.error) {
       convListError.value = j.error;
-      if (!append) allConvList.value = [];
+      if (!append) {
+        allConvList.value = [];
+        totalConvCount.value = 0;
+      }
     } else {
-      const page = (j.data ?? []) as ConversationListItem[];
+      const page = j.data ?? [];
+      const total = typeof j.total === "number" ? j.total : page.length;
+      totalConvCount.value = total;
       if (append) allConvList.value = [...allConvList.value, ...page];
       else allConvList.value = page;
-      hasMore.value = page.length === PAGE_SIZE;
-      currentOffset.value = offset + page.length;
+      const loaded = append ? offset + page.length : page.length;
+      hasMore.value = loaded < total && page.length === PAGE_SIZE;
+      currentOffset.value = loaded;
     }
   } catch (e) {
     convListError.value = e instanceof Error ? e.message : "Failed to load conversations";
-    if (!append) allConvList.value = [];
+    if (!append) {
+      allConvList.value = [];
+      totalConvCount.value = 0;
+    }
   } finally {
     convListLoading.value = false;
     convListLoadingMore.value = false;
@@ -203,13 +259,15 @@ function resetAndFetch() {
   hasMore.value = true;
   currentOffset.value = 0;
   allConvList.value = [];
+  totalConvCount.value = 0;
   void fetchConversationsPage(0, false);
 }
 
 watch(() => projectStore.selectedProjectId, () => {
   selectedConvUuid.value = null;
   searchInput.value = "";
-  appliedSearch.value = "";
+  searchQuery.value = "";
+  replyTagFilter.value = "";
   resetAndFetch();
 }, { immediate: true });
 
@@ -238,6 +296,10 @@ onBeforeUnmount(() => {
 
 const selectedConvItem = computed(() =>
   allConvList.value.find((c) => c.conversationUuid === selectedConvUuid.value) ?? null
+);
+
+const listFiltersActive = computed(
+  () => Boolean(searchQuery.value.trim()) || Boolean(replyTagFilter.value.trim())
 );
 
 function selectConversation(item: ConversationListItem) {
@@ -514,7 +576,7 @@ function switchToContactConversation(contact: ContactWithConversations) {
   if (contact.conversations.length === 0) return;
   const convUuid = contact.conversations[0].conversationUuid;
   // Find in list or set directly
-  const found = convList.value.find((c) => c.conversationUuid === convUuid);
+  const found = allConvList.value.find((c) => c.conversationUuid === convUuid);
   if (found) {
     selectedConvUuid.value = convUuid;
   } else {
@@ -542,7 +604,7 @@ const filteredRelatedContacts = computed(() => {
           <NButton size="tiny" quaternary @click="resetAndFetch" style="margin-left:auto">Refresh</NButton>
         </div>
 
-        <!-- Search -->
+        <!-- Search + status filter (server-side) -->
         <div class="convpage__search">
           <NInput
             v-model:value="searchInput"
@@ -552,18 +614,25 @@ const filteredRelatedContacts = computed(() => {
           >
             <template #prefix><SearchIcon :size="14" style="opacity:0.5" /></template>
           </NInput>
+          <NSelect
+            v-model:value="replyTagFilter"
+            :options="replyTagSelectOptions"
+            size="small"
+            placeholder="Status"
+            class="convpage__tag-filter"
+          />
         </div>
 
         <NSpin :show="convListLoading" class="convpage__spin">
           <NAlert v-if="convListError" type="error" class="convpage__alert">{{ convListError }}</NAlert>
           <NEmpty
-            v-else-if="!convListLoading && convList.length === 0"
-            :description="appliedSearch ? 'No results for your search' : 'No conversations found'"
+            v-else-if="!convListLoading && allConvList.length === 0"
+            :description="listFiltersActive ? 'No results for your filters' : 'No conversations found'"
             class="convpage__empty"
           />
           <div v-else class="convpage__list">
             <div
-              v-for="item in convList"
+              v-for="item in allConvList"
               :key="item.conversationUuid"
               class="convpage__item"
               :class="{ 'convpage__item--active': item.conversationUuid === selectedConvUuid }"
@@ -594,16 +663,10 @@ const filteredRelatedContacts = computed(() => {
                   {{ item.senderDisplayName }}
                 </NTag>
 
-                <!-- Response status -->
-                <NTag v-if="item.outboxCount > 0 && item.inboxCount === 0" size="small" :bordered="false" type="error">
-                  No response
-                </NTag>
-                <NTag v-else-if="item.inboxCount > 0 && item.lastMessageIsOutbox" size="small" :bordered="false" type="warning">
-                  Waiting for response
-                </NTag>
-                <NTag v-else-if="item.inboxCount > 0 && !item.lastMessageIsOutbox" size="small" :bordered="false" type="success">
-                  Got response
-                </NTag>
+                <!-- Response status (API replyTag + legacy fallback from counts) -->
+                <template v-for="b in [replyStatusBadge(item)]" :key="`${item.conversationUuid}-status`">
+                  <NTag size="small" :bordered="false" :type="b.type">{{ b.label }}</NTag>
+                </template>
 
                 <!-- Hypothesis count -->
                 <NTag v-if="item.hypothesisCount > 0" size="small" :bordered="false" type="info">
@@ -617,8 +680,8 @@ const filteredRelatedContacts = computed(() => {
               </div>
             </div>
 
-            <!-- Infinite scroll sentinel (hidden when searching, since search is client-side) -->
-            <div v-if="!appliedSearch" ref="listSentinelRef" class="convpage__sentinel">
+            <!-- Infinite scroll sentinel -->
+            <div v-if="hasMore" ref="listSentinelRef" class="convpage__sentinel">
               <NSpin v-if="convListLoadingMore" :size="16" />
               <span v-else-if="!hasMore" class="convpage__sentinel-end">All loaded</span>
             </div>
@@ -898,6 +961,13 @@ const filteredRelatedContacts = computed(() => {
   padding: 8px 10px;
   border-bottom: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.2));
   flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.convpage__tag-filter {
+  width: 100%;
 }
 
 .convpage__alert {

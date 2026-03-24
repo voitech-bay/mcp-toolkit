@@ -1,0 +1,142 @@
+name: Deploy to AWS App Runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: "AWS region"
+        required: true
+        default: "eu-central-1"
+      image_tag:
+        description: "Docker image tag"
+        required: true
+        default: "latest"
+      web_service_name:
+        description: "App Runner web+api service name"
+        required: true
+        default: "mcp-toolkit-web-api"
+      mcp_service_name:
+        description: "App Runner mcp service name"
+        required: true
+        default: "mcp-toolkit-mcp"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  WEB_REPOSITORY: mcp-toolkit-web
+  MCP_REPOSITORY: mcp-toolkit-mcp
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ inputs.region }}
+
+      - name: Resolve account and image URIs
+        id: vars
+        shell: bash
+        run: |
+          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          REGISTRY="$ACCOUNT_ID.dkr.ecr.${{ inputs.region }}.amazonaws.com"
+          WEB_IMAGE="$REGISTRY/${{ env.WEB_REPOSITORY }}:${{ inputs.image_tag }}"
+          MCP_IMAGE="$REGISTRY/${{ env.MCP_REPOSITORY }}:${{ inputs.image_tag }}"
+          echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
+          echo "registry=$REGISTRY" >> "$GITHUB_OUTPUT"
+          echo "web_image=$WEB_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "mcp_image=$MCP_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure ECR repositories exist
+        shell: bash
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.WEB_REPOSITORY }}" --region "${{ inputs.region }}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${{ env.WEB_REPOSITORY }}" --region "${{ inputs.region }}"
+          aws ecr describe-repositories --repository-names "${{ env.MCP_REPOSITORY }}" --region "${{ inputs.region }}" >/dev/null 2>&1 || \
+          aws ecr create-repository --repository-name "${{ env.MCP_REPOSITORY }}" --region "${{ inputs.region }}"
+
+      - name: Login to ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push web image
+        shell: bash
+        run: |
+          docker build -f Dockerfile.web -t "${{ steps.vars.outputs.web_image }}" .
+          docker push "${{ steps.vars.outputs.web_image }}"
+
+      - name: Build and push mcp image
+        shell: bash
+        run: |
+          docker build -f Dockerfile.mcp -t "${{ steps.vars.outputs.mcp_image }}" .
+          docker push "${{ steps.vars.outputs.mcp_image }}"
+
+      - name: Ensure App Runner ECR access role exists
+        shell: bash
+        run: |
+          ROLE_NAME="AppRunnerECRAccessRole"
+          aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1 || \
+          aws iam create-role \
+            --role-name "$ROLE_NAME" \
+            --assume-role-policy-document "file://deploy/aws/apprunner-ecr-trust-policy.json"
+          aws iam attach-role-policy \
+            --role-name "$ROLE_NAME" \
+            --policy-arn "arn:aws:iam::aws:policy/service-role/AWSAppRunnerServicePolicyForECRAccess"
+
+      - name: Create or update web service
+        shell: bash
+        run: |
+          ACCESS_ROLE_ARN="arn:aws:iam::${{ steps.vars.outputs.account_id }}:role/AppRunnerECRAccessRole"
+          SERVICE_ARN="$(aws apprunner list-services --region "${{ inputs.region }}" --query "ServiceSummaryList[?ServiceName=='${{ inputs.web_service_name }}'].ServiceArn | [0]" --output text)"
+          SOURCE_CFG="AuthenticationConfiguration={AccessRoleArn=$ACCESS_ROLE_ARN},ImageRepository={ImageIdentifier=${{ steps.vars.outputs.web_image }},ImageRepositoryType=ECR,ImageConfiguration={Port=3000,RuntimeEnvironmentVariables={PORT=3000}}},AutoDeploymentsEnabled=true"
+
+          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" = "None" ]; then
+            aws apprunner create-service \
+              --service-name "${{ inputs.web_service_name }}" \
+              --region "${{ inputs.region }}" \
+              --source-configuration "$SOURCE_CFG" \
+              --instance-configuration "Cpu=1 vCPU,Memory=2 GB" >/dev/null
+          else
+            aws apprunner update-service \
+              --service-arn "$SERVICE_ARN" \
+              --region "${{ inputs.region }}" \
+              --source-configuration "$SOURCE_CFG" >/dev/null
+          fi
+
+      - name: Create or update mcp service
+        shell: bash
+        run: |
+          ACCESS_ROLE_ARN="arn:aws:iam::${{ steps.vars.outputs.account_id }}:role/AppRunnerECRAccessRole"
+          SERVICE_ARN="$(aws apprunner list-services --region "${{ inputs.region }}" --query "ServiceSummaryList[?ServiceName=='${{ inputs.mcp_service_name }}'].ServiceArn | [0]" --output text)"
+          SOURCE_CFG="AuthenticationConfiguration={AccessRoleArn=$ACCESS_ROLE_ARN},ImageRepository={ImageIdentifier=${{ steps.vars.outputs.mcp_image }},ImageRepositoryType=ECR,ImageConfiguration={Port=3000,RuntimeEnvironmentVariables={PORT=3000}}},AutoDeploymentsEnabled=true"
+
+          if [ -z "$SERVICE_ARN" ] || [ "$SERVICE_ARN" = "None" ]; then
+            aws apprunner create-service \
+              --service-name "${{ inputs.mcp_service_name }}" \
+              --region "${{ inputs.region }}" \
+              --source-configuration "$SOURCE_CFG" \
+              --instance-configuration "Cpu=1 vCPU,Memory=2 GB" >/dev/null
+          else
+            aws apprunner update-service \
+              --service-arn "$SERVICE_ARN" \
+              --region "${{ inputs.region }}" \
+              --source-configuration "$SOURCE_CFG" >/dev/null
+          fi
+
+      - name: Print service URLs
+        shell: bash
+        run: |
+          WEB_ARN="$(aws apprunner list-services --region "${{ inputs.region }}" --query "ServiceSummaryList[?ServiceName=='${{ inputs.web_service_name }}'].ServiceArn | [0]" --output text)"
+          MCP_ARN="$(aws apprunner list-services --region "${{ inputs.region }}" --query "ServiceSummaryList[?ServiceName=='${{ inputs.mcp_service_name }}'].ServiceArn | [0]" --output text)"
+          WEB_URL="$(aws apprunner describe-service --region "${{ inputs.region }}" --service-arn "$WEB_ARN" --query "Service.ServiceUrl" --output text)"
+          MCP_URL="$(aws apprunner describe-service --region "${{ inputs.region }}" --service-arn "$MCP_ARN" --query "Service.ServiceUrl" --output text)"
+          echo "Web/API URL: https://$WEB_URL"
+          echo "MCP URL: https://$MCP_URL/mcp"
