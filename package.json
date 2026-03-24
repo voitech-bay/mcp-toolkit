@@ -12,7 +12,7 @@
     "dev:http": "tsx src/standalone-http.ts",
     "dev:api": "tsx src/api-server.ts",
     "dev:frontend": "cd frontend && npm run dev",
-    "start": "node src/api-server.ts",
+    "start": "node dist/api-server.js",
     "prepare": "npm run build"
   },
   "engines": {
