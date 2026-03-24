@@ -388,7 +388,7 @@ wss.on("connection", (ws: WebSocket, _req: unknown, runId: string) => {
   });
 });
 
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`API server: http://localhost:${PORT}`);
   console.log("  GET  /api/supabase-state");
   console.log("  POST /api/supabase-sync");
