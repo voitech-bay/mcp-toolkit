@@ -46,8 +46,10 @@ import {
   handleGetCompaniesByIds,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
+import { createMcpHandler } from "./server.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
+const mcpHandler = createMcpHandler();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const STATIC_ROOT = path.resolve(__dirname, "../public");
@@ -109,7 +111,8 @@ const server = createServer(async (req, res) => {
 
   // Allow frontend dev server (and any origin when testing locally)
   res.setHeader("Access-Control-Allow-Origin", "*");
-  if (req.method === "OPTIONS") {
+  // MCP Streamable HTTP handles its own CORS/preflight on /mcp
+  if (req.method === "OPTIONS" && !pathname.startsWith("/mcp")) {
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     res.writeHead(204);
@@ -139,6 +142,24 @@ const server = createServer(async (req, res) => {
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
 
   try {
+    if (pathname.startsWith("/mcp")) {
+      await mcpHandler(req, res);
+      return;
+    }
+
+    if (pathname === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          api: true,
+          mcpPath: "/mcp",
+          static: "GET /* → public/",
+        })
+      );
+      return;
+    }
+
     if (projectCredentialsMatch) {
       const projectId = decodeURIComponent(projectCredentialsMatch[1]);
       await handleUpdateProjectCredentials(req, res, projectId);
@@ -388,8 +409,10 @@ wss.on("connection", (ws: WebSocket, _req: unknown, runId: string) => {
   });
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`API server: http://localhost:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`API + static + MCP: http://localhost:${PORT}`);
+  console.log("  MCP  Streamable HTTP: GET|POST /mcp");
+  console.log("  GET  /health");
   console.log("  GET  /api/supabase-state");
   console.log("  POST /api/supabase-sync");
   console.log("  GET  /api/supabase-table-query");

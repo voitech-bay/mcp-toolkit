@@ -9,7 +9,7 @@
     "build:backend": "tsc",
     "build:frontend": "cd frontend && npm run build",
     "dev": "tsx src/stdio.ts",
-    "dev:http": "tsx src/standalone-http.ts",
+    "dev:http": "tsx src/api-server.ts",
     "dev:api": "tsx src/api-server.ts",
     "dev:frontend": "cd frontend && npm run dev",
     "start": "node dist/api-server.js",
