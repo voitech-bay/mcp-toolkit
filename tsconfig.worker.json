@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/workers/**/*.ts",
+    "src/services/supabase.ts",
+    "src/services/worker-registry.ts"
+  ],
+  "exclude": ["node_modules", "dist"]
+}

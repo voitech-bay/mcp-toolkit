@@ -1409,7 +1409,10 @@ export async function getProjectCompanies(
     });
   }
 
-  query = query.order("created_at", { ascending: false }).range(offset, offset + limit - 1);
+  query = query
+    .order("created_at", { ascending: false })
+    .order("id", { ascending: true })
+    .range(offset, offset + limit - 1);
 
   const { data, error, count } = await query;
   if (error) return { data: [], total: 0, error: error.message };
@@ -2231,6 +2234,9 @@ export type EnrichmentAgentCellStatus =
   | "success"
   | "error";
 
+/** When `status` is `running`: batch accumulator vs. run row created / agent executing. */
+export type EnrichmentRunPhase = "batch_wait" | "working";
+
 export interface EnrichmentAgentCellState {
   status: EnrichmentAgentCellStatus;
   updatedAt: string | null;
@@ -2239,6 +2245,8 @@ export interface EnrichmentAgentCellState {
   resultPreview?: unknown;
   /** Worker id/name when task is claimed or run is executing (from claimed_by / run.meta / run.input). */
   workerName?: string | null;
+  /** Set when status is `running` (from queue `enrichment_agent_run_id`). */
+  runPhase?: EnrichmentRunPhase;
 }
 
 export interface EnrichmentQueueTaskRow {
@@ -2307,6 +2315,25 @@ function workerNameFromRun(run: EnrichmentAgentRunRow): string | null {
   return null;
 }
 
+/** `claimed_by` may be a UUID; prefer human-readable name from the run row. */
+function isProbablyUuid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+    s.trim()
+  );
+}
+
+function resolveWorkerDisplayName(
+  claimedBy: string | null | undefined,
+  run: EnrichmentAgentRunRow | undefined
+): string | null {
+  const fromRun = run ? workerNameFromRun(run) : null;
+  if (fromRun) return fromRun;
+  const cb = claimedBy?.trim();
+  if (!cb) return null;
+  if (isProbablyUuid(cb)) return null;
+  return cb;
+}
+
 /**
  * Derive per-cell status from latest queue row, optional result row, and latest run.
  */
@@ -2324,11 +2351,14 @@ export function deriveEnrichmentCellState(
       };
     }
     if (task.status === "running") {
-      const cb = task.claimed_by?.trim();
+      const runPhase: EnrichmentRunPhase = task.enrichment_agent_run_id
+        ? "working"
+        : "batch_wait";
       return {
         status: "running",
+        runPhase,
         updatedAt: task.updated_at,
-        workerName: cb || (run ? workerNameFromRun(run) : null) || null,
+        workerName: resolveWorkerDisplayName(task.claimed_by, run),
       };
     }
     if (task.status === "error") {
@@ -2360,8 +2390,9 @@ export function deriveEnrichmentCellState(
     if (run.status === "running") {
       return {
         status: "running",
+        runPhase: "working",
         updatedAt: run.started_at,
-        workerName: workerNameFromRun(run),
+        workerName: resolveWorkerDisplayName(undefined, run),
       };
     }
     if (run.status === "error") {
@@ -2386,6 +2417,8 @@ export type EnrichmentAgentRegistryRow = {
   name: string;
   entity_type: string;
   operation_name: string | null;
+  prompt: string;
+  batch_size: number;
   is_active: boolean;
   created_at: string;
 };
@@ -2397,7 +2430,9 @@ export async function listAllEnrichmentAgents(client: SupabaseClient): Promise<{
 }> {
   const { data, error } = await client
     .from(ENRICHMENT_AGENTS_TABLE)
-    .select("name, entity_type, operation_name, is_active, created_at")
+    .select(
+      "name, entity_type, operation_name, prompt, batch_size, is_active, created_at"
+    )
     .order("name", { ascending: true });
   if (error) return { data: [], error: error.message };
   return { data: (data ?? []) as EnrichmentAgentRegistryRow[], error: null };
@@ -2409,6 +2444,8 @@ export async function createEnrichmentAgent(
     name: string;
     entity_type: string;
     operation_name?: string | null;
+    prompt?: string;
+    batch_size?: number;
     is_active?: boolean;
   }
 ): Promise<{ error: string | null }> {
@@ -2418,10 +2455,17 @@ export async function createEnrichmentAgent(
   if (et !== "company" && et !== "contact" && et !== "both") {
     return { error: "entity_type must be company, contact, or both" };
   }
+  const batchSize =
+    payload.batch_size !== undefined ? Number(payload.batch_size) : 1;
+  if (!Number.isFinite(batchSize) || batchSize < 1) {
+    return { error: "batch_size must be an integer >= 1" };
+  }
   const { error } = await client.from(ENRICHMENT_AGENTS_TABLE).insert({
     name,
     entity_type: et,
     operation_name: payload.operation_name?.trim() || null,
+    prompt: payload.prompt ?? "",
+    batch_size: Math.floor(batchSize),
     is_active: payload.is_active !== false,
   });
   if (error) return { error: error.message };
@@ -2434,6 +2478,8 @@ export async function updateEnrichmentAgent(
   patch: {
     entity_type?: string;
     operation_name?: string | null;
+    prompt?: string;
+    batch_size?: number;
     is_active?: boolean;
   }
 ): Promise<{ error: string | null }> {
@@ -2452,6 +2498,16 @@ export async function updateEnrichmentAgent(
       patch.operation_name === null || patch.operation_name === ""
         ? null
         : String(patch.operation_name).trim();
+  }
+  if (patch.prompt !== undefined) {
+    updates.prompt = String(patch.prompt);
+  }
+  if (patch.batch_size !== undefined) {
+    const bs = Number(patch.batch_size);
+    if (!Number.isFinite(bs) || bs < 1) {
+      return { error: "batch_size must be an integer >= 1" };
+    }
+    updates.batch_size = Math.floor(bs);
   }
   if (patch.is_active !== undefined) {
     updates.is_active = Boolean(patch.is_active);
@@ -2478,6 +2534,8 @@ export async function listEnrichmentAgentsForEntityType(
     name: string;
     entity_type: string;
     operation_name: string | null;
+    prompt: string;
+    batch_size: number;
     is_active: boolean;
   }>;
   error: string | null;
@@ -2488,7 +2546,7 @@ export async function listEnrichmentAgentsForEntityType(
       : ["contact", "both"];
   const { data, error } = await client
     .from(ENRICHMENT_AGENTS_TABLE)
-    .select("name, entity_type, operation_name, is_active")
+    .select("name, entity_type, operation_name, prompt, batch_size, is_active")
     .eq("is_active", true)
     .in("entity_type", allowed)
     .order("name", { ascending: true });
@@ -2497,8 +2555,28 @@ export async function listEnrichmentAgentsForEntityType(
     name: string;
     entity_type: string;
     operation_name: string | null;
+    prompt: string;
+    batch_size: number;
     is_active: boolean;
   }>, error: null };
+}
+
+/** Full agent row by name (for worker execution: prompt + batch_size). */
+export async function getEnrichmentAgentByName(
+  client: SupabaseClient,
+  name: string
+): Promise<{ data: EnrichmentAgentRegistryRow | null; error: string | null }> {
+  const trimmed = name?.trim();
+  if (!trimmed) return { data: null, error: "name is required" };
+  const { data, error } = await client
+    .from(ENRICHMENT_AGENTS_TABLE)
+    .select(
+      "name, entity_type, operation_name, prompt, batch_size, is_active, created_at"
+    )
+    .eq("name", trimmed)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: (data as EnrichmentAgentRegistryRow) ?? null, error: null };
 }
 
 export async function getContactsForProjectPage(
@@ -2514,6 +2592,7 @@ export async function getContactsForProjectPage(
     .select("*", { count: "exact" })
     .eq("project_id", projectId)
     .order("created_at", { ascending: false })
+    .order("uuid", { ascending: true })
     .range(off, off + lim - 1);
   if (error) return { data: [], total: 0, error: error.message };
   return { data: (data ?? []) as Record<string, unknown>[], total: count ?? 0, error: null };

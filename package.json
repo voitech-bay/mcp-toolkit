@@ -7,13 +7,16 @@
   "scripts": {
     "build": "tsc && cd frontend && npm ci && npm run build",
     "build:backend": "tsc",
+    "build:worker": "tsc -p tsconfig.worker.json",
+    "build:worker:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.worker.json",
     "build:frontend": "cd frontend && npm run build",
     "dev": "tsx src/stdio.ts",
+    "dev:worker": "tsx src/workers/enrichment-worker.ts",
     "dev:http": "tsx src/api-server.ts",
     "dev:api": "tsx src/api-server.ts",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:enrichment-worker": "tsx src/workers/enrichment-worker.ts",
-    "start:enrichment-worker": "node dist/workers/enrichment-worker.js",
+    "start:worker": "node dist/workers/enrichment-worker.js",
     "start": "node dist/api-server.js",
     "prepare": "npm run build"
   },
@@ -26,6 +29,7 @@
     "dotenv": "^16.4.0",
     "lucide-vue-next": "^0.576.0",
     "openai": "^6.32.0",
+    "unique-names-generator": "^4.7.1",
     "ws": "^8.19.0",
     "zod": "^3.23.0"
   },

@@ -65,7 +65,11 @@ import {
   isWorkerHeartbeatAuthOk,
   recordWorkerHeartbeat,
   type WorkerHeartbeatPayload,
+  type WorkerPendingBatchProgress,
 } from "./services/worker-registry.js";
+import { persistWorkerPresenceToSupabase } from "./services/worker-presence-db.js";
+import { getWorkersUiSnapshot } from "./services/worker-ui-snapshot.js";
+import { broadcastEnrichmentBatchStarted } from "./services/enrichment-realtime.js";
 
 export { generateContextText };
 
@@ -1578,6 +1582,8 @@ export async function handlePostEnrichmentAgent(
         name?: string;
         entity_type?: string;
         operation_name?: string | null;
+        prompt?: string;
+        batch_size?: number;
         is_active?: boolean;
       }
     | undefined;
@@ -1585,6 +1591,8 @@ export async function handlePostEnrichmentAgent(
     name: body?.name ?? "",
     entity_type: body?.entity_type ?? "",
     operation_name: body?.operation_name,
+    prompt: body?.prompt,
+    batch_size: body?.batch_size,
     is_active: body?.is_active,
   });
   if (result.error) {
@@ -1619,6 +1627,8 @@ export async function handlePutEnrichmentAgent(
         name?: string;
         entity_type?: string;
         operation_name?: string | null;
+        prompt?: string;
+        batch_size?: number;
         is_active?: boolean;
       }
     | undefined;
@@ -1631,6 +1641,8 @@ export async function handlePutEnrichmentAgent(
   const result = await updateEnrichmentAgent(client, name, {
     entity_type: body?.entity_type,
     operation_name: body?.operation_name,
+    prompt: body?.prompt,
+    batch_size: body?.batch_size,
     is_active: body?.is_active,
   });
   if (result.error) {
@@ -1863,13 +1875,52 @@ export async function handlePostWorkerHeartbeat(
     }
   }
 
+  let pendingBatches: WorkerPendingBatchProgress[] | undefined;
+  if (Array.isArray(raw.pendingBatches)) {
+    pendingBatches = [];
+    for (const item of raw.pendingBatches) {
+      if (!isRecord(item)) continue;
+      const agentName = parseString(item.agentName);
+      const count = typeof item.count === "number" && Number.isFinite(item.count) ? item.count : 0;
+      const batchSize =
+        typeof item.batchSize === "number" && Number.isFinite(item.batchSize) ? item.batchSize : 1;
+      const waitingSince =
+        typeof item.waitingSince === "string" && item.waitingSince.trim()
+          ? item.waitingSince.trim()
+          : "";
+      if (!agentName || !waitingSince) continue;
+      pendingBatches.push({
+        agentName,
+        count: Math.max(0, Math.floor(count)),
+        batchSize: Math.max(1, Math.floor(batchSize)),
+        waitingSince,
+      });
+    }
+  }
+
+  let runtime: Record<string, string | number> | undefined;
+  if (isRecord(raw.runtime)) {
+    const out: Record<string, string | number> = {};
+    for (const [k, v] of Object.entries(raw.runtime)) {
+      if (k.length > 80) continue;
+      if (typeof v === "string" || typeof v === "number") {
+        if (typeof v === "number" && !Number.isFinite(v)) continue;
+        out[k] = v;
+      }
+    }
+    if (Object.keys(out).length > 0) runtime = out;
+  }
+
   const payload: WorkerHeartbeatPayload = {
     workerId,
     name,
     kind,
     status,
     tasksInProgress,
+    pendingBatches,
+    runtime,
   };
+  await persistWorkerPresenceToSupabase(payload);
   recordWorkerHeartbeat(payload);
   res.writeHead(200);
   res.end(JSON.stringify({ ok: true }));
@@ -1888,5 +1939,77 @@ export async function handleGetWorkers(
   }
   res.setHeader("Content-Type", "application/json");
   res.writeHead(200);
-  res.end(JSON.stringify(getActiveWorkers()));
+  try {
+    const snap = await getWorkersUiSnapshot();
+    res.end(JSON.stringify(snap));
+  } catch {
+    res.end(JSON.stringify(getActiveWorkers()));
+  }
+}
+
+/** POST /api/enrichment/worker-batch-event — worker notifies UI that a batch run is starting (same auth as worker heartbeat). */
+export async function handlePostEnrichmentWorkerBatchEvent(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  if (!isWorkerHeartbeatAuthOk(req)) {
+    res.writeHead(401);
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+    return;
+  }
+  const raw = await getParsedBody(req);
+  if (!isRecord(raw)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const projectId = parseString(raw.projectId);
+  const agentName = parseString(raw.agentName);
+  const workerName = parseString(raw.workerName) ?? null;
+  if (!projectId || !agentName) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and agentName are required" }));
+    return;
+  }
+  const itemsRaw = raw.items;
+  if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "items must be a non-empty array" }));
+    return;
+  }
+  const items: Array<{ taskId: string; companyId: string | null; contactId: string | null }> = [];
+  for (const el of itemsRaw) {
+    if (!isRecord(el)) continue;
+    const taskId = parseString(el.taskId);
+    if (!taskId) continue;
+    const companyId =
+      el.companyId === undefined
+        ? null
+        : typeof el.companyId === "string"
+          ? el.companyId
+          : null;
+    const contactId =
+      el.contactId === undefined
+        ? null
+        : typeof el.contactId === "string"
+          ? el.contactId
+          : null;
+    if (!companyId && !contactId) continue;
+    items.push({ taskId, companyId, contactId });
+  }
+  if (items.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "no valid items" }));
+    return;
+  }
+  broadcastEnrichmentBatchStarted({ projectId, agentName, workerName, items });
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true, broadcast: items.length }));
 }

@@ -398,6 +398,7 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
         <div style="display:flex;align-items:center;gap:8px">
           <UsersIcon :size="16" />
           <span>Contacts</span>
+          <span v-if="loading" style="opacity:0.6;font-size:0.82rem">Loading…</span>
         </div>
         <NInput
           v-model:value="searchInput"
@@ -419,7 +420,6 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
       <NDataTable
         :columns="columns"
         :data="data"
-        :loading="loading"
         :scroll-x="1200"
         :row-key="(r: ContactRow) => (r.id ?? `${r.company_id ?? ''}/${r.first_name ?? ''}/${r.last_name ?? ''}/${r.position ?? ''}`)"
         v-model:checked-row-keys="checkedKeys"

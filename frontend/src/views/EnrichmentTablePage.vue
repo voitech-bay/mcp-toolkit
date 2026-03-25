@@ -1,5 +1,16 @@
 <script setup lang="ts">
-import { ref, computed, watch, h, onMounted, onUnmounted } from "vue";
+import {
+  ref,
+  computed,
+  watch,
+  h,
+  onMounted,
+  onUnmounted,
+  inject,
+  nextTick,
+  type Ref,
+} from "vue";
+import type { HTMLAttributes } from "vue";
 import {
   NCard,
   NDataTable,
@@ -10,23 +21,32 @@ import {
   NAlert,
   NEmpty,
   NModal,
-  NTag,
   NSpin,
+  NTag,
   NPagination,
   NSelect,
   NInput,
+  NInputNumber,
   NSwitch,
-  NDivider,
+  NPopconfirm,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
 import { useIntervalFn } from "@vueuse/core";
-import { Table2Icon } from "lucide-vue-next";
+import { PlayIcon, RefreshCwIcon, ClockIcon } from "lucide-vue-next";
 import { useProjectStore } from "../stores/project";
+import {
+  useEnrichmentRealtime,
+  type EnrichmentDataPayload,
+  type EnrichmentBatchStartedPayload,
+} from "../composables/useEnrichmentRealtime";
+import type { WorkerEntry } from "../composables/useWorkers";
 
 type EntityTab = "company" | "contact";
 
 type EnrichmentAgentCellStatus = "planned" | "queued" | "running" | "success" | "error";
+
+type EnrichmentRunPhase = "batch_wait" | "working";
 
 interface EnrichmentAgentCellState {
   status: EnrichmentAgentCellStatus;
@@ -34,6 +54,8 @@ interface EnrichmentAgentCellState {
   error?: string | null;
   resultPreview?: unknown;
   workerName?: string | null;
+  /** When status is `running`: batch accumulator vs. executing agent. */
+  runPhase?: EnrichmentRunPhase;
 }
 
 interface EnrichmentRunStats {
@@ -56,6 +78,8 @@ interface EnrichmentAgentInfo {
   name: string;
   entity_type: string;
   operation_name: string | null;
+  prompt?: string;
+  batch_size?: number;
   is_active: boolean;
 }
 
@@ -63,12 +87,20 @@ interface EnrichmentAgentRegistryRow {
   name: string;
   entity_type: string;
   operation_name: string | null;
+  prompt: string;
+  batch_size: number;
   is_active: boolean;
   created_at: string;
 }
 
 const projectStore = useProjectStore();
 const message = useMessage();
+
+/** Shared with App.vue (single workers WebSocket). */
+const enrichmentWorkers = inject<Ref<WorkerEntry[]>>(
+  "workersRegistry",
+  ref<WorkerEntry[]>([])
+);
 
 /** Base columns shown for each entity tab (fixed set). */
 const COMPANY_BASE_KEYS: readonly string[] = [
@@ -100,17 +132,29 @@ const enqueueAgentName = ref<string | null>(null);
 const enqueueOperationName = ref("");
 const enqueueLoading = ref(false);
 
+/** Per-cell POST /api/enrichment/enqueue (Run / Rerun). */
+const cellEnqueueLoading = ref<Record<string, boolean>>({});
+
+function cellEnqueueKey(row: EnrichmentTableRow, agentName: string): string {
+  return `${rowKey(row)}::${agentName}`;
+}
+
 const manageAgentsOpen = ref(false);
 const registryRows = ref<EnrichmentAgentRegistryRow[]>([]);
 const registryLoading = ref(false);
 const registryError = ref("");
 const updatingAgentName = ref<string | null>(null);
 
-const newAgentName = ref("");
-const newAgentEntityType = ref<"company" | "contact" | "both">("company");
-const newAgentOperation = ref("");
-const newAgentActive = ref(true);
-const creatingAgent = ref(false);
+type AgentModalMode = "create" | "edit";
+const agentModalOpen = ref(false);
+const agentModalMode = ref<AgentModalMode>("create");
+const agentFormName = ref("");
+const agentFormEntityType = ref<"company" | "contact" | "both">("company");
+const agentFormOperation = ref("");
+const agentFormPrompt = ref("");
+const agentFormBatchSize = ref<number | null>(1);
+const agentFormActive = ref(true);
+const savingAgent = ref(false);
 
 const entityTypeOptions: SelectOption[] = [
   { label: "Company", value: "company" },
@@ -134,6 +178,34 @@ const tableError = ref("");
 const page = ref(1);
 const pageSize = ref(25);
 const PAGE_SIZES = [10, 25, 50, 100];
+
+/** Tasks held in worker memory waiting to form a batch (sum across all workers). */
+const workerBatchBufferCount = computed(() =>
+  enrichmentWorkers.value.reduce(
+    (sum, w) => sum + w.pendingBatches.reduce((s, p) => s + p.count, 0),
+    0
+  )
+);
+
+/** Tooltip: per-agent buffer vs target batch size from workers. */
+const workerBatchBufferDetail = computed(() => {
+  const parts: string[] = [];
+  for (const w of enrichmentWorkers.value) {
+    for (const p of w.pendingBatches) {
+      parts.push(`${p.agentName}: ${p.count}/${p.batchSize}`);
+    }
+  }
+  return parts.join(" · ");
+});
+
+/** Configured agent batch sizes (DB) for agents on this tab. */
+const agentBatchSizeSummary = computed(() => {
+  const sizes = agents.value.map((a) => Math.max(1, Number(a.batch_size) || 1));
+  if (sizes.length === 0) return "";
+  const uniq = [...new Set(sizes)].sort((a, b) => a - b);
+  if (uniq.length === 1) return String(uniq[0]);
+  return uniq.join(" · ");
+});
 
 const POLL_MS = 8000;
 const { pause: pausePoll, resume: resumePoll } = useIntervalFn(
@@ -209,6 +281,11 @@ function pruneCheckedRowKeys() {
   });
 }
 
+/** Row ids on the current page that can be enqueued (same rules as row checkboxes). */
+const enqueueableRowIdsOnPage = computed(() =>
+  rows.value.filter((r) => !rowEnrichmentInProgress(r)).map((r) => rowKey(r))
+);
+
 async function fetchAgents() {
   if (!projectStore.selectedProjectId) return;
   agentsLoading.value = true;
@@ -253,37 +330,76 @@ async function openManageAgents() {
   await fetchRegistry();
 }
 
-async function createRegistryAgent() {
-  const name = newAgentName.value.trim();
+function resetAgentForm() {
+  agentFormName.value = "";
+  agentFormEntityType.value = "company";
+  agentFormOperation.value = "";
+  agentFormPrompt.value = "";
+  agentFormBatchSize.value = 1;
+  agentFormActive.value = true;
+}
+
+function openCreateAgentModal() {
+  agentModalMode.value = "create";
+  resetAgentForm();
+  agentModalOpen.value = true;
+}
+
+function openEditAgentModal(row: EnrichmentAgentRegistryRow) {
+  agentModalMode.value = "edit";
+  agentFormName.value = row.name;
+  agentFormEntityType.value = row.entity_type as "company" | "contact" | "both";
+  agentFormOperation.value = row.operation_name ?? "";
+  agentFormPrompt.value = row.prompt ?? "";
+  agentFormBatchSize.value = Math.max(1, Number(row.batch_size) || 1);
+  agentFormActive.value = row.is_active;
+  agentModalOpen.value = true;
+}
+
+function truncatePromptText(s: string, max = 56): string {
+  const t = s?.trim() ?? "";
+  if (!t) return "—";
+  return t.length <= max ? t : `${t.slice(0, max - 1)}…`;
+}
+
+async function submitAgentModal() {
+  const name = agentFormName.value.trim();
   if (!name) {
     message.warning("Agent name is required.");
     return;
   }
-  creatingAgent.value = true;
+  const bs = agentFormBatchSize.value;
+  const batchSize = typeof bs === "number" && Number.isFinite(bs) ? Math.floor(bs) : 1;
+  if (batchSize < 1) {
+    message.warning("Batch size must be at least 1.");
+    return;
+  }
+  savingAgent.value = true;
   try {
+    const payload = {
+      name,
+      entity_type: agentFormEntityType.value,
+      operation_name: agentFormOperation.value.trim() || null,
+      prompt: agentFormPrompt.value,
+      batch_size: batchSize,
+      is_active: agentFormActive.value,
+    };
+    const isCreate = agentModalMode.value === "create";
     const r = await fetch("/api/enrichment/agents/registry", {
-      method: "POST",
+      method: isCreate ? "POST" : "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name,
-        entity_type: newAgentEntityType.value,
-        operation_name: newAgentOperation.value.trim() || null,
-        is_active: newAgentActive.value,
-      }),
+      body: JSON.stringify(payload),
     });
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error ?? "Create failed");
-    message.success("Agent created.");
-    newAgentName.value = "";
-    newAgentOperation.value = "";
-    newAgentEntityType.value = "company";
-    newAgentActive.value = true;
+    if (!r.ok) throw new Error(j.error ?? (isCreate ? "Create failed" : "Update failed"));
+    message.success(isCreate ? "Agent created." : "Agent updated.");
+    agentModalOpen.value = false;
     await fetchRegistry();
     await fetchAgents();
   } catch (e) {
-    message.error(e instanceof Error ? e.message : "Create failed");
+    message.error(e instanceof Error ? e.message : "Save failed");
   } finally {
-    creatingAgent.value = false;
+    savingAgent.value = false;
   }
 }
 
@@ -309,16 +425,16 @@ async function setRegistryAgentActive(row: EnrichmentAgentRegistryRow, isActive:
   }
 }
 
-async function enqueueSelected() {
+async function enqueueForIds(ids: string[]) {
   const projectId = projectStore.selectedProjectId;
   const agent = enqueueAgentName.value?.trim();
   if (!projectId || !agent) {
     message.warning("Select an agent.");
     return;
   }
-  const ids = checkedRowKeys.value.map((k) => String(k));
-  if (ids.length === 0) {
-    message.warning("Select one or more rows.");
+  const filtered = ids.map((k) => String(k)).filter(Boolean);
+  if (filtered.length === 0) {
+    message.warning("No rows to enqueue.");
     return;
   }
   enqueueLoading.value = true;
@@ -328,8 +444,8 @@ async function enqueueSelected() {
       entityType: activeTab.value,
       agentName: agent,
     };
-    if (activeTab.value === "company") body.companyIds = ids;
-    else body.contactIds = ids;
+    if (activeTab.value === "company") body.companyIds = filtered;
+    else body.contactIds = filtered;
     const op = enqueueOperationName.value.trim();
     if (op) body.operationName = op;
     const r = await fetch("/api/enrichment/enqueue", {
@@ -350,19 +466,154 @@ async function enqueueSelected() {
   }
 }
 
+async function enqueueSelected() {
+  await enqueueForIds(checkedRowKeys.value.map((k) => String(k)));
+}
+
+/** Per-agent header "run all on page" loading state. */
+const headerEnqueueLoading = ref<Record<string, boolean>>({});
+
+/** Staggered row wave after header “run all on page” succeeds. */
+const rowWaveActive = ref(false);
+const ROW_WAVE_STAGGER_MS = 42;
+const ROW_WAVE_DURATION_MS = 520;
+let rowWaveClearTimer: ReturnType<typeof setTimeout> | undefined;
+
+function scheduleRowWaveAfterHeaderRun() {
+  if (rowWaveClearTimer) {
+    clearTimeout(rowWaveClearTimer);
+    rowWaveClearTimer = undefined;
+  }
+  rowWaveActive.value = true;
+  const n = rows.value.length;
+  const totalMs = Math.min(n * ROW_WAVE_STAGGER_MS + ROW_WAVE_DURATION_MS + 100, 4500);
+  rowWaveClearTimer = setTimeout(() => {
+    rowWaveActive.value = false;
+    rowWaveClearTimer = undefined;
+  }, totalMs);
+}
+
+async function enqueueForAgentAllOnPage(agentName: string) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId) {
+    message.warning("Select a project.");
+    return;
+  }
+  const name = agentName.trim();
+  if (!name) return;
+  const ids = enqueueableRowIdsOnPage.value;
+  if (ids.length === 0) {
+    message.warning("No rows to enqueue.");
+    return;
+  }
+  headerEnqueueLoading.value = { ...headerEnqueueLoading.value, [name]: true };
+  try {
+    const op = agents.value.find((a) => a.name === name)?.operation_name?.trim();
+    const body: Record<string, unknown> = {
+      projectId,
+      entityType: activeTab.value,
+      agentName: name,
+    };
+    if (activeTab.value === "company") body.companyIds = ids;
+    else body.contactIds = ids;
+    if (op) body.operationName = op;
+    const r = await fetch("/api/enrichment/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Enqueue failed");
+    const n = Number(j.inserted ?? 0);
+    message.success(`Queued ${n} task(s).`);
+    checkedRowKeys.value = [];
+    await fetchTable(false);
+    await nextTick();
+    scheduleRowWaveAfterHeaderRun();
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Enqueue failed");
+  } finally {
+    const next = { ...headerEnqueueLoading.value };
+    delete next[name];
+    headerEnqueueLoading.value = next;
+  }
+}
+
+async function enqueueOne(row: EnrichmentTableRow, agentName: string) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId) {
+    message.warning("Select a project.");
+    return;
+  }
+  const entityId =
+    activeTab.value === "company" ? row.entity.company_id : row.entity.uuid ?? row.entity.id;
+  const idStr = typeof entityId === "string" ? entityId : String(entityId ?? "");
+  if (!idStr) {
+    message.warning("Missing row id.");
+    return;
+  }
+  const k = cellEnqueueKey(row, agentName);
+  cellEnqueueLoading.value = { ...cellEnqueueLoading.value, [k]: true };
+  try {
+    const op = agents.value.find((a) => a.name === agentName)?.operation_name?.trim();
+    const body: Record<string, unknown> = {
+      projectId,
+      entityType: activeTab.value,
+      agentName,
+    };
+    if (activeTab.value === "company") body.companyIds = [idStr];
+    else body.contactIds = [idStr];
+    if (op) body.operationName = op;
+    const r = await fetch("/api/enrichment/enqueue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Enqueue failed");
+    message.success("Queued.");
+    await fetchTable(false);
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Enqueue failed");
+  } finally {
+    const next = { ...cellEnqueueLoading.value };
+    delete next[k];
+    cellEnqueueLoading.value = next;
+  }
+}
+
 const registryColumns = computed<DataTableColumns<EnrichmentAgentRegistryRow>>(() => [
-  { title: "Name", key: "name", width: 180, ellipsis: { tooltip: true } },
-  { title: "Entity", key: "entity_type", width: 88 },
+  { title: "Name", key: "name", width: 160, ellipsis: { tooltip: true } },
+  { title: "Entity", key: "entity_type", width: 72 },
   {
     title: "Operation",
     key: "operation_name",
+    width: 120,
     ellipsis: { tooltip: true },
     render: (row) => row.operation_name ?? "—",
   },
   {
+    title: "Prompt",
+    key: "prompt",
+    minWidth: 140,
+    render: (row) => {
+      const full = row.prompt?.trim() ?? "";
+      if (!full) return "—";
+      const short = truncatePromptText(full, 56);
+      return h("span", { title: full, style: "cursor: default" }, short);
+    },
+  },
+  {
+    title: "Batch size",
+    key: "batch_size",
+    width: 84,
+    align: "right",
+    render: (row) => String(row.batch_size ?? 1),
+  },
+  {
     title: "Active",
     key: "is_active",
-    width: 88,
+    width: 80,
     render: (row) =>
       h(NSwitch, {
         value: row.is_active,
@@ -372,6 +623,21 @@ const registryColumns = computed<DataTableColumns<EnrichmentAgentRegistryRow>>((
           void setRegistryAgentActive(row, v);
         },
       }),
+  },
+  {
+    title: "",
+    key: "actions",
+    width: 72,
+    render: (row) =>
+      h(
+        NButton,
+        {
+          size: "tiny",
+          quaternary: true,
+          onClick: () => openEditAgentModal(row),
+        },
+        { default: () => "Edit" }
+      ),
   },
 ]);
 
@@ -408,8 +674,27 @@ async function fetchTable(showSpinner = true) {
   }
 }
 
-function renderAgentCell(agentName: string, state: EnrichmentAgentCellState | undefined) {
+function isUuidLike(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s.trim());
+}
+
+/** Prefer showing a human worker name; hide UUIDs if the API still sends them. */
+function workerDisplayName(state: EnrichmentAgentCellState | undefined): string | null {
+  const w = state?.workerName?.trim();
+  if (!w) return null;
+  if (isUuidLike(w)) return null;
+  return w;
+}
+
+function renderAgentCell(
+  agentName: string,
+  state: EnrichmentAgentCellState | undefined,
+  row: EnrichmentTableRow
+) {
   const s = state?.status ?? "planned";
+  const k = cellEnqueueKey(row, agentName);
+  const enqueueBusy = !!cellEnqueueLoading.value[k];
+
   const onClickSuccess = () => {
     const raw = state?.resultPreview;
     const text =
@@ -424,134 +709,123 @@ function renderAgentCell(agentName: string, state: EnrichmentAgentCellState | un
     openDetail(`Error · ${agentName}`, state?.error ?? "(no message)");
   };
 
+  function runIconBtn(
+    title: string,
+    type: "default" | "primary" | "success" | "error" | "info" = "default",
+    icon: "play" | "refresh" = "refresh"
+  ) {
+    const Icon = icon === "play" ? PlayIcon : RefreshCwIcon;
+    return h(NButton, {
+      size: "tiny",
+      circle: true,
+      tertiary: true,
+      type,
+      renderIcon: () => h(Icon, { size: 14 }),
+      title,
+      disabled: enqueueBusy,
+      loading: enqueueBusy,
+      onClick: (e: MouseEvent) => {
+        e.stopPropagation();
+        void enqueueOne(row, agentName);
+      },
+    });
+  }
+
   if (s === "planned") {
-    return h("span", { style: "opacity:0.45" }, "—");
+    return h("div", { class: "enrichment-agent-cell enrichment-agent-cell--planned" }, [
+      h("span", { class: "enrichment-agent-cell__status enrichment-agent-cell__status--muted" }, "No data"),
+      runIconBtn("Run", "default", "play"),
+    ]);
   }
   if (s === "queued") {
-    return h(
-      NTag,
-      {
-        size: "small",
-        type: "default",
-        bordered: false,
-        title: "Waiting for a worker to pick this up",
-      },
-      { default: () => "Queued" }
-    );
+    return h("div", { class: "enrichment-agent-cell enrichment-agent-cell--queued" }, [
+      h("div", { class: "enrichment-agent-cell__main-row" }, [
+        h("span", { class: "enrichment-agent-cell__status enrichment-agent-cell__status--queued" }, "Queued"),
+        h(
+          NTag,
+          {
+            size: "small",
+            type: "warning",
+            bordered: false,
+            round: true,
+            class: "enrichment-agent-cell__queue-tag",
+          },
+          { default: () => "Waiting for worker" }
+        ),
+      ]),
+    ]);
   }
   if (s === "running") {
-    const w = state?.workerName?.trim();
-    return h(
-      "div",
-      { class: "enrichment-cell enrichment-cell--running" },
-      [
-        h(NSpin, { size: 14 }),
+    const w = workerDisplayName(state);
+    const phase: EnrichmentRunPhase = state?.runPhase ?? "working";
+    const workerTag = w
+      ? h(
+          NTag,
+          {
+            size: "small",
+            type: "info",
+            bordered: false,
+            round: true,
+            title: `Worker: ${w}`,
+            class: "enrichment-agent-cell__worker-tag",
+            style: { maxWidth: "10rem" },
+          },
+          { default: () => w }
+        )
+      : null;
+
+    if (phase === "batch_wait") {
+      return h("div", { class: "enrichment-agent-cell enrichment-agent-cell--running-batch" }, [
+        h("div", { class: "enrichment-agent-cell__main-row" }, [
+          h(ClockIcon, { size: 16, class: "enrichment-agent-cell__phase-icon enrichment-agent-cell__phase-icon--batch" }),
+          h(
+            "span",
+            { class: "enrichment-agent-cell__status enrichment-agent-cell__status--running-batch" },
+            "Agent waiting batch"
+          ),
+          workerTag,
+        ]),
+      ]);
+    }
+
+    return h("div", { class: "enrichment-agent-cell enrichment-agent-cell--running-working" }, [
+      h("div", { class: "enrichment-agent-cell__main-row" }, [
         h(
-          "div",
-          { class: "enrichment-cell-running-text" },
-          [
-            h(NTag, { size: "small", type: "info", bordered: false }, { default: () => "Running" }),
-            ...(w ? [h("span", { class: "enrichment-worker-hint", title: `Worker: ${w}` }, w)] : []),
-          ]
+          "span",
+          { class: "enrichment-agent-cell__status enrichment-agent-cell__status--running-working" },
+          "Agent working"
         ),
-      ]
-    );
+        workerTag,
+      ]),
+    ]);
   }
   if (s === "success") {
     return h(
-      NButton,
+      "div",
       {
-        size: "tiny",
-        quaternary: true,
-        type: "success",
+        class: "enrichment-agent-cell enrichment-agent-cell--done enrichment-agent-cell--clickable",
         onClick: onClickSuccess,
       },
-      { default: () => "Worked" }
+      [
+        h("span", { class: "enrichment-agent-cell__label enrichment-agent-cell__label--success" }, "Result"),
+        runIconBtn("Rerun", "default"),
+      ]
     );
   }
   if (s === "error") {
     return h(
-      NButton,
+      "div",
       {
-        size: "tiny",
-        quaternary: true,
-        type: "error",
+        class: "enrichment-agent-cell enrichment-agent-cell--failed enrichment-agent-cell--clickable",
         onClick: onClickError,
       },
-      { default: () => "Error" }
+      [
+        h("span", { class: "enrichment-agent-cell__label enrichment-agent-cell__label--error" }, "Error"),
+        runIconBtn("Rerun", "error"),
+      ]
     );
   }
   return h("span", { style: "opacity:0.45" }, "—");
-}
-
-function renderEnrichmentSummary(row: EnrichmentTableRow) {
-  const s = row.runStats;
-  if (!s) {
-    return h("span", { style: "opacity:0.45" }, "—");
-  }
-  /** Rows still in the queue (no worker yet). */
-  const waiting = s.queueQueued;
-  /** Claimed by a worker or a run row executing. */
-  const executing = s.queueRunning + s.runsRunning;
-  const children: ReturnType<typeof h>[] = [
-    h("div", { class: "enrichment-sum-line" }, [
-      h("strong", {}, String(s.totalRuns)),
-      " runs · ",
-      h("span", { class: "enrichment-sum-ok" }, `${s.runsSuccess} ok`),
-      " · ",
-      h("span", { class: "enrichment-sum-err" }, `${s.runsError} err`),
-    ]),
-  ];
-  if (waiting > 0) {
-    children.push(
-      h(
-        NTag,
-        {
-          size: "small",
-          type: "default",
-          bordered: false,
-          class: "enrichment-sum-waiting",
-          title: "Tasks are in the queue; start a worker to process them.",
-        },
-        { default: () => `Waiting (${waiting})` }
-      )
-    );
-  }
-  if (executing > 0) {
-    children.push(
-      h(
-        NTag,
-        {
-          size: "small",
-          type: "info",
-          bordered: false,
-          class: "enrichment-sum-executing",
-          title: "A worker has claimed these tasks or a run is active.",
-        },
-        { default: () => `Executing (${executing})` }
-      )
-    );
-  }
-  if (s.errorSamples.length > 0) {
-    children.push(
-      h(
-        NButton,
-        {
-          size: "tiny",
-          quaternary: true,
-          type: "error",
-          class: "enrichment-sum-errors-btn",
-          onClick: () =>
-            openDetail(
-              "Enrichment errors",
-              s.errorSamples.map((e, i) => `${i + 1}. ${e}`).join("\n\n")
-            ),
-        },
-        { default: () => `Errors (${s.errorSamples.length})` }
-      )
-    );
-  }
-  return h("div", { class: "enrichment-summary-col" }, children);
 }
 
 const baseColumns = computed<DataTableColumns<EnrichmentTableRow>>(() => {
@@ -573,38 +847,84 @@ const selectionColumn = computed<DataTableColumns<EnrichmentTableRow>>(() => [
   {
     type: "selection",
     disabled: (row) => rowEnrichmentInProgress(row),
-  },
-]);
-
-const enrichmentSummaryColumn = computed<DataTableColumns<EnrichmentTableRow>>(() => [
-  {
-    title: "Enrichment",
-    key: "enrichment:summary",
-    width: 240,
-    render: (row) => renderEnrichmentSummary(row),
+    sticky: true,
   },
 ]);
 
 const agentColumns = computed<DataTableColumns<EnrichmentTableRow>>(() => {
+  void cellEnqueueLoading.value;
+  void enqueueableRowIdsOnPage.value;
+  void headerEnqueueLoading.value;
   const names = agentNames.value;
   const opByName = new Map(agents.value.map((a) => [a.name, a.operation_name]));
+  const batchByName = new Map(agents.value.map((a) => [a.name, Math.max(1, Number(a.batch_size) || 1)]));
   return names.map((name) => ({
-    title: () =>
-      h("span", { title: opByName.get(name) ?? undefined }, [
-        h(Table2Icon, { size: 12, style: "margin-right:4px;vertical-align:middle;opacity:0.7" }),
-        name,
-      ]),
+    title: () => {
+      const nRows = enqueueableRowIdsOnPage.value.length;
+      const busy = !!headerEnqueueLoading.value[name];
+      const batchN = batchByName.get(name) ?? 1;
+      return h("div", { class: "enrichment-col-head" }, [
+        h("div", { class: "enrichment-col-head__left" }, [
+          h("span", { class: "enrichment-col-head__name", title: opByName.get(name) ?? undefined }, name),
+          h(
+            NTag,
+            {
+              size: "tiny",
+              bordered: false,
+              round: true,
+              type: "info",
+              class: "enrichment-col-head__batch",
+            },
+            { default: () => String(batchN) }
+          ),
+        ]),
+        
+        h(
+          NPopconfirm,
+          {
+            showIcon: false,
+            positiveText: "Run",
+            negativeText: "Cancel",
+            onPositiveClick: () => {
+              void enqueueForAgentAllOnPage(name);
+            },
+          },
+          {
+            trigger: () =>
+              h(NButton, {
+                size: "tiny",
+                circle: true,
+                disabled: agentsLoading.value || nRows === 0,
+                loading: busy,
+                title: `Run ${name} for all rows on this page`,
+                renderIcon: () => h(PlayIcon, { size: 14 }),
+                onClick: (e: MouseEvent) => {
+                  e.stopPropagation();
+                },
+              }),
+            default: () =>
+              h("div", { class: "enrichment-col-head-confirm" }, [
+                h(
+                  "p",
+                  { class: "enrichment-col-head-confirm__line" },
+                  `Run “${name}” for ${nRows} row(s) on this page?`
+                ),
+              ]),
+          }
+        ),
+      ]);
+    },
     key: `agent:${name}`,
-    width: 130,
+    resizable: true,
+    minWidth: 150,
     align: "center" as const,
-    render: (row: EnrichmentTableRow) => renderAgentCell(name, row.agentStates[name]),
+    render: (row: EnrichmentTableRow) => renderAgentCell(name, row.agentStates[name], row),
   }));
 });
 
 const columns = computed(() => [
   ...selectionColumn.value,
   ...baseColumns.value,
-  ...enrichmentSummaryColumn.value,
   ...agentColumns.value,
 ]);
 
@@ -645,7 +965,88 @@ onMounted(() => {
 
 onUnmounted(() => {
   pausePoll();
+  if (rowWaveClearTimer) {
+    clearTimeout(rowWaveClearTimer);
+    rowWaveClearTimer = undefined;
+  }
 });
+
+const enrichmentTableParams = computed(() => ({
+  entityType: activeTab.value,
+  limit: pageSize.value,
+  offset: (page.value - 1) * pageSize.value,
+}));
+
+function applyEnrichmentFromSocket(p: EnrichmentDataPayload) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || p.projectId !== projectId) return;
+  if (p.entityType !== activeTab.value) return;
+  if (p.limit !== pageSize.value || p.offset !== (page.value - 1) * pageSize.value) return;
+  total.value = Number(p.total ?? 0);
+  agentNames.value = Array.isArray(p.agentNames) ? p.agentNames : [];
+  rows.value = (p.rows ?? []) as EnrichmentTableRow[];
+  agents.value = (p.agents ?? []) as EnrichmentAgentInfo[];
+  pruneCheckedRowKeys();
+  const err = p.error;
+  if (err && typeof err === "string") {
+    message.warning(err);
+  }
+}
+
+function applyBatchStartedFromSocket(p: EnrichmentBatchStartedPayload) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || p.projectId !== projectId) return;
+  const agentName = p.agentName;
+  if (!agentName) return;
+  const tab = activeTab.value;
+  const idSet = new Set<string>();
+  for (const it of p.items) {
+    if (tab === "company") {
+      if (it.companyId) idSet.add(it.companyId);
+    } else if (it.contactId) {
+      idSet.add(it.contactId);
+    }
+  }
+  if (idSet.size === 0) return;
+  const wn = p.workerName ?? null;
+  rows.value = rows.value.map((row) => {
+    const eid =
+      tab === "company"
+        ? (row.entity.company_id as string | undefined)
+        : (row.entity.uuid as string | undefined);
+    if (!eid || !idSet.has(eid)) return row;
+    const prev = row.agentStates[agentName];
+    if (!prev) return row;
+    return {
+      ...row,
+      agentStates: {
+        ...row.agentStates,
+        [agentName]: {
+          ...prev,
+          status: "running",
+          runPhase: "working",
+          workerName: wn ?? prev.workerName ?? null,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+    };
+  });
+}
+
+const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
+  computed(() => projectStore.selectedProjectId),
+  enrichmentTableParams,
+  {
+    onEnrichmentData: applyEnrichmentFromSocket,
+    onBatchStarted: applyBatchStartedFromSocket,
+    pausePoll,
+    resumePoll,
+    onSafetyPoll: () => {
+      void fetchTable(false);
+      void fetchAgents();
+    },
+  }
+);
 </script>
 
 <template>
@@ -706,6 +1107,27 @@ onUnmounted(() => {
           <NButton size="small" quaternary @click="openManageAgents">Manage agents</NButton>
         </NSpace>
         <div class="toolbar-meta">
+          <NSpace v-if="workerBatchBufferCount > 0 || agentBatchSizeSummary" size="small" align="center" wrap>
+            <NTag
+              v-if="workerBatchBufferCount > 0"
+              size="small"
+              type="warning"
+              :bordered="true"
+              :title="workerBatchBufferDetail || 'Tasks accumulating before batch run'"
+            >
+              Worker batch {{ workerBatchBufferCount }}
+            </NTag>
+            <NTag
+              v-if="agentBatchSizeSummary"
+              size="small"
+              :bordered="true"
+              title="Configured batch_size on each agent (how many entities per LLM call when full)"
+            >
+              Agent batch {{ agentBatchSizeSummary }}
+            </NTag>
+          </NSpace>
+          <span v-if="enrichmentRealtimeConnected" class="muted enrichment-live">Live</span>
+          <span v-if="tableLoading && rows.length > 0" class="muted">Refreshing…</span>
           <span v-if="agentsLoading" class="muted">Loading agents…</span>
           <span v-else-if="agents.length" class="muted">{{ agents.length }} active agent(s) for this tab</span>
           <span v-if="checkedRowKeys.length" class="muted selection-hint">{{ checkedRowKeys.length }} selected</span>
@@ -719,20 +1141,23 @@ onUnmounted(() => {
         {{ tableError }}
       </NAlert>
 
-      <NSpin :show="tableLoading">
-        <NEmpty v-if="!tableLoading && !tableError && rows.length === 0" description="No rows for this project." />
-        <NDataTable
-          v-else-if="rows.length > 0"
-          v-model:checked-row-keys="checkedRowKeys"
-          :columns="columns"
-          :data="rows"
-          :row-key="(r: EnrichmentTableRow) => rowKey(r)"
-          :scroll-x="Math.max(900, 200 + columns.length * 120)"
-          size="small"
-          striped
-          bordered
-        />
-      </NSpin>
+      <NEmpty
+        v-if="tableLoading && rows.length === 0 && !tableError"
+        description="Loading…"
+      />
+      <NEmpty v-else-if="!tableLoading && !tableError && rows.length === 0" description="No rows for this project." />
+      <NDataTable
+        v-else-if="rows.length > 0"
+        v-model:checked-row-keys="checkedRowKeys"
+        class="enrichment-data-table"
+        :columns="columns"
+        :data="rows"
+        :row-key="(r: EnrichmentTableRow) => rowKey(r)"
+        :scroll-x="Math.max(900, 200 + columns.length * 120)"
+        size="small"
+        striped
+        bordered
+      />
     </NCard>
 
     <NModal
@@ -749,9 +1174,12 @@ onUnmounted(() => {
       v-model:show="manageAgentsOpen"
       preset="card"
       title="Enrichment agents"
-      style="width: min(720px, 96vw)"
+      style="width: min(900px, 96vw)"
       :mask-closable="true"
     >
+      <div class="registry-toolbar">
+        <NButton size="small" type="primary" @click="openCreateAgentModal">New agent</NButton>
+      </div>
       <NAlert v-if="registryError" type="error" class="alert-block" :show-icon="true">
         {{ registryError }}
       </NAlert>
@@ -763,30 +1191,82 @@ onUnmounted(() => {
           size="small"
           striped
           bordered
+          :scroll-x="720"
           :max-height="360"
         />
       </NSpin>
-      <NDivider />
-      <div class="new-agent-form">
-        <div class="new-agent-title">Add agent</div>
-        <NSpace vertical :size="10" style="width: 100%">
-          <NSpace wrap :size="8">
-            <NInput v-model:value="newAgentName" placeholder="Name (primary key)" size="small" style="min-width: 200px" />
-            <NSelect
-              v-model:value="newAgentEntityType"
-              :options="entityTypeOptions"
+    </NModal>
+
+    <NModal
+      v-model:show="agentModalOpen"
+      preset="card"
+      :title="agentModalMode === 'create' ? 'New agent' : `Edit · ${agentFormName}`"
+      style="width: min(520px, 94vw)"
+      :mask-closable="true"
+      :segmented="{ content: true, footer: 'soft' }"
+      @after-leave="resetAgentForm"
+    >
+      <NSpace vertical :size="14" class="agent-modal-form">
+        <div class="agent-modal-field">
+          <div class="agent-modal-label">Name</div>
+          <NInput
+            v-model:value="agentFormName"
+            placeholder="Unique agent name (primary key)"
+            size="small"
+            :disabled="agentModalMode === 'edit'"
+          />
+        </div>
+        <div class="agent-modal-field">
+          <div class="agent-modal-label">Entity type</div>
+          <NSelect v-model:value="agentFormEntityType" :options="entityTypeOptions" size="small" style="width: 100%" />
+        </div>
+        <div class="agent-modal-field">
+          <div class="agent-modal-label">Operation label</div>
+          <NInput v-model:value="agentFormOperation" placeholder="Optional label for this operation" size="small" clearable />
+        </div>
+        <div class="agent-modal-field">
+          <div class="agent-modal-label">Prompt</div>
+          <NInput
+            v-model:value="agentFormPrompt"
+            type="textarea"
+            placeholder="Instructions for the enrichment agent"
+            size="small"
+            :autosize="{ minRows: 4, maxRows: 14 }"
+          />
+        </div>
+        <div class="agent-modal-field agent-modal-field--inline">
+          <div class="agent-modal-field-grow">
+            <div class="agent-modal-label">Batch size</div>
+            <NInputNumber
+              v-model:value="agentFormBatchSize"
+              :min="1"
+              :step="1"
+              :precision="0"
               size="small"
-              style="width: 140px"
+              placeholder="1"
+              style="width: 100%"
             />
-            <NInput v-model:value="newAgentOperation" placeholder="Operation label (optional)" size="small" style="min-width: 200px" />
-            <span class="muted small-label">Active</span>
-            <NSwitch v-model:value="newAgentActive" size="small" />
-          </NSpace>
-          <NButton type="primary" size="small" :loading="creatingAgent" :disabled="!newAgentName.trim()" @click="createRegistryAgent">
-            Create agent
+          </div>
+          <div class="agent-modal-field-switch">
+            <div class="agent-modal-label">Active</div>
+            <NSwitch v-model:value="agentFormActive" size="small" />
+          </div>
+        </div>
+      </NSpace>
+      <template #footer>
+        <NSpace justify="end" size="small">
+          <NButton size="small" @click="agentModalOpen = false">Cancel</NButton>
+          <NButton
+            type="primary"
+            size="small"
+            :loading="savingAgent"
+            :disabled="!agentFormName.trim()"
+            @click="submitAgentModal"
+          >
+            {{ agentModalMode === 'create' ? 'Create' : 'Save' }}
           </NButton>
         </NSpace>
-      </div>
+      </template>
     </NModal>
   </div>
 </template>
@@ -819,19 +1299,34 @@ onUnmounted(() => {
   gap: 0.75rem;
   flex-wrap: wrap;
 }
-.new-agent-form {
-  margin-top: 0.25rem;
+.registry-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: 0.75rem;
 }
-.new-agent-title {
+.agent-modal-form {
+  width: 100%;
+}
+.agent-modal-field {
+  width: 100%;
+}
+.agent-modal-field--inline {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-end;
+}
+.agent-modal-field-grow {
+  flex: 1;
+  min-width: 0;
+}
+.agent-modal-field-switch {
+  flex-shrink: 0;
+  padding-bottom: 2px;
+}
+.agent-modal-label {
   font-size: 0.75rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   opacity: 0.75;
-  margin-bottom: 0.5rem;
-}
-.small-label {
-  font-size: 0.75rem;
-  align-self: center;
+  margin-bottom: 0.35rem;
 }
 .muted {
   font-size: 0.875rem;
@@ -840,82 +1335,139 @@ onUnmounted(() => {
 .selection-hint {
   margin-left: 0.25rem;
 }
+.enrichment-live {
+  font-weight: 600;
+  color: var(--n-success-color, #63e2b7);
+  margin-right: 0.35rem;
+}
 .alert-block {
   margin-bottom: 0.75rem;
 }
 
-/* Running agent cell — :deep() so h() nodes inside the table still match */
-.enrichment-page :deep(.enrichment-cell--running) {
+.enrichment-page :deep(.enrichment-agent-cell) {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  column-gap: calc(var(--n-td-padding) + 6px);
+  row-gap: calc(var(--n-td-padding) / 2 + 4px);
+  min-height: 40px;
+  padding: calc(var(--n-td-padding) + 2px) calc(var(--n-td-padding) + 4px);
+  border-radius: calc(var(--n-border-radius) * 2 + 2px);
+  box-sizing: border-box;
+  text-align: left;
+}
+.enrichment-page :deep(.enrichment-agent-cell--clickable) {
+  cursor: pointer;
+}
+.enrichment-page :deep(.enrichment-agent-cell__label) {
+  font-size: var(--n-font-size);
+  line-height: var(--n-line-height);
+  font-weight: var(--n-th-font-weight);
+  flex-shrink: 0;
+}
+.enrichment-page :deep(.enrichment-agent-cell__label--success) {
+  color: var(--n-th-icon-color-active);
+}
+.enrichment-page :deep(.enrichment-agent-cell__label--error) {
+  color: var(--n-td-text-color);
+}
+.enrichment-page :deep(.enrichment-agent-cell--planned) {
+  background: color-mix(in srgb, var(--n-th-icon-color) 10%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--n-border-color) 45%, transparent);
+}
+.enrichment-page :deep(.enrichment-col-head__batch) {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 0 6px;
+  line-height: 1.35;
+}
+.enrichment-page :deep(.enrichment-agent-cell--queued) {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  column-gap: 8px;
+  row-gap: 4px;
+  background: color-mix(in srgb, rgb(251, 191, 36) 14%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(245, 158, 11) 34%, transparent);
+}
+.enrichment-page :deep(.enrichment-agent-cell__status--queued) {
+  color: rgba(253, 224, 71, 0.95);
+}
+.enrichment-page :deep(.enrichment-agent-cell__queue-tag) {
+  flex-shrink: 0;
+  max-width: min(100%, 11rem);
+}
+.enrichment-page :deep(.enrichment-agent-cell--running-batch) {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  column-gap: 8px;
+  row-gap: 4px;
+  background: color-mix(in srgb, rgb(167, 139, 250) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(167, 139, 250) 36%, transparent);
+}
+.enrichment-page :deep(.enrichment-agent-cell--running-working) {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  column-gap: 8px;
+  row-gap: 4px;
+  background: color-mix(in srgb, rgb(96, 165, 250) 16%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, rgb(96, 165, 250) 38%, transparent);
+}
+.enrichment-page :deep(.enrichment-agent-cell__status--running-batch) {
+  color: rgba(216, 201, 255, 0.96);
+}
+.enrichment-page :deep(.enrichment-agent-cell__status--running-working) {
+  color: rgba(186, 220, 255, 0.95);
+}
+.enrichment-page :deep(.enrichment-agent-cell__phase-icon--batch) {
+  color: rgba(196, 181, 253, 0.95);
+  flex-shrink: 0;
+}
+.enrichment-page :deep(.enrichment-agent-cell__worker-tag) {
+  flex-shrink: 0;
+  max-width: min(100%, 10rem);
+}
+.enrichment-page :deep(.enrichment-agent-cell__main-row) {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.enrichment-page :deep(.enrichment-agent-cell--done) {
+  background: color-mix(in srgb, var(--n-th-icon-color-active) 12%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--n-loading-color) 28%, transparent);
+}
+.enrichment-page :deep(.enrichment-agent-cell--failed) {
+  background: color-mix(in srgb, var(--n-border-color-modal) 35%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--n-border-color-popover) 55%, transparent);
+}
+.enrichment-page :deep(.enrichment-agent-cell__row) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 6px;
-  min-width: min(100%, 8rem);
-  min-height: 30px;
-  padding: 4px 10px;
-  margin: 0 auto;
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--n-primary-color) 16%, transparent);
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--n-primary-color) 45%, transparent),
-    0 0 0 1px color-mix(in srgb, var(--n-primary-color) 20%, transparent);
-  animation: enrichment-running-pulse 1.4s ease-in-out infinite;
+  gap: calc(var(--n-td-padding) + 4px);
 }
-@keyframes enrichment-running-pulse {
-  0%,
-  100% {
-    background: color-mix(in srgb, var(--n-primary-color) 14%, transparent);
-  }
-  50% {
-    background: color-mix(in srgb, var(--n-primary-color) 24%, transparent);
-  }
+.enrichment-page :deep(.enrichment-agent-cell__status) {
+  font-size: 12px;
+  font-weight: var(--n-th-font-weight);
+  color: var(--n-td-text-color);
+}
+.enrichment-page :deep(.enrichment-agent-cell__status--muted) {
+  font-size: 12px;
+  color: var(--n-th-icon-color);
 }
 
-.enrichment-page :deep(.enrichment-summary-col) {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  font-size: 12px;
-  line-height: 1.35;
-  max-width: 260px;
-}
-.enrichment-page :deep(.enrichment-sum-line) {
-  white-space: normal;
-}
-.enrichment-page :deep(.enrichment-sum-ok) {
-  color: var(--n-success-color);
-}
-.enrichment-page :deep(.enrichment-sum-err) {
-  color: var(--n-error-color);
-}
-.enrichment-page :deep(.enrichment-sum-progress) {
-  max-width: 100%;
-}
-.enrichment-page :deep(.enrichment-sum-errors-btn) {
-  align-self: flex-start;
-}
-.enrichment-page :deep(.enrichment-sum-waiting) {
-  margin-top: 2px;
-}
-.enrichment-page :deep(.enrichment-sum-executing) {
-  margin-top: 2px;
-}
-.enrichment-page :deep(.enrichment-cell-running-text) {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 3px;
-}
-.enrichment-page :deep(.enrichment-worker-hint) {
-  font-size: 10px;
-  line-height: 1.2;
-  opacity: 0.88;
-  max-width: 9rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .detail-pre {
   margin: 0;
   white-space: pre-wrap;
@@ -924,5 +1476,28 @@ onUnmounted(() => {
   line-height: 1.45;
   max-height: 60vh;
   overflow: auto;
+}
+</style>
+
+<style>
+.enrichment-col-head {
+  justify-content: space-between;
+  display: flex;
+  align-items: center;
+  padding-right: 12px;
+}
+
+.enrichment-col-head__left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.enrichment-col-head-confirm {
+  max-width: 260px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.enrichment-col-head-confirm__line {
+  margin: 0;
 }
 </style>

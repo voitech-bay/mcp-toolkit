@@ -56,8 +56,14 @@ import {
   handlePostEnrichmentRestart,
   handlePostWorkerHeartbeat,
   handleGetWorkers,
+  handlePostEnrichmentWorkerBatchEvent,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
+import {
+  attachWorkerListSubscriberSocket,
+  attachWorkerPresenceSocket,
+} from "./services/worker-socket.js";
+import { attachEnrichmentTableSocket } from "./services/enrichment-realtime.js";
 import { createMcpHandler } from "./server.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
@@ -412,6 +418,14 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/enrichment/worker-batch-event":
+        if (req.method === "POST") {
+          await handlePostEnrichmentWorkerBatchEvent(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/workers/heartbeat":
         await handlePostWorkerHeartbeat(req, res);
         return;
@@ -441,10 +455,37 @@ const server = createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ noServer: true });
+const wssSync = new WebSocketServer({ noServer: true });
+const wssWorkers = new WebSocketServer({ noServer: true });
+const wssEnrichment = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
   const url = new URL(req.url ?? "", `http://localhost:${PORT}`);
+  if (url.pathname === "/api/workers-ws") {
+    wssWorkers.handleUpgrade(req, socket, head, (ws) => {
+      const role = url.searchParams.get("role") ?? "worker";
+      if (role === "subscribe") {
+        attachWorkerListSubscriberSocket(ws);
+      } else {
+        attachWorkerPresenceSocket(ws, req);
+      }
+    });
+    return;
+  }
+
+  if (url.pathname === "/api/enrichment-ws") {
+    const projectId = url.searchParams.get("projectId")?.trim() ?? "";
+    if (!projectId) {
+      socket.write("HTTP/1.1 400 Bad Request\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wssEnrichment.handleUpgrade(req, socket, head, (ws) => {
+      attachEnrichmentTableSocket(ws, projectId);
+    });
+    return;
+  }
+
   if (url.pathname !== "/api/sync-ws") {
     socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
     socket.destroy();
@@ -458,12 +499,12 @@ server.on("upgrade", (req, socket, head) => {
     return;
   }
 
-  wss.handleUpgrade(req, socket, head, (ws) => {
-    wss.emit("connection", ws, req, runId);
+  wssSync.handleUpgrade(req, socket, head, (ws) => {
+    wssSync.emit("connection", ws, req, runId);
   });
 });
 
-wss.on("connection", (ws: WebSocket, _req: unknown, runId: string) => {
+wssSync.on("connection", (ws: WebSocket, _req: unknown, runId: string) => {
   console.log(`[sync-ws] client connected for runId=${runId}`);
 
   const listener = (event: SyncEvent) => {
@@ -522,7 +563,10 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /api/enrichment/runs?projectId=<id>");
   console.log("  POST /api/enrichment/stop");
   console.log("  POST /api/enrichment/restart");
+  console.log("  POST /api/enrichment/worker-batch-event");
   console.log("  GET  /api/workers");
   console.log("  POST /api/workers/heartbeat");
   console.log("  WS   /api/sync-ws?runId=<id>");
+  console.log("  WS   /api/workers-ws?role=worker|subscribe");
+  console.log("  WS   /api/enrichment-ws?projectId=<id>");
 });

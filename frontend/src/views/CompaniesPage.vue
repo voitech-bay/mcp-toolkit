@@ -530,6 +530,7 @@ async function submitAddToHypothesis() {
           <NTag v-if="total > 0" size="small" :bordered="false">{{ total }}</NTag>
         </div>
         <div class="toolbar-right">
+          <span v-if="loading" class="toolbar-loading-hint">Loading…</span>
           <NCheckbox v-model:checked="showAll" size="small">Show all</NCheckbox>
           <NInput
             v-model:value="searchInput"
@@ -573,7 +574,6 @@ async function submitAddToHypothesis() {
         v-model:checked-row-keys="checkedKeys"
         :columns="columns"
         :data="data"
-        :loading="loading"
         :bordered="false"
         size="small"
         :max-height="600"
@@ -712,6 +712,12 @@ async function submitAddToHypothesis() {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+}
+
+.toolbar-loading-hint {
+  font-size: 0.82rem;
+  opacity: 0.65;
+  margin-right: 0.25rem;
 }
 
 .bulk-bar {

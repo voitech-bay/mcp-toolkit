@@ -1,19 +1,44 @@
 /**
- * Shared presence state for long-running workers: local HTTP status + API heartbeats.
+ * Shared presence state for long-running workers: local HTTP status + WebSocket to API (realtime).
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { WorkerTaskProgress } from "../services/worker-registry.js";
+import WebSocket from "ws";
+import type {
+  WorkerPendingBatchProgress,
+  WorkerTaskProgress,
+} from "../services/worker-registry.js";
 
 const presence: {
-  status: "idle" | "busy" | "stopping";
+  stopping: boolean;
   tasksInProgress: WorkerTaskProgress[];
+  pendingBatches: WorkerPendingBatchProgress[];
+  /** Serialized worker tuning (e.g. ENRICHMENT_* env) sent with each heartbeat. */
+  runtime: Record<string, string | number>;
 } = {
-  status: "idle",
+  stopping: false,
   tasksInProgress: [],
+  pendingBatches: [],
+  runtime: {},
 };
 
+/** Call from worker process startup (e.g. enrichment worker) to expose ENV in the UI. */
+export function setWorkerRuntimeConfig(config: Record<string, string | number>): void {
+  presence.runtime = { ...config };
+}
+
+function deriveStatus(): "idle" | "busy" | "stopping" {
+  if (presence.stopping) return "stopping";
+  if (presence.tasksInProgress.length > 0 || presence.pendingBatches.length > 0) return "busy";
+  return "idle";
+}
+
 export function markWorkerStopping(): void {
-  presence.status = "stopping";
+  presence.stopping = true;
+}
+
+/** Updates batch-accumulator snapshot for heartbeats (tasks waiting to be executed as a batch). */
+export function setWorkerPendingBatches(batches: WorkerPendingBatchProgress[]): void {
+  presence.pendingBatches = batches.map((b) => ({ ...b }));
 }
 
 export async function withWorkerTaskPresence<T>(
@@ -21,15 +46,26 @@ export async function withWorkerTaskPresence<T>(
   fn: () => Promise<T>
 ): Promise<T> {
   presence.tasksInProgress.push(task);
-  presence.status = "busy";
   try {
     return await fn();
   } finally {
     const id = task.taskId;
     presence.tasksInProgress = presence.tasksInProgress.filter((t) => t.taskId !== id);
-    if (presence.tasksInProgress.length === 0 && presence.status === "busy") {
-      presence.status = "idle";
-    }
+  }
+}
+
+export async function withWorkerTasksPresence<T>(
+  tasks: WorkerTaskProgress[],
+  fn: () => Promise<T>
+): Promise<T> {
+  for (const t of tasks) {
+    presence.tasksInProgress.push(t);
+  }
+  try {
+    return await fn();
+  } finally {
+    const ids = new Set(tasks.map((t) => t.taskId));
+    presence.tasksInProgress = presence.tasksInProgress.filter((t) => !ids.has(t.taskId));
   }
 }
 
@@ -38,13 +74,18 @@ export function getWorkerPresenceBody(
   name: string,
   kind: string
 ): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     workerId,
     name,
     kind,
-    status: presence.status,
+    status: deriveStatus(),
     tasksInProgress: presence.tasksInProgress.map((t) => ({ ...t })),
+    pendingBatches: presence.pendingBatches.map((b) => ({ ...b })),
   };
+  if (Object.keys(presence.runtime).length > 0) {
+    body.runtime = { ...presence.runtime };
+  }
+  return body;
 }
 
 /**
@@ -84,31 +125,22 @@ function normalizeApiBase(raw: string): string {
   return t;
 }
 
-async function postHeartbeat(
-  apiBase: string,
-  body: Record<string, unknown>,
-  authorization?: string
-): Promise<void> {
-  const url = `${apiBase}/api/workers/heartbeat`;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (authorization) headers.Authorization = authorization;
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`heartbeat ${res.status}: ${text || res.statusText}`);
-  }
+function toWorkerWsUrl(httpBase: string): string {
+  const u = new URL(httpBase.includes("://") ? httpBase : `http://${httpBase}`);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  u.pathname = "/api/workers-ws";
+  u.search = "";
+  u.searchParams.set("role", "worker");
+  const secret = process.env.WORKER_HEARTBEAT_SECRET?.trim();
+  if (secret) u.searchParams.set("token", secret);
+  return u.toString();
 }
 
 /**
- * Periodically POST presence to the main API. Call `stop()` on shutdown.
+ * WebSocket connection to the main API for realtime presence (replaces HTTP heartbeat).
+ * Reconnects automatically. Call `stop()` on shutdown.
  */
-export function startWorkerHeartbeatLoop(
+export function startWorkerRealtimeConnection(
   apiBaseUrl: string,
   workerId: string,
   name: string,
@@ -116,23 +148,74 @@ export function startWorkerHeartbeatLoop(
   intervalMs: number
 ): { stop: () => void } {
   const base = normalizeApiBase(apiBaseUrl);
-  const secret = process.env.WORKER_HEARTBEAT_SECRET?.trim();
-  const authorization = secret ? `Bearer ${secret}` : undefined;
+  const wsUrl = toWorkerWsUrl(base);
 
-  let timer: ReturnType<typeof setInterval> | undefined;
-  const tick = (): void => {
+  let socket: WebSocket | null = null;
+  let tickTimer: ReturnType<typeof setInterval> | undefined;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+
+  function clearTimers(): void {
+    if (tickTimer) {
+      clearInterval(tickTimer);
+      tickTimer = undefined;
+    }
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = undefined;
+    }
+  }
+
+  function sendStatus(): void {
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     const body = getWorkerPresenceBody(workerId, name, kind);
-    void postHeartbeat(base, body, authorization).catch(() => {
-      /* logged elsewhere if needed */
+    socket.send(JSON.stringify({ type: "status", ...body }));
+  }
+
+  function connect(): void {
+    if (stopped) return;
+    clearTimers();
+    const ws = new WebSocket(wsUrl);
+    socket = ws;
+
+    ws.on("open", () => {
+      if (stopped) {
+        ws.close();
+        return;
+      }
+      const hello = { type: "hello", ...getWorkerPresenceBody(workerId, name, kind) };
+      ws.send(JSON.stringify(hello));
+      sendStatus();
+      tickTimer = setInterval(sendStatus, Math.max(2000, intervalMs));
     });
-  };
-  tick();
-  timer = setInterval(tick, Math.max(2000, intervalMs));
+
+    ws.on("message", () => {
+      /* server may send pings or acks; ignore */
+    });
+
+    ws.on("close", () => {
+      socket = null;
+      clearTimers();
+      if (!stopped) {
+        reconnectTimer = setTimeout(connect, 3000);
+      }
+    });
+
+    ws.on("error", () => {
+      ws.close();
+    });
+  }
+
+  connect();
 
   return {
     stop: (): void => {
-      if (timer) clearInterval(timer);
-      timer = undefined;
+      stopped = true;
+      clearTimers();
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+      socket = null;
     },
   };
 }
