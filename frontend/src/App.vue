@@ -31,7 +31,6 @@ import {
   ChevronDownIcon,
   ClipboardListIcon,
   CpuIcon,
-  CircleDotIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 import { useWorkers } from "./composables/useWorkers";
