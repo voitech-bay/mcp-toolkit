@@ -42,6 +42,17 @@ import {
   updateContactCompany,
   getCompaniesByIds,
   type TableQueryFilters,
+  listEnrichmentAgentsForEntityType,
+  listAllEnrichmentAgents,
+  createEnrichmentAgent,
+  updateEnrichmentAgent,
+  getEnrichmentTableData,
+  enqueueEnrichmentTasks,
+  listEnrichmentQueueTasksForProject,
+  listEnrichmentAgentRunsForProject,
+  stopEnrichmentQueueTask,
+  restartEnrichmentQueueTask,
+  type EnrichmentEntityType,
 } from "./services/supabase.js";
 import {
   buildReplyContextPrompt,
@@ -49,6 +60,12 @@ import {
   type BuildContextNodes,
 } from "./services/reply-context-prompt.js";
 import { syncSupabaseFromSource } from "./services/sync-supabase.js";
+import {
+  getActiveWorkers,
+  isWorkerHeartbeatAuthOk,
+  recordWorkerHeartbeat,
+  type WorkerHeartbeatPayload,
+} from "./services/worker-registry.js";
 
 export { generateContextText };
 
@@ -1350,4 +1367,526 @@ export async function handlePatchContactCompany(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ ok: true }));
+}
+
+// ── Enrichment table API ─────────────────────────────────────────────────────
+
+function parseEnrichmentEntityType(raw: string | null): EnrichmentEntityType | null {
+  if (raw === "company" || raw === "contact") return raw;
+  return null;
+}
+
+/** GET /api/enrichment/agents?entityType=company|contact */
+export async function handleGetEnrichmentAgents(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const entityType = parseEnrichmentEntityType(params.get("entityType"));
+  if (!entityType) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid query: entityType (company|contact)" }));
+    return;
+  }
+  const result = await listEnrichmentAgentsForEntityType(client, entityType);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** GET /api/enrichment-table?entityType=company|contact&projectId=...&limit=&offset= */
+export async function handleGetEnrichmentTable(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const entityType = parseEnrichmentEntityType(params.get("entityType"));
+  const projectId = params.get("projectId")?.trim();
+  if (!entityType || !projectId) {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "Missing or invalid query: entityType (company|contact) and projectId are required",
+      })
+    );
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await getEnrichmentTableData(client, projectId, entityType, limit, offset);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(
+      JSON.stringify({
+        total: 0,
+        agentNames: [],
+        rows: [],
+        error: result.error,
+      })
+    );
+    return;
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      total: result.total,
+      agentNames: result.agentNames,
+      rows: result.rows,
+    })
+  );
+}
+
+/** POST /api/enrichment/enqueue */
+export async function handlePostEnrichmentEnqueue(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        projectId?: string;
+        entityType?: string;
+        agentName?: string;
+        companyIds?: string[];
+        contactIds?: string[];
+        operationName?: string | null;
+        meta?: Record<string, unknown> | null;
+      }
+    | undefined;
+  const projectId = body?.projectId?.trim();
+  const entityType = parseEnrichmentEntityType(
+    body?.entityType != null ? String(body.entityType) : null
+  );
+  const agentName = body?.agentName?.trim();
+  if (!projectId || !entityType || !agentName) {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "Body must include projectId, entityType (company|contact), and agentName",
+      })
+    );
+    return;
+  }
+  const enqueueResult = await enqueueEnrichmentTasks(client, {
+    projectId,
+    entityType,
+    agentName,
+    companyIds: body?.companyIds,
+    contactIds: body?.contactIds,
+    operationName: body?.operationName,
+    meta: body?.meta,
+  });
+  if (enqueueResult.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: enqueueResult.error, inserted: 0 }));
+    return;
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ inserted: enqueueResult.inserted }));
+}
+
+/** GET /api/enrichment/agents/registry — all agents (admin). */
+export async function handleGetEnrichmentAgentsRegistry(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await listAllEnrichmentAgents(client);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** POST /api/enrichment/agents/registry — create agent. */
+export async function handlePostEnrichmentAgent(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        name?: string;
+        entity_type?: string;
+        operation_name?: string | null;
+        is_active?: boolean;
+      }
+    | undefined;
+  const result = await createEnrichmentAgent(client, {
+    name: body?.name ?? "",
+    entity_type: body?.entity_type ?? "",
+    operation_name: body?.operation_name,
+    is_active: body?.is_active,
+  });
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+/** PUT /api/enrichment/agents/registry — update agent by name. */
+export async function handlePutEnrichmentAgent(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "PUT") {
+    res.writeHead(405, { Allow: "PUT" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        name?: string;
+        entity_type?: string;
+        operation_name?: string | null;
+        is_active?: boolean;
+      }
+    | undefined;
+  const name = body?.name?.trim();
+  if (!name) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include name" }));
+    return;
+  }
+  const result = await updateEnrichmentAgent(client, name, {
+    entity_type: body?.entity_type,
+    operation_name: body?.operation_name,
+    is_active: body?.is_active,
+  });
+  if (result.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+/** GET /api/enrichment/queue?projectId=&limit=&offset=&status= */
+export async function handleGetEnrichmentQueue(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required" }));
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const status = params.get("status")?.trim() || null;
+  const result = await listEnrichmentQueueTasksForProject(client, projectId, {
+    limit,
+    offset,
+    status,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+/** GET /api/enrichment/runs?projectId=&limit=&offset=&status= */
+export async function handleGetEnrichmentRunsList(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required" }));
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const status = params.get("status")?.trim() || null;
+  const result = await listEnrichmentAgentRunsForProject(client, projectId, {
+    limit,
+    offset,
+    status,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+/** POST /api/enrichment/stop — body: { projectId, queueTaskId } */
+export async function handlePostEnrichmentStop(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | { projectId?: string; queueTaskId?: string }
+    | undefined;
+  const projectId = body?.projectId?.trim();
+  const queueTaskId = body?.queueTaskId?.trim();
+  if (!projectId || !queueTaskId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and queueTaskId are required" }));
+    return;
+  }
+  const result = await stopEnrichmentQueueTask(client, projectId, queueTaskId);
+  if (!result.ok) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error ?? "Stop failed" }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+/** POST /api/enrichment/restart — body: { projectId, queueTaskId } */
+export async function handlePostEnrichmentRestart(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | { projectId?: string; queueTaskId?: string }
+    | undefined;
+  const projectId = body?.projectId?.trim();
+  const queueTaskId = body?.queueTaskId?.trim();
+  if (!projectId || !queueTaskId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and queueTaskId are required" }));
+    return;
+  }
+  const result = await restartEnrichmentQueueTask(client, projectId, queueTaskId);
+  if (!result.ok) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: result.error ?? "Restart failed" }));
+    return;
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ ok: true, newTaskId: result.newTaskId }));
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function parseString(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
+/** POST /api/workers/heartbeat — JSON body from worker processes. */
+export async function handlePostWorkerHeartbeat(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  if (!isWorkerHeartbeatAuthOk(req)) {
+    res.writeHead(401);
+    res.end(JSON.stringify({ error: "Unauthorized" }));
+    return;
+  }
+  const raw = await getParsedBody(req);
+  if (!isRecord(raw)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const workerId = parseString(raw.workerId);
+  const name = parseString(raw.name);
+  const kind = parseString(raw.kind) ?? "unknown";
+  const statusRaw = parseString(raw.status);
+  if (!workerId || !name) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "workerId and name are required" }));
+    return;
+  }
+  const status =
+    statusRaw === "idle" || statusRaw === "busy" || statusRaw === "stopping" ? statusRaw : "idle";
+
+  let tasksInProgress: WorkerHeartbeatPayload["tasksInProgress"];
+  if (Array.isArray(raw.tasksInProgress)) {
+    tasksInProgress = [];
+    for (const item of raw.tasksInProgress) {
+      if (!isRecord(item)) continue;
+      const taskId = parseString(item.taskId);
+      const agentName = parseString(item.agentName);
+      if (!taskId || !agentName) continue;
+      const operationName =
+        item.operationName === null || item.operationName === undefined
+          ? undefined
+          : typeof item.operationName === "string"
+            ? item.operationName
+            : String(item.operationName);
+      tasksInProgress.push({ taskId, agentName, operationName });
+    }
+  }
+
+  const payload: WorkerHeartbeatPayload = {
+    workerId,
+    name,
+    kind,
+    status,
+    tasksInProgress,
+  };
+  recordWorkerHeartbeat(payload);
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+/** GET /api/workers — recent worker heartbeats (for UI). */
+export async function handleGetWorkers(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  res.writeHead(200);
+  res.end(JSON.stringify(getActiveWorkers()));
 }

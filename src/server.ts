@@ -2,15 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { registerGetLinkedinMessagesTool } from "./tools/get-linkedin-messages.js";
-import { registerGetSendersTool } from "./tools/get-senders.js";
 import { registerGetContactsTool } from "./tools/get-contacts.js";
 import { registerGetConversationByContactNameTool } from "./tools/get-conversation-by-contact-name.js";
 import { registerGetConversationBySenderTool } from "./tools/get-conversation-by-sender.js";
 import { registerGetConversationByMessageTool } from "./tools/get-conversation-by-message.js";
 import { registerCompanyEnrichmentTools } from "./tools/company-enrichment.js";
-import { registerGetCompanyRootContextTool } from "./tools/get-company-root-context.js";
 import { registerSetCompanyRootContextTool } from "./tools/set-company-root-context.js";
-import { registerBuildReplyContextPromptTool } from "./tools/build-reply-context-prompt.js";
 import { registerGetReplyContextSnapshotTool } from "./tools/get-reply-context-snapshot.js";
 
 function createMcpServer(): McpServer {
@@ -19,13 +16,12 @@ function createMcpServer(): McpServer {
     version: "0.1.0",
   });
   // registerGetLinkedinMessagesTool(server);
-  // registerGetSendersTool(server);
   // registerGetContactsTool(server);
   // registerGetConversationByContactNameTool(server);
   // registerGetConversationBySenderTool(server);
   // registerGetConversationByMessageTool(server);
   registerCompanyEnrichmentTools(server);
-  registerBuildReplyContextPromptTool(server);
+  // registerBuildReplyContextPromptTool(server);
   registerGetReplyContextSnapshotTool(server);
   // registerGetCompanyRootContextTool(server);
   // registerSetCompanyRootContextTool(server);

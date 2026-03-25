@@ -12,6 +12,8 @@
     "dev:http": "tsx src/api-server.ts",
     "dev:api": "tsx src/api-server.ts",
     "dev:frontend": "cd frontend && npm run dev",
+    "dev:enrichment-worker": "tsx src/workers/enrichment-worker.ts",
+    "start:enrichment-worker": "node dist/workers/enrichment-worker.js",
     "start": "node dist/api-server.js",
     "prepare": "npm run build"
   },
@@ -30,6 +32,7 @@
   "devDependencies": {
     "@types/node": "^20.0.0",
     "@types/ws": "^8.18.1",
+    "less": "^4.6.4",
     "tsx": "^4.0.0",
     "typescript": "^5.0.0"
   }

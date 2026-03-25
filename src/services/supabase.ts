@@ -10,6 +10,17 @@ export const CONTACTS_TABLE = "Contacts";
 export const COMPANIES_TABLE = "companies";
 export const CONTEXT_SNAPSHOTS_TABLE = "ContextSnapshots";
 
+/** Parse `companies.tags` jsonb (array of tag strings, or legacy numeric values) from PostgREST/JSON. */
+export function parseCompanyTagsColumn(raw: unknown): string[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) return [];
+  return raw.map((x) => {
+    if (typeof x === "string") return x;
+    if (typeof x === "number" && Number.isFinite(x)) return String(x);
+    return String(x);
+  });
+}
+
 // --- Projects (table: Projects) ---
 
 export const PROJECTS_TABLE = "Projects";
@@ -1146,6 +1157,8 @@ export interface AllCompanyRow {
   domain: string;
   linkedin_url: string | null;
   created_at: string;
+  /** Tag values (from companies.tags jsonb). */
+  tags: string[];
   in_project: boolean;
   project_company_id: string | null;
 }
@@ -1173,15 +1186,26 @@ export async function createCompany(
 export async function getCompaniesByIds(
   client: SupabaseClient,
   ids: string[]
-): Promise<{ data: Array<{ id: string; name: string | null; domain: string | null }>; error: string | null }> {
+): Promise<{
+  data: Array<{ id: string; name: string | null; domain: string | null; tags: string[] }>;
+  error: string | null;
+}> {
   const unique = [...new Set(ids)].filter(Boolean);
   if (unique.length === 0) return { data: [], error: null };
   const { data, error } = await client
     .from(COMPANIES_TABLE)
-    .select("id, name, domain")
+    .select("id, name, domain, tags")
     .in("id", unique);
   if (error) return { data: [], error: error.message };
-  return { data: (data ?? []) as Array<{ id: string; name: string | null; domain: string | null }>, error: null };
+  return {
+    data: ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+      id: r.id as string,
+      name: (r.name as string) ?? null,
+      domain: (r.domain as string) ?? null,
+      tags: parseCompanyTagsColumn(r.tags),
+    })),
+    error: null,
+  };
 }
 
 /** LinkedIn-style profile fields from Contacts (for reply prompts). */
@@ -1280,6 +1304,7 @@ export async function getAllCompanies(
     domain: r.domain as string,
     linkedin_url: (r.linkedin_url as string) ?? null,
     created_at: r.created_at as string,
+    tags: parseCompanyTagsColumn(r.tags),
     in_project: r.id as string in pcMap,
     project_company_id: pcMap[r.id as string] ?? null,
   }));
@@ -1341,6 +1366,8 @@ export interface ProjectCompanyRow {
   name: string | null;
   domain: string | null;
   linkedin_url: string | null;
+  /** Tag values (companies.tags jsonb). */
+  tags: string[];
   hypotheses: Array<{ id: string; name: string }>;
   contact_count: number;
   contacts_preview: ProjectCompanyContact[];
@@ -1363,7 +1390,7 @@ export async function getProjectCompanies(
     .from(PROJECT_COMPANIES_TABLE)
     .select(
       `id, status, created_at, company_id,
-       companies!inner(id, name, domain, linkedin_url),
+       companies!inner(id, name, domain, linkedin_url, tags),
        hypothesis_targets(hypothesis_id, hypotheses(id, name))`,
       { count: "exact" }
     )
@@ -1439,6 +1466,7 @@ export async function getProjectCompanies(
       name: (company.name as string) ?? null,
       domain: (company.domain as string) ?? null,
       linkedin_url: (company.linkedin_url as string) ?? null,
+      tags: parseCompanyTagsColumn(company.tags),
       hypotheses,
       contact_count: contactCountByCompany[companyId] ?? 0,
       contacts_preview: contactsByCompany[companyId] ?? [],
@@ -2185,4 +2213,878 @@ export async function saveContextSnapshot(
 
   if (error) return { data: null, error: error.message };
   return { data: data as ContextSnapshotRow, error: null };
+}
+
+// ── Enrichment (agents, queue, runs, results) ────────────────────────────────
+
+export const ENRICHMENT_AGENTS_TABLE = "enrichment_agents";
+export const ENRICHMENT_QUEUE_TASKS_TABLE = "enrichment_queue_tasks";
+export const ENRICHMENT_AGENT_RUNS_TABLE = "enrichment_agent_runs";
+export const ENRICHMENT_AGENT_RESULTS_TABLE = "enrichment_agent_results";
+
+export type EnrichmentEntityType = "company" | "contact";
+
+export type EnrichmentAgentCellStatus =
+  | "planned"
+  | "queued"
+  | "running"
+  | "success"
+  | "error";
+
+export interface EnrichmentAgentCellState {
+  status: EnrichmentAgentCellStatus;
+  updatedAt: string | null;
+  error?: string | null;
+  /** Subset or full `agent_result` json for UI preview / modal */
+  resultPreview?: unknown;
+  /** Worker id/name when task is claimed or run is executing (from claimed_by / run.meta / run.input). */
+  workerName?: string | null;
+}
+
+export interface EnrichmentQueueTaskRow {
+  id: string;
+  project_id: string;
+  agent_name: string;
+  operation_name: string | null;
+  company_id: string | null;
+  contact_id: string | null;
+  meta: Record<string, unknown>;
+  status: string;
+  attempts: number;
+  locked_until: string | null;
+  created_at: string;
+  updated_at: string;
+  last_error: string | null;
+  enrichment_agent_run_id: string | null;
+  /** Set when a worker claims the task (RPC claim_enrichment_tasks). */
+  claimed_by?: string | null;
+}
+
+export interface EnrichmentAgentRunRow {
+  id: string;
+  queue_task_id: string;
+  project_id: string;
+  agent_name: string;
+  operation_name: string | null;
+  company_id: string | null;
+  contact_id: string | null;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+  error: string | null;
+  input: Record<string, unknown>;
+  /** Worker/UI metadata (e.g. worker_name). */
+  meta?: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface EnrichmentAgentResultRow {
+  id: string;
+  project_id: string;
+  agent_name: string;
+  company_id: string | null;
+  contact_id: string | null;
+  agent_result: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+function enrichmentEntityKey(entityId: string, agentName: string): string {
+  return `${entityId}::${agentName}`;
+}
+
+function workerNameFromRun(run: EnrichmentAgentRunRow): string | null {
+  const meta = run.meta;
+  if (meta && typeof meta.worker_name === "string") {
+    const w = meta.worker_name.trim();
+    if (w) return w;
+  }
+  const inp = run.input;
+  if (inp && typeof inp.worker_name === "string") {
+    const w = inp.worker_name.trim();
+    if (w) return w;
+  }
+  return null;
+}
+
+/**
+ * Derive per-cell status from latest queue row, optional result row, and latest run.
+ */
+export function deriveEnrichmentCellState(
+  task: EnrichmentQueueTaskRow | undefined,
+  result: EnrichmentAgentResultRow | undefined,
+  run: EnrichmentAgentRunRow | undefined
+): EnrichmentAgentCellState {
+  if (task) {
+    if (task.status === "queued") {
+      return {
+        status: "queued",
+        updatedAt: task.updated_at,
+        workerName: null,
+      };
+    }
+    if (task.status === "running") {
+      const cb = task.claimed_by?.trim();
+      return {
+        status: "running",
+        updatedAt: task.updated_at,
+        workerName: cb || (run ? workerNameFromRun(run) : null) || null,
+      };
+    }
+    if (task.status === "error") {
+      return {
+        status: "error",
+        updatedAt: task.updated_at,
+        error: task.last_error ?? null,
+      };
+    }
+    if (task.status === "done") {
+      if (result) {
+        return {
+          status: "success",
+          updatedAt: result.updated_at,
+          resultPreview: result.agent_result,
+        };
+      }
+      return { status: "success", updatedAt: task.updated_at };
+    }
+  }
+  if (result) {
+    return {
+      status: "success",
+      updatedAt: result.updated_at,
+      resultPreview: result.agent_result,
+    };
+  }
+  if (run) {
+    if (run.status === "running") {
+      return {
+        status: "running",
+        updatedAt: run.started_at,
+        workerName: workerNameFromRun(run),
+      };
+    }
+    if (run.status === "error") {
+      return {
+        status: "error",
+        updatedAt: run.finished_at ?? run.started_at,
+        error: run.error ?? null,
+      };
+    }
+    if (run.status === "success") {
+      return {
+        status: "success",
+        updatedAt: run.finished_at ?? run.started_at,
+        resultPreview: undefined,
+      };
+    }
+  }
+  return { status: "planned", updatedAt: null };
+}
+
+export type EnrichmentAgentRegistryRow = {
+  name: string;
+  entity_type: string;
+  operation_name: string | null;
+  is_active: boolean;
+  created_at: string;
+};
+
+/** All rows in `enrichment_agents` (including inactive), for admin UI. */
+export async function listAllEnrichmentAgents(client: SupabaseClient): Promise<{
+  data: EnrichmentAgentRegistryRow[];
+  error: string | null;
+}> {
+  const { data, error } = await client
+    .from(ENRICHMENT_AGENTS_TABLE)
+    .select("name, entity_type, operation_name, is_active, created_at")
+    .order("name", { ascending: true });
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as EnrichmentAgentRegistryRow[], error: null };
+}
+
+export async function createEnrichmentAgent(
+  client: SupabaseClient,
+  payload: {
+    name: string;
+    entity_type: string;
+    operation_name?: string | null;
+    is_active?: boolean;
+  }
+): Promise<{ error: string | null }> {
+  const name = payload.name?.trim();
+  if (!name) return { error: "name is required" };
+  const et = payload.entity_type;
+  if (et !== "company" && et !== "contact" && et !== "both") {
+    return { error: "entity_type must be company, contact, or both" };
+  }
+  const { error } = await client.from(ENRICHMENT_AGENTS_TABLE).insert({
+    name,
+    entity_type: et,
+    operation_name: payload.operation_name?.trim() || null,
+    is_active: payload.is_active !== false,
+  });
+  if (error) return { error: error.message };
+  return { error: null };
+}
+
+export async function updateEnrichmentAgent(
+  client: SupabaseClient,
+  agentName: string,
+  patch: {
+    entity_type?: string;
+    operation_name?: string | null;
+    is_active?: boolean;
+  }
+): Promise<{ error: string | null }> {
+  const name = agentName?.trim();
+  if (!name) return { error: "name is required" };
+  const updates: Record<string, unknown> = {};
+  if (patch.entity_type !== undefined) {
+    const et = patch.entity_type;
+    if (et !== "company" && et !== "contact" && et !== "both") {
+      return { error: "entity_type must be company, contact, or both" };
+    }
+    updates.entity_type = et;
+  }
+  if (patch.operation_name !== undefined) {
+    updates.operation_name =
+      patch.operation_name === null || patch.operation_name === ""
+        ? null
+        : String(patch.operation_name).trim();
+  }
+  if (patch.is_active !== undefined) {
+    updates.is_active = Boolean(patch.is_active);
+  }
+  if (Object.keys(updates).length === 0) {
+    return { error: "No fields to update" };
+  }
+  const { error } = await client
+    .from(ENRICHMENT_AGENTS_TABLE)
+    .update(updates)
+    .eq("name", name);
+  if (error) return { error: error.message };
+  return { error: null };
+}
+
+/**
+ * Active enrichment agents for a base entity type (includes `both`).
+ */
+export async function listEnrichmentAgentsForEntityType(
+  client: SupabaseClient,
+  entityType: EnrichmentEntityType
+): Promise<{
+  data: Array<{
+    name: string;
+    entity_type: string;
+    operation_name: string | null;
+    is_active: boolean;
+  }>;
+  error: string | null;
+}> {
+  const allowed =
+    entityType === "company"
+      ? ["company", "both"]
+      : ["contact", "both"];
+  const { data, error } = await client
+    .from(ENRICHMENT_AGENTS_TABLE)
+    .select("name, entity_type, operation_name, is_active")
+    .eq("is_active", true)
+    .in("entity_type", allowed)
+    .order("name", { ascending: true });
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as Array<{
+    name: string;
+    entity_type: string;
+    operation_name: string | null;
+    is_active: boolean;
+  }>, error: null };
+}
+
+export async function getContactsForProjectPage(
+  client: SupabaseClient,
+  projectId: string,
+  limit: number,
+  offset: number
+): Promise<{ data: Record<string, unknown>[]; total: number; error: string | null }> {
+  const lim = Math.min(Math.max(limit, 1), 100);
+  const off = Math.max(offset, 0);
+  const { data, error, count } = await client
+    .from(CONTACTS_TABLE)
+    .select("*", { count: "exact" })
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false })
+    .range(off, off + lim - 1);
+  if (error) return { data: [], total: 0, error: error.message };
+  return { data: (data ?? []) as Record<string, unknown>[], total: count ?? 0, error: null };
+}
+
+/** Historical + queue snapshot for enrichment_agent_runs / queue (per entity row). */
+export interface EnrichmentRunStats {
+  /** Total rows in `enrichment_agent_runs` for this entity (all time). */
+  totalRuns: number;
+  runsSuccess: number;
+  runsError: number;
+  runsRunning: number;
+  queueQueued: number;
+  queueRunning: number;
+  /** Deduplicated error lines from the **latest** outcome per agent only (capped). */
+  errorSamples: string[];
+}
+
+export interface EnrichmentTableRow {
+  entity: Record<string, unknown>;
+  agentStates: Record<string, EnrichmentAgentCellState>;
+  runStats: EnrichmentRunStats;
+}
+
+function runRecencyMs(run: EnrichmentAgentRunRow): number {
+  if (run.finished_at) return new Date(run.finished_at).getTime();
+  return new Date(run.started_at).getTime();
+}
+
+/**
+ * Error messages for the Enrichment summary: only from the **current** outcome per agent
+ * (latest queue task vs latest run by time). Older failed runs/tasks after a restart+success are ignored.
+ */
+function collectErrorSamplesForEntity(
+  entityId: string,
+  entityType: EnrichmentEntityType,
+  tasks: EnrichmentQueueTaskRow[],
+  runs: EnrichmentAgentRunRow[]
+): string[] {
+  const entityTasks = tasks.filter((t) => {
+    const eid = entityType === "company" ? t.company_id : t.contact_id;
+    return eid === entityId;
+  });
+  const entityRuns = runs.filter((r) => {
+    const eid = entityType === "company" ? r.company_id : r.contact_id;
+    return eid === entityId;
+  });
+
+  const agentNames = new Set<string>();
+  for (const t of entityTasks) agentNames.add(t.agent_name);
+  for (const r of entityRuns) agentNames.add(r.agent_name);
+
+  const messages: string[] = [];
+
+  for (const agentName of agentNames) {
+    const agentTasks = entityTasks.filter((t) => t.agent_name === agentName);
+    const agentRuns = entityRuns.filter((r) => r.agent_name === agentName);
+
+    const latestTask =
+      agentTasks.length === 0
+        ? undefined
+        : agentTasks.reduce((a, b) =>
+            new Date(a.updated_at).getTime() >= new Date(b.updated_at).getTime() ? a : b
+          );
+
+    const latestRun =
+      agentRuns.length === 0
+        ? undefined
+        : agentRuns.reduce((a, b) => (runRecencyMs(b) >= runRecencyMs(a) ? b : a));
+
+    const taskMs = latestTask ? new Date(latestTask.updated_at).getTime() : -1;
+    const runMs = latestRun ? runRecencyMs(latestRun) : -1;
+
+    const preferTask = latestTask && (!latestRun || taskMs >= runMs);
+
+    if (preferTask && latestTask) {
+      if (latestTask.status === "error") {
+        const err = (latestTask.last_error ?? "").trim();
+        if (err) messages.push(err);
+      }
+    } else if (latestRun) {
+      if (latestRun.status === "error") {
+        const err = (latestRun.error ?? "").trim();
+        if (err) messages.push(err);
+      }
+    }
+  }
+
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const m of messages) {
+    if (seen.has(m)) continue;
+    seen.add(m);
+    out.push(m);
+    if (out.length >= 16) break;
+  }
+  return out;
+}
+
+function buildEnrichmentRunStatsForEntity(
+  entityId: string,
+  entityType: EnrichmentEntityType,
+  tasks: EnrichmentQueueTaskRow[],
+  runs: EnrichmentAgentRunRow[]
+): EnrichmentRunStats {
+  const entityRuns = runs.filter((r) => {
+    const eid = entityType === "company" ? r.company_id : r.contact_id;
+    return eid === entityId;
+  });
+  let runsSuccess = 0;
+  let runsError = 0;
+  let runsRunning = 0;
+  for (const r of entityRuns) {
+    if (r.status === "success") runsSuccess++;
+    else if (r.status === "error") runsError++;
+    else if (r.status === "running") runsRunning++;
+  }
+  let queueQueued = 0;
+  let queueRunning = 0;
+  for (const t of tasks) {
+    const eid = entityType === "company" ? t.company_id : t.contact_id;
+    if (eid !== entityId) continue;
+    if (t.status === "queued") queueQueued++;
+    else if (t.status === "running") queueRunning++;
+  }
+  return {
+    totalRuns: entityRuns.length,
+    runsSuccess,
+    runsError,
+    runsRunning,
+    queueQueued,
+    queueRunning,
+    errorSamples: collectErrorSamplesForEntity(entityId, entityType, tasks, runs),
+  };
+}
+
+/**
+ * Paginated enrichment table: project companies or contacts plus merged agent column states.
+ */
+export async function getEnrichmentTableData(
+  client: SupabaseClient,
+  projectId: string,
+  entityType: EnrichmentEntityType,
+  limit: number,
+  offset: number
+): Promise<{
+  total: number;
+  agentNames: string[];
+  rows: EnrichmentTableRow[];
+  error: string | null;
+}> {
+  const lim = Math.min(Math.max(limit, 1), 100);
+  const off = Math.max(offset, 0);
+
+  let baseRows: Record<string, unknown>[] = [];
+  let total = 0;
+  let baseError: string | null = null;
+
+  if (entityType === "company") {
+    const pc = await getProjectCompanies(client, projectId, { limit: lim, offset: off });
+    baseError = pc.error;
+    total = pc.total;
+    baseRows = pc.data.map((r) => ({
+      project_company_id: r.project_company_id,
+      company_id: r.company_id,
+      status: r.status,
+      created_at: r.created_at,
+      name: r.name,
+      domain: r.domain,
+      linkedin_url: r.linkedin_url,
+      tags: r.tags,
+      hypotheses: r.hypotheses,
+      contact_count: r.contact_count,
+      contacts_preview: r.contacts_preview,
+    }));
+  } else {
+    const c = await getContactsForProjectPage(client, projectId, lim, off);
+    baseError = c.error;
+    total = c.total;
+    baseRows = c.data;
+  }
+
+  if (baseError) {
+    return { total: 0, agentNames: [], rows: [], error: baseError };
+  }
+
+  const entityIds = baseRows
+    .map((row) =>
+      entityType === "company"
+        ? (row.company_id as string | undefined)
+        : (row.uuid as string | undefined)
+    )
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+
+  if (entityIds.length === 0) {
+    const agentsRes = await listEnrichmentAgentsForEntityType(client, entityType);
+    const agentNames = agentsRes.data.map((a) => a.name);
+    return {
+      total,
+      agentNames,
+      rows: [] as EnrichmentTableRow[],
+      error: agentsRes.error,
+    };
+  }
+
+  const idColumn = entityType === "company" ? "company_id" : "contact_id";
+
+  const [agentsRes, tasksRes, runsRes, resultsRes] = await Promise.all([
+    listEnrichmentAgentsForEntityType(client, entityType),
+    client
+      .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+      .select("*")
+      .eq("project_id", projectId)
+      .in(idColumn, entityIds),
+    client
+      .from(ENRICHMENT_AGENT_RUNS_TABLE)
+      .select("*")
+      .eq("project_id", projectId)
+      .in(idColumn, entityIds),
+    client
+      .from(ENRICHMENT_AGENT_RESULTS_TABLE)
+      .select("*")
+      .eq("project_id", projectId)
+      .in(idColumn, entityIds),
+  ]);
+
+  if (tasksRes.error || runsRes.error || resultsRes.error) {
+    const err =
+      tasksRes.error?.message ??
+      runsRes.error?.message ??
+      resultsRes.error?.message ??
+      "enrichment fetch failed";
+    return { total, agentNames: [], rows: [], error: err };
+  }
+
+  const tasks = (tasksRes.data ?? []) as EnrichmentQueueTaskRow[];
+  const runs = (runsRes.data ?? []) as EnrichmentAgentRunRow[];
+  const results = (resultsRes.data ?? []) as EnrichmentAgentResultRow[];
+
+  const nameSet = new Set<string>();
+  for (const a of agentsRes.data) nameSet.add(a.name);
+  for (const t of tasks) nameSet.add(t.agent_name);
+  for (const r of runs) nameSet.add(r.agent_name);
+  for (const r of results) nameSet.add(r.agent_name);
+  const agentNames = [...nameSet].sort((a, b) => a.localeCompare(b));
+
+  const latestTask = new Map<string, EnrichmentQueueTaskRow>();
+  for (const t of tasks) {
+    const eid =
+      entityType === "company" ? t.company_id : t.contact_id;
+    if (!eid) continue;
+    const k = enrichmentEntityKey(eid, t.agent_name);
+    const prev = latestTask.get(k);
+    if (
+      !prev ||
+      new Date(t.updated_at).getTime() > new Date(prev.updated_at).getTime()
+    ) {
+      latestTask.set(k, t);
+    }
+  }
+
+  const latestRun = new Map<string, EnrichmentAgentRunRow>();
+  for (const r of runs) {
+    const eid =
+      entityType === "company" ? r.company_id : r.contact_id;
+    if (!eid) continue;
+    const k = enrichmentEntityKey(eid, r.agent_name);
+    const prev = latestRun.get(k);
+    const tNew = new Date(r.started_at).getTime();
+    const tPrev = prev ? new Date(prev.started_at).getTime() : 0;
+    if (!prev || tNew > tPrev) latestRun.set(k, r);
+  }
+
+  const resultByKey = new Map<string, EnrichmentAgentResultRow>();
+  for (const r of results) {
+    const eid =
+      entityType === "company" ? r.company_id : r.contact_id;
+    if (!eid) continue;
+    const k = enrichmentEntityKey(eid, r.agent_name);
+    resultByKey.set(k, r);
+  }
+
+  const rows: EnrichmentTableRow[] = [];
+  for (const row of baseRows) {
+    const entityId =
+      entityType === "company"
+        ? (row.company_id as string)
+        : (row.uuid as string);
+    if (!entityId) continue;
+
+    const agentStates: Record<string, EnrichmentAgentCellState> = {};
+    for (const agentName of agentNames) {
+      const k = enrichmentEntityKey(entityId, agentName);
+      agentStates[agentName] = deriveEnrichmentCellState(
+        latestTask.get(k),
+        resultByKey.get(k),
+        latestRun.get(k)
+      );
+    }
+    const runStats = buildEnrichmentRunStatsForEntity(
+      entityId,
+      entityType,
+      tasks,
+      runs
+    );
+    rows.push({ entity: row, agentStates, runStats });
+  }
+
+  return {
+    total,
+    agentNames,
+    rows,
+    error: agentsRes.error,
+  };
+}
+
+/**
+ * Enqueue enrichment tasks (one queue row per entity id).
+ */
+export async function enqueueEnrichmentTasks(
+  client: SupabaseClient,
+  payload: {
+    projectId: string;
+    entityType: EnrichmentEntityType;
+    agentName: string;
+    companyIds?: string[];
+    contactIds?: string[];
+    operationName?: string | null;
+    meta?: Record<string, unknown> | null;
+  }
+): Promise<{ inserted: number; error: string | null }> {
+  const { projectId, entityType, agentName } = payload;
+  const ids =
+    entityType === "company"
+      ? payload.companyIds ?? []
+      : payload.contactIds ?? [];
+  const unique = [...new Set(ids.map((id) => id?.trim()).filter(Boolean))] as string[];
+  if (unique.length === 0) {
+    return { inserted: 0, error: "No entity ids provided" };
+  }
+
+  const { data: agentRow, error: agentErr } = await client
+    .from(ENRICHMENT_AGENTS_TABLE)
+    .select("name, entity_type, is_active")
+    .eq("name", agentName)
+    .maybeSingle();
+
+  if (agentErr) return { inserted: 0, error: agentErr.message };
+  if (!agentRow) return { inserted: 0, error: `Unknown agent: ${agentName}` };
+  const et = (agentRow as { entity_type: string; is_active: boolean }).entity_type;
+  const active = (agentRow as { is_active: boolean }).is_active;
+  if (!active) return { inserted: 0, error: `Agent is inactive: ${agentName}` };
+  if (et !== "both" && et !== entityType) {
+    return {
+      inserted: 0,
+      error: `Agent "${agentName}" is not valid for entity type ${entityType}`,
+    };
+  }
+
+  const op = payload.operationName ?? null;
+  const meta = payload.meta ?? {};
+
+  const rowsToInsert = unique.map((id) => {
+    if (entityType === "company") {
+      return {
+        project_id: projectId,
+        agent_name: agentName,
+        operation_name: op,
+        company_id: id,
+        contact_id: null,
+        meta,
+        status: "queued",
+      };
+    }
+    return {
+      project_id: projectId,
+      agent_name: agentName,
+      operation_name: op,
+      company_id: null,
+      contact_id: id,
+      meta,
+      status: "queued",
+    };
+  });
+
+  const { error: insErr } = await client
+    .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+    .insert(rowsToInsert);
+  if (insErr) return { inserted: 0, error: insErr.message };
+  return { inserted: unique.length, error: null };
+}
+
+const QUEUE_STATUS_SET = new Set(["queued", "running", "done", "error", "cancelled"]);
+const RUN_STATUS_SET = new Set(["running", "success", "error"]);
+
+/**
+ * Paginated queue tasks for a project (newest first).
+ */
+export async function listEnrichmentQueueTasksForProject(
+  client: SupabaseClient,
+  projectId: string,
+  options: { limit: number; offset: number; status?: string | null }
+): Promise<{ data: EnrichmentQueueTaskRow[]; total: number; error: string | null }> {
+  const lim = Math.min(Math.max(options.limit, 1), 100);
+  const off = Math.max(options.offset, 0);
+  const st = options.status?.trim();
+  let q = client
+    .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+    .select("*", { count: "exact" })
+    .eq("project_id", projectId)
+    .order("updated_at", { ascending: false })
+    .range(off, off + lim - 1);
+  if (st && QUEUE_STATUS_SET.has(st)) {
+    q = q.eq("status", st);
+  }
+  const { data, error, count } = await q;
+  if (error) return { data: [], total: 0, error: error.message };
+  return { data: (data ?? []) as EnrichmentQueueTaskRow[], total: count ?? 0, error: null };
+}
+
+/**
+ * Paginated agent runs for a project (newest first).
+ */
+export async function listEnrichmentAgentRunsForProject(
+  client: SupabaseClient,
+  projectId: string,
+  options: { limit: number; offset: number; status?: string | null }
+): Promise<{ data: EnrichmentAgentRunRow[]; total: number; error: string | null }> {
+  const lim = Math.min(Math.max(options.limit, 1), 100);
+  const off = Math.max(options.offset, 0);
+  const st = options.status?.trim();
+  let q = client
+    .from(ENRICHMENT_AGENT_RUNS_TABLE)
+    .select("*", { count: "exact" })
+    .eq("project_id", projectId)
+    .order("started_at", { ascending: false })
+    .range(off, off + lim - 1);
+  if (st && RUN_STATUS_SET.has(st)) {
+    q = q.eq("status", st);
+  }
+  const { data, error, count } = await q;
+  if (error) return { data: [], total: 0, error: error.message };
+  return { data: (data ?? []) as EnrichmentAgentRunRow[], total: count ?? 0, error: null };
+}
+
+/**
+ * Stop a queued or running task (cancel queue row; mark active run as error).
+ */
+export async function stopEnrichmentQueueTask(
+  client: SupabaseClient,
+  projectId: string,
+  taskId: string
+): Promise<{ ok: boolean; error: string | null }> {
+  const { data: row, error: fetchErr } = await client
+    .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+    .select("*")
+    .eq("id", taskId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+
+  if (fetchErr) return { ok: false, error: fetchErr.message };
+  if (!row) return { ok: false, error: "Task not found" };
+
+  const task = row as EnrichmentQueueTaskRow;
+  const st = task.status;
+  if (st === "done" || st === "cancelled" || st === "error") {
+    return { ok: false, error: `Task is already ${st}` };
+  }
+
+  const nowIso = new Date().toISOString();
+
+  if (st === "queued") {
+    const { error } = await client
+      .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+      .update({
+        status: "cancelled",
+        last_error: "Stopped by user",
+        updated_at: nowIso,
+      })
+      .eq("id", taskId)
+      .eq("project_id", projectId);
+    return { ok: !error, error: error?.message ?? null };
+  }
+
+  if (st === "running") {
+    await client
+      .from(ENRICHMENT_AGENT_RUNS_TABLE)
+      .update({
+        status: "error",
+        finished_at: nowIso,
+        error: "Stopped by user",
+      })
+      .eq("queue_task_id", taskId)
+      .eq("status", "running");
+
+    const runningUpdate = {
+      status: "cancelled" as const,
+      last_error: "Stopped by user",
+      locked_until: null as null,
+      claimed_by: null as null,
+      updated_at: nowIso,
+    };
+    let { error } = await client
+      .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+      .update(runningUpdate)
+      .eq("id", taskId)
+      .eq("project_id", projectId);
+    if (
+      error &&
+      error.message.includes("claimed_by") &&
+      error.message.includes("schema cache")
+    ) {
+      const { claimed_by: _c, ...withoutClaimed } = runningUpdate;
+      void _c;
+      const r2 = await client
+        .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+        .update(withoutClaimed)
+        .eq("id", taskId)
+        .eq("project_id", projectId);
+      error = r2.error;
+    }
+    return { ok: !error, error: error?.message ?? null };
+  }
+
+  return { ok: false, error: `Cannot stop task with status ${st}` };
+}
+
+/**
+ * Re-queue a copy of a terminal task (done / error / cancelled).
+ */
+export async function restartEnrichmentQueueTask(
+  client: SupabaseClient,
+  projectId: string,
+  taskId: string
+): Promise<{ ok: boolean; newTaskId: string | null; error: string | null }> {
+  const { data: row, error: fetchErr } = await client
+    .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+    .select("*")
+    .eq("id", taskId)
+    .eq("project_id", projectId)
+    .maybeSingle();
+
+  if (fetchErr) return { ok: false, newTaskId: null, error: fetchErr.message };
+  if (!row) return { ok: false, newTaskId: null, error: "Task not found" };
+
+  const task = row as EnrichmentQueueTaskRow;
+  if (task.status !== "done" && task.status !== "error" && task.status !== "cancelled") {
+    return {
+      ok: false,
+      newTaskId: null,
+      error: "Only finished tasks can be restarted (done, error, or cancelled)",
+    };
+  }
+
+  const insertRow: Record<string, unknown> = {
+    project_id: task.project_id,
+    agent_name: task.agent_name,
+    operation_name: task.operation_name,
+    company_id: task.company_id,
+    contact_id: task.contact_id,
+    meta: task.meta ?? {},
+    status: "queued",
+  };
+
+  const { data: ins, error: insErr } = await client
+    .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+    .insert(insertRow)
+    .select("id")
+    .single();
+
+  if (insErr) return { ok: false, newTaskId: null, error: insErr.message };
+  const newId = (ins as { id: string }).id;
+  return { ok: true, newTaskId: newId, error: null };
 }

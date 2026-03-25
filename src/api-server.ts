@@ -44,6 +44,18 @@ import {
   handleCreateCompany,
   handlePatchContactCompany,
   handleGetCompaniesByIds,
+  handleGetEnrichmentAgents,
+  handleGetEnrichmentAgentsRegistry,
+  handlePostEnrichmentAgent,
+  handlePutEnrichmentAgent,
+  handleGetEnrichmentTable,
+  handlePostEnrichmentEnqueue,
+  handleGetEnrichmentQueue,
+  handleGetEnrichmentRunsList,
+  handlePostEnrichmentStop,
+  handlePostEnrichmentRestart,
+  handlePostWorkerHeartbeat,
+  handleGetWorkers,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import { createMcpHandler } from "./server.js";
@@ -347,6 +359,70 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/enrichment/agents/registry":
+        if (req.method === "GET") {
+          await handleGetEnrichmentAgentsRegistry(req, res);
+        } else if (req.method === "POST") {
+          await handlePostEnrichmentAgent(req, res);
+        } else if (req.method === "PUT") {
+          await handlePutEnrichmentAgent(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/enrichment/agents":
+        await handleGetEnrichmentAgents(req, res);
+        return;
+      case "/api/enrichment-table":
+        await handleGetEnrichmentTable(req, res);
+        return;
+      case "/api/enrichment/enqueue":
+        await handlePostEnrichmentEnqueue(req, res);
+        return;
+      case "/api/enrichment/queue":
+        if (req.method === "GET") {
+          await handleGetEnrichmentQueue(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/enrichment/runs":
+        if (req.method === "GET") {
+          await handleGetEnrichmentRunsList(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/enrichment/stop":
+        if (req.method === "POST") {
+          await handlePostEnrichmentStop(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/enrichment/restart":
+        if (req.method === "POST") {
+          await handlePostEnrichmentRestart(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/workers/heartbeat":
+        await handlePostWorkerHeartbeat(req, res);
+        return;
+      case "/api/workers":
+        if (req.method === "GET") {
+          await handleGetWorkers(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       default:
         if (req.method === "GET" || req.method === "HEAD") {
           const wasServed = await servesStatic(pathname, res);
@@ -438,5 +514,15 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  DELETE /api/hypotheses/:id/targets");
   console.log("  POST /api/build-context");
   console.log("  GET  /api/context-snapshots?projectId=<id>");
+  console.log("  GET  /api/enrichment/agents?entityType=company|contact");
+  console.log("  GET|POST|PUT /api/enrichment/agents/registry");
+  console.log("  GET  /api/enrichment-table?entityType=company|contact&projectId=<id>");
+  console.log("  POST /api/enrichment/enqueue");
+  console.log("  GET  /api/enrichment/queue?projectId=<id>");
+  console.log("  GET  /api/enrichment/runs?projectId=<id>");
+  console.log("  POST /api/enrichment/stop");
+  console.log("  POST /api/enrichment/restart");
+  console.log("  GET  /api/workers");
+  console.log("  POST /api/workers/heartbeat");
   console.log("  WS   /api/sync-ws?runId=<id>");
 });

@@ -113,6 +113,8 @@ export interface ProjectCompanyListItem {
   company_id: string;
   name: string | null;
   domain: string | null;
+  /** Tag values from companies.tags */
+  tags?: string[];
   contacts_preview: Array<{
     first_name: string | null;
     last_name: string | null;

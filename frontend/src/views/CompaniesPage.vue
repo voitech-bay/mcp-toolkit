@@ -35,6 +35,15 @@ interface CompanyContact {
   project_id: string | null;
 }
 
+function normalizeCompanyTags(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map((x) => {
+    if (typeof x === "string") return x;
+    if (typeof x === "number" && Number.isFinite(x)) return String(x);
+    return String(x);
+  });
+}
+
 interface CompanyRow {
   id: string;
   company_id: string;
@@ -42,6 +51,8 @@ interface CompanyRow {
   domain: string;
   linkedin_url: string | null;
   created_at: string;
+  /** Tag values from companies.tags (jsonb). */
+  tags: string[];
   in_project: boolean;
   project_company_id: string | null;
   hypotheses: Array<{ id: string; name: string }>;
@@ -210,6 +221,7 @@ async function fetchCompanies() {
       data.value = (json.data ?? []).map((row: Record<string, unknown>) => ({
         ...row,
         company_id: (row.company_id as string) ?? (row.id as string),
+        tags: normalizeCompanyTags(row.tags),
         hypotheses: [],
         contact_count: 0,
         contacts_preview: [],
@@ -223,6 +235,7 @@ async function fetchCompanies() {
         domain: row.domain as string,
         linkedin_url: row.linkedin_url as string | null,
         created_at: row.created_at as string,
+        tags: normalizeCompanyTags(row.tags),
         in_project: true,
         project_company_id: row.project_company_id as string,
         hypotheses: Array.isArray(row.hypotheses) ? row.hypotheses : [],
@@ -284,6 +297,25 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     title: "Domain",
     ellipsis: { tooltip: true },
     render: (row) => row.domain ?? "—",
+  },
+  {
+    key: "tags",
+    title: "Tags",
+    width: 120,
+    render: (row: CompanyRow) => {
+      const ids = row.tags ?? [];
+      if (ids.length === 0) return h("span", { style: "opacity:.4" }, "—");
+      return h(
+        NSpace,
+        { size: 4, wrap: true },
+        {
+          default: () =>
+            ids.map((id) =>
+              h(NTag, { size: "tiny", bordered: false, key: String(id) }, { default: () => String(id) })
+            ),
+        }
+      );
+    },
   },
   {
     key: "linkedin_url",

@@ -12,6 +12,8 @@ const router = createRouter({
     { path: "/context", name: "Context", component: () => import("../views/ContextBuilderPage.vue"), meta: { title: "Context Builder | MCP Toolkit" } },
     { path: "/context-snapshots", name: "ContextSnapshots", component: () => import("../views/ContextSnapshotsPage.vue"), meta: { title: "Saved Contexts | MCP Toolkit" } },
     { path: "/conversations", name: "Conversations", component: () => import("../views/ConversationsPage.vue"), meta: { title: "Conversations | MCP Toolkit" } },
+    { path: "/enrichment", name: "EnrichmentTable", component: () => import("../views/EnrichmentTablePage.vue"), meta: { title: "Enrichment | MCP Toolkit" } },
+    { path: "/enrichment/jobs", name: "EnrichmentJobs", component: () => import("../views/EnrichmentJobsPage.vue"), meta: { title: "Enrichment jobs | MCP Toolkit" } },
   ],
 });
 

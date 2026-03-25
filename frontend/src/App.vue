@@ -2,11 +2,39 @@
 import { computed, h } from "vue";
 import { useDark } from "@vueuse/core";
 import { useRoute, useRouter } from "vue-router";
-import { NConfigProvider, NButton, NSpace, NSelect, NMessageProvider, NCard } from "naive-ui";
-import type { SelectOption } from "naive-ui";
+import {
+  NConfigProvider,
+  NButton,
+  NSpace,
+  NSelect,
+  NMessageProvider,
+  NCard,
+  NDropdown,
+  NAlert,
+  NText,
+} from "naive-ui";
+import type { SelectOption, DropdownOption } from "naive-ui";
 import { darkTheme, lightTheme } from "naive-ui";
-import { MoonIcon, SunIcon, LayoutDashboardIcon, TableIcon, RefreshCwIcon, BuildingIcon, LightbulbIcon, NetworkIcon, UsersIcon, BookmarkIcon, MessageCircleIcon } from "lucide-vue-next";
+import {
+  MoonIcon,
+  SunIcon,
+  LayoutDashboardIcon,
+  TableIcon,
+  RefreshCwIcon,
+  BuildingIcon,
+  LightbulbIcon,
+  NetworkIcon,
+  UsersIcon,
+  BookmarkIcon,
+  MessageCircleIcon,
+  Table2Icon,
+  ChevronDownIcon,
+  ClipboardListIcon,
+  CpuIcon,
+  CircleDotIcon,
+} from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
+import { useWorkers } from "./composables/useWorkers";
 
 const isDark = useDark();
 isDark.value = true;
@@ -15,15 +43,84 @@ const naiveTheme = computed(() => (isDark.value ? darkTheme : lightTheme));
 
 const route = useRoute();
 const router = useRouter();
-const isTables = computed(() => route.path === "/tables");
+
 const isHome = computed(() => route.path === "/");
-const isSync = computed(() => route.path === "/sync");
-const isCompanies = computed(() => route.path === "/companies");
-const isContacts = computed(() => route.path === "/contacts");
-const isHypotheses = computed(() => route.path === "/hypotheses");
-const isContext = computed(() => route.path === "/context");
-const isContextSnapshots = computed(() => route.path === "/context-snapshots");
-const isConversations = computed(() => route.path === "/conversations");
+
+/** Grouped routes — highlight parent when any child is active. */
+const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations"] as const;
+const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses"] as const;
+const PIPELINE_PATHS = ["/sync", "/enrichment", "/enrichment/jobs"] as const;
+
+function pathInGroup(path: string, group: readonly string[]): boolean {
+  return group.includes(path);
+}
+
+const isDataGroupActive = computed(() => pathInGroup(route.path, DATA_PATHS));
+const isContextGroupActive = computed(() => pathInGroup(route.path, CONTEXT_PATHS));
+const isPipelineGroupActive = computed(() => pathInGroup(route.path, PIPELINE_PATHS));
+
+const dataMenuOptions: DropdownOption[] = [
+  {
+    label: "Tables",
+    key: "/tables",
+    icon: () => h(TableIcon, { size: 14 }),
+  },
+  {
+    label: "Companies",
+    key: "/companies",
+    icon: () => h(BuildingIcon, { size: 14 }),
+  },
+  {
+    label: "Contacts",
+    key: "/contacts",
+    icon: () => h(UsersIcon, { size: 14 }),
+  },
+  {
+    label: "Conversations",
+    key: "/conversations",
+    icon: () => h(MessageCircleIcon, { size: 14 }),
+  },
+];
+
+const contextMenuOptions: DropdownOption[] = [
+  {
+    label: "Context builder",
+    key: "/context",
+    icon: () => h(NetworkIcon, { size: 14 }),
+  },
+  {
+    label: "Saved contexts",
+    key: "/context-snapshots",
+    icon: () => h(BookmarkIcon, { size: 14 }),
+  },
+  {
+    label: "Hypotheses",
+    key: "/hypotheses",
+    icon: () => h(LightbulbIcon, { size: 14 }),
+  },
+];
+
+const pipelineMenuOptions: DropdownOption[] = [
+  {
+    label: "Sync",
+    key: "/sync",
+    icon: () => h(RefreshCwIcon, { size: 14 }),
+  },
+  {
+    label: "Enrichment",
+    key: "/enrichment",
+    icon: () => h(Table2Icon, { size: 14 }),
+  },
+  {
+    label: "Enrichment jobs",
+    key: "/enrichment/jobs",
+    icon: () => h(ClipboardListIcon, { size: 14 }),
+  },
+];
+
+function onNavSelect(key: string | number) {
+  router.push(String(key));
+}
 
 const projectStore = useProjectStore();
 
@@ -53,7 +150,62 @@ function toggleTheme() {
   isDark.value = !isDark.value;
 }
 
-projectStore.loadProjects()
+projectStore.loadProjects();
+
+const { workers, loading: workersLoading, error: workersError } = useWorkers(8000);
+
+const onlineWorkerCount = computed(() => workers.value.length);
+const busyWorkerCount = computed(() => workers.value.filter((w) => w.status === "busy").length);
+
+function formatSeen(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+const workerMenuOptions = computed<DropdownOption[]>(() => {
+  if (workersError.value) {
+    return [
+      {
+        key: "err",
+        type: "render",
+        disabled: true,
+        render: () =>
+          h("div", { class: "worker-dd-note" }, [
+            h("div", { class: "worker-dd-note__line" }, "Could not load workers"),
+            h(NText, { depth: 3, class: "worker-dd-note__detail" }, () => workersError.value ?? ""),
+          ]),
+      },
+    ];
+  }
+  if (workers.value.length === 0) {
+    return [
+      {
+        key: "empty",
+        type: "render",
+        disabled: true,
+        render: () =>
+          h(
+            NText,
+            { depth: 3, class: "worker-dd-note" },
+            () => (workersLoading.value ? "Loading…" : "No workers online")
+          ),
+      },
+    ];
+  }
+
+  return workers.value.map((w) => ({
+    key: w.workerId,
+    label: w.name,
+    icon: () => h('div', { 
+      style: "height: 8px; width: 8px; border-radius: 50%; align-self: center;",
+      class: w.status === "busy" ? "worker-dd-row__icon--busy" : "worker-dd-row__icon--idle"
+    }),
+  }));
+});
 </script>
 
 <template>
@@ -73,51 +225,81 @@ projectStore.loadProjects()
                 size="small"
                 style="width: 220px"
               />
+              <NDropdown
+                trigger="click"
+                placement="bottom-start"
+                :options="workerMenuOptions"
+                :show-arrow="true"
+              >
+                <NButton quaternary size="small" class="workers-trigger" title="Worker status and heartbeats">
+                  <CpuIcon :size="14" class="workers-trigger__icon" />
+                  <span class="workers-trigger__label">Workers</span>
+                  <span v-if="workersLoading" class="workers-trigger__count workers-trigger__count--muted">
+                    …
+                  </span>
+                  <template v-else-if="workersError">
+                    <span class="workers-trigger__count workers-trigger__count--err">—</span>
+                  </template>
+                  <template v-else>
+                    <span class="workers-trigger__count">{{ onlineWorkerCount }} online</span>
+                    <span v-if="busyWorkerCount > 0" class="workers-trigger__busy">{{ busyWorkerCount }} busy</span>
+                  </template>
+                  <ChevronDownIcon :size="14" class="workers-trigger__chev" />
+                </NButton>
+              </NDropdown>
             </div>
-            <div class="nav-row">
-              <NSpace>
+            <nav class="nav-row" aria-label="Main">
+              <NSpace wrap size="small" align="center">
                 <NButton quaternary :type="isHome ? 'primary' : undefined" size="small" @click="router.push('/')">
                   <LayoutDashboardIcon :size="14" style="margin-right: 4px" />
                   Home
                 </NButton>
-                <NButton quaternary :type="isTables ? 'primary' : undefined" size="small" @click="router.push('/tables')">
-                  <TableIcon :size="14" style="margin-right: 4px" />
-                  Tables
-                </NButton>
-                <NButton quaternary :type="isSync ? 'primary' : undefined" size="small" @click="router.push('/sync')">
-                  <RefreshCwIcon :size="14" style="margin-right: 4px" />
-                  Sync
-                </NButton>
-                <NButton quaternary :type="isCompanies ? 'primary' : undefined" size="small" @click="router.push('/companies')">
-                  <BuildingIcon :size="14" style="margin-right: 4px" />
-                  Companies
-                </NButton>
-                <NButton quaternary :type="isContacts ? 'primary' : undefined" size="small" @click="router.push('/contacts')">
-                  <UsersIcon :size="14" style="margin-right: 4px" />
-                  Contacts
-                </NButton>
-                <NButton quaternary :type="isHypotheses ? 'primary' : undefined" size="small" @click="router.push('/hypotheses')">
-                  <LightbulbIcon :size="14" style="margin-right: 4px" />
-                  Hypotheses
-                </NButton>
-                <NButton quaternary :type="isContext ? 'primary' : undefined" size="small" @click="router.push('/context')">
-                  <NetworkIcon :size="14" style="margin-right: 4px" />
-                  Context
-                </NButton>
-                <NButton quaternary :type="isContextSnapshots ? 'primary' : undefined" size="small" @click="router.push('/context-snapshots')">
-                  <BookmarkIcon :size="14" style="margin-right: 4px" />
-                  Saved
-                </NButton>
-                <NButton quaternary :type="isConversations ? 'primary' : undefined" size="small" @click="router.push('/conversations')">
-                  <MessageCircleIcon :size="14" style="margin-right: 4px" />
-                  Conversations
-                </NButton>
-                <NButton quaternary @click="toggleTheme()" size="small">
+
+                <NDropdown
+                  trigger="hover"
+                  placement="bottom-start"
+                  :options="dataMenuOptions"
+                  :show-arrow="true"
+                  @select="onNavSelect"
+                >
+                  <NButton quaternary size="small" :type="isDataGroupActive ? 'primary' : undefined" class="nav-dropdown-trigger">
+                    Data
+                    <ChevronDownIcon :size="14" class="nav-chevron" />
+                  </NButton>
+                </NDropdown>
+
+                <NDropdown
+                  trigger="hover"
+                  placement="bottom-start"
+                  :options="contextMenuOptions"
+                  :show-arrow="true"
+                  @select="onNavSelect"
+                >
+                  <NButton quaternary size="small" :type="isContextGroupActive ? 'primary' : undefined" class="nav-dropdown-trigger">
+                    Context
+                    <ChevronDownIcon :size="14" class="nav-chevron" />
+                  </NButton>
+                </NDropdown>
+
+                <NDropdown
+                  trigger="hover"
+                  placement="bottom-start"
+                  :options="pipelineMenuOptions"
+                  :show-arrow="true"
+                  @select="onNavSelect"
+                >
+                  <NButton quaternary size="small" :type="isPipelineGroupActive ? 'primary' : undefined" class="nav-dropdown-trigger">
+                    Pipeline
+                    <ChevronDownIcon :size="14" class="nav-chevron" />
+                  </NButton>
+                </NDropdown>
+
+                <NButton quaternary size="small" @click="toggleTheme()" :title="isDark ? 'Light mode' : 'Dark mode'">
                   <SunIcon :size="14" v-if="isDark" />
                   <MoonIcon :size="14" v-else />
                 </NButton>
               </NSpace>
-            </div>
+            </nav>
           </header>
         </NCard>
 
@@ -137,7 +319,17 @@ projectStore.loadProjects()
   </NMessageProvider>
 </template>
 
-<style scoped>
+<style>
+.worker-dd-row__icon--busy {
+  background: #e88080;
+}
+
+.worker-dd-row__icon--idle {
+  background: #63e2b7;
+}
+</style>
+
+<style scoped lang="less">
 .header-card {
   max-width: 1600px;
   margin: 0 auto;
@@ -164,9 +356,81 @@ projectStore.loadProjects()
   gap: 0.5rem;
 }
 
+.workers-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(100%, 280px);
+  :deep(.n-button__content) {
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+}
+
+.workers-trigger__icon {
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.workers-trigger__label {
+  font-weight: 500;
+}
+
+.workers-trigger__count {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(24, 160, 88, 0.18);
+  color: var(--n-success-color, #18a058);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.workers-trigger__count--muted {
+  background: var(--n-color-hover);
+  color: var(--n-text-color-3);
+  font-weight: 400;
+}
+
+.workers-trigger__count--err {
+  background: rgba(208, 48, 80, 0.15);
+  color: var(--n-error-color);
+}
+
+.workers-trigger__busy {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(240, 160, 32, 0.2);
+  color: var(--n-warning-color, #f0a020);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.workers-trigger__chev {
+  flex-shrink: 0;
+  margin-left: 1px;
+  opacity: 0.55;
+}
+
 .nav-row {
   display: flex;
   align-items: center;
+  flex: 1;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.nav-dropdown-trigger {
+  gap: 2px;
+}
+
+.nav-chevron {
+  margin-left: 2px;
+  opacity: 0.65;
 }
 
 .main {
@@ -174,5 +438,58 @@ projectStore.loadProjects()
   max-width: 1600px;
   margin: 0 auto;
   width: 100%;
+}
+</style>
+
+<!-- Dropdown body is teleported; render() nodes use global classes -->
+<style>
+.worker-dd-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px 16px;
+  min-width: 300px;
+  max-width: 420px;
+  padding: 6px 4px;
+  font-size: 13px;
+}
+
+.worker-dd-row__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+  color: var(--n-text-color-1);
+}
+
+.worker-dd-row__status {
+  font-size: 12px;
+  color: var(--n-text-color-2);
+  text-transform: lowercase;
+}
+
+.worker-dd-row__seen {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--n-text-color-3);
+  white-space: nowrap;
+}
+
+.worker-dd-note {
+  padding: 8px 12px;
+  min-width: 200px;
+  max-width: 320px;
+  font-size: 13px;
+}
+
+.worker-dd-note__line {
+  margin-bottom: 4px;
+}
+
+.worker-dd-note__detail {
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
 }
 </style>
