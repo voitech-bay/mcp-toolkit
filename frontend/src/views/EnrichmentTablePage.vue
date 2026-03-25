@@ -10,7 +10,6 @@ import {
   nextTick,
   type Ref,
 } from "vue";
-import type { HTMLAttributes } from "vue";
 import {
   NCard,
   NDataTable,
