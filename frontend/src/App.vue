@@ -156,15 +156,6 @@ const { workers, loading: workersLoading, error: workersError } = useWorkers(800
 const onlineWorkerCount = computed(() => workers.value.length);
 const busyWorkerCount = computed(() => workers.value.filter((w) => w.status === "busy").length);
 
-function formatSeen(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  } catch {
-    return iso;
-  }
-}
-
 const workerMenuOptions = computed<DropdownOption[]>(() => {
   if (workersError.value) {
     return [
