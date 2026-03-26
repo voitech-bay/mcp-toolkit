@@ -36,7 +36,6 @@ import {
   MessageCircleIcon,
   Table2Icon,
   ChevronDownIcon,
-  ChevronRightIcon,
   ClipboardListIcon,
   CpuIcon,
 } from "lucide-vue-next";
@@ -131,6 +130,32 @@ function onNavSelect(key: string | number) {
 
 const projectStore = useProjectStore();
 
+/** Random rectangular loop for the empty “no project” GIF (new params each load). */
+type NoProjectOrbit = {
+  hw: number;
+  hh: number;
+  durationSec: number;
+  delaySec: number;
+};
+
+function randomNoProjectOrbit(): NoProjectOrbit {
+  const r = () => Math.random();
+  const hw = Math.round(70 + r() * 200);
+  const hh = Math.round(35 + r() * 150);
+  const durationSec = Math.round(12 + r() * 24);
+  const delaySec = -r() * durationSec;
+  return { hw, hh, durationSec, delaySec };
+}
+
+const noProjectOrbit = ref<NoProjectOrbit>(randomNoProjectOrbit());
+
+const noProjectOrbitStageStyle = computed(() => ({
+  "--orbit-hw": `${noProjectOrbit.value.hw}px`,
+  "--orbit-hh": `${noProjectOrbit.value.hh}px`,
+  "--orbit-duration": `${noProjectOrbit.value.durationSec}s`,
+  "--orbit-delay": `${noProjectOrbit.value.delaySec}s`,
+}));
+
 const projectOptions = computed<SelectOption[]>(() =>
   projectStore.projects.map((p) => ({ label: p.name, value: p.id }))
 );
@@ -179,12 +204,15 @@ function onWorkerDropdownSelect(key: string | number) {
   workerDrawerOpen.value = true;
 }
 
-function pendingBufferTotal(w: WorkerEntry): number {
-  return w.pendingBatches.reduce((s, p) => s + p.count, 0);
-}
-
 const RUNTIME_LABELS: Record<string, string> = {
   workerName: "Worker name (ENV)",
+  llmAdapter: "LLM adapter (LLM_ADAPTER)",
+  cursorApiKeyConfigured: "Cursor API key set (CURSOR_API_KEY)",
+  cursorAgentRepoUrl: "Cursor agent repo (CURSOR_AGENT_REPO_URL)",
+  cursorAgentRef: "Cursor agent git ref (CURSOR_AGENT_REF)",
+  cursorApiBaseUrl: "Cursor API base (CURSOR_API_BASE_URL)",
+  cursorPollIntervalMs: "Cursor agent poll interval (ms)",
+  cursorTimeoutMs: "Cursor agent timeout (ms)",
   maxConcurrentAgentRuns: "Max concurrent agent runs (this worker)",
   pickLimit: "Max tasks claimed per pick",
   pickIntervalMs: "Pick interval — time between picks (ms)",
@@ -195,6 +223,34 @@ const RUNTIME_LABELS: Record<string, string> = {
   batchWaitMs: "Batch wait before partial flush (ms); -1 = full batch only",
   heartbeatIntervalMs: "Presence heartbeat interval (ms)",
 };
+
+/** Display order for runtime snapshot (unknown keys sort after). */
+const RUNTIME_KEY_ORDER: string[] = [
+  "workerName",
+  "llmAdapter",
+  "cursorApiKeyConfigured",
+  "cursorAgentRepoUrl",
+  "cursorAgentRef",
+  "cursorApiBaseUrl",
+  "cursorPollIntervalMs",
+  "cursorTimeoutMs",
+  "maxConcurrentAgentRuns",
+  "pickLimit",
+  "pickIntervalMs",
+  "lockMinutes",
+  "batchWaitMs",
+  "heartbeatIntervalMs",
+];
+
+function sortRuntimeKeys(keys: string[]): string[] {
+  const order = new Map(RUNTIME_KEY_ORDER.map((k, i) => [k, i]));
+  return [...keys].sort((a, b) => {
+    const ia = order.get(a) ?? 1000;
+    const ib = order.get(b) ?? 1000;
+    if (ia !== ib) return ia - ib;
+    return a.localeCompare(b);
+  });
+}
 
 function formatRuntimeLabel(key: string): string {
   return RUNTIME_LABELS[key] ?? key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
@@ -222,28 +278,28 @@ const busyWorkerCount = computed(() =>
   workers.value.filter((w) => w.hasRuntime !== false && w.status === "busy").length
 );
 
-/** Per-worker detail expand (sub-rows). Default expanded when there is detail to show. */
-const workerDetailExpanded = ref<Record<string, boolean>>({});
-
-function hasWorkerDetail(w: {
-  tasksInProgress: unknown[];
-  pendingBatches: unknown[];
-}): boolean {
-  return w.tasksInProgress.length > 0 || w.pendingBatches.length > 0;
-}
-
-function isWorkerDetailExpanded(workerId: string, w: typeof workers.value[number]): boolean {
-  if (!hasWorkerDetail(w)) return false;
-  return workerDetailExpanded.value[workerId] !== false;
-}
-
-function toggleWorkerDetail(workerId: string): void {
-  const wasExpanded = workerDetailExpanded.value[workerId] !== false;
-  workerDetailExpanded.value = {
-    ...workerDetailExpanded.value,
-    [workerId]: !wasExpanded,
-  };
-}
+/** e.g. ` (1 cursor, 1 mock)` for live workers with runtime llmAdapter counts. */
+const liveWorkerProviderSummary = computed(() => {
+  const live = workers.value.filter((w) => w.hasRuntime !== false);
+  if (live.length === 0) return "";
+  const counts = new Map<string, number>();
+  for (const w of live) {
+    const raw = w.runtime?.llmAdapter;
+    const key =
+      typeof raw === "string" && raw.trim() !== ""
+        ? raw.trim().toLowerCase()
+        : "unknown";
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const order = (k: string): number =>
+    k === "cursor" ? 0 : k === "mock" ? 1 : k === "unknown" ? 98 : 50;
+  const entries = [...counts.entries()].sort((a, b) => {
+    const d = order(a[0]) - order(b[0]);
+    return d !== 0 ? d : a[0].localeCompare(b[0]);
+  });
+  const parts = entries.map(([k, n]) => `${n} ${k}`);
+  return ` (${parts.join(", ")})`;
+});
 
 function formatWorkerSeen(iso: string): string {
   try {
@@ -258,32 +314,19 @@ function formatWorkerSeen(iso: string): string {
   }
 }
 
+/** Dropdown tag: short label from `runtime.llmAdapter` (mock, cursor, …). */
+function formatLlmProviderShort(raw: string): string {
+  const s = raw.trim().toLowerCase();
+  if (s === "mock") return "Mock";
+  if (s === "cursor") return "Cursor";
+  if (!s) return raw;
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
 function waitingSeconds(waitingSince: string): number {
   const t = new Date(waitingSince).getTime();
   if (Number.isNaN(t)) return 0;
   return Math.max(0, Math.floor((now.value.getTime() - t) / 1000));
-}
-
-function runningTasksSummary(
-  tasks: Array<{ agentName: string }>
-): string {
-  const m = new Map<string, number>();
-  for (const t of tasks) {
-    m.set(t.agentName, (m.get(t.agentName) ?? 0) + 1);
-  }
-  return [...m.entries()].map(([a, n]) => `${a}: ${n} running`).join(" · ");
-}
-
-function pendingBatchesSummary(
-  batches: Array<{ agentName: string; count: number; batchSize: number; waitingSince: string }>
-): string {
-  return batches
-    .map((p) => {
-      const sec = waitingSeconds(p.waitingSince);
-      const waitLabel = sec < 60 ? `${sec}s` : `${Math.floor(sec / 60)}m ${sec % 60}s`;
-      return `${p.agentName}: ${p.count}/${p.batchSize} (waiting ${waitLabel})`;
-    })
-    .join(" · ");
 }
 
 function statusPillClass(status: "idle" | "busy" | "stopping"): string {
@@ -293,8 +336,6 @@ function statusPillClass(status: "idle" | "busy" | "stopping"): string {
 }
 
 const workerMenuOptions = computed<DropdownOption[]>(() => {
-  void now.value;
-  void workerDetailExpanded.value;
   if (workersError.value) {
     return [
       {
@@ -339,36 +380,25 @@ function renderWorkerLabel(option: DropdownOption) {
   if (!w) {
     return h(NText, { depth: 3 }, () => "—");
   }
-  const detail = hasWorkerDetail(w);
-  const expanded = isWorkerDetailExpanded(w.workerId, w);
   const dotBusy = w.status === "busy" || w.status === "stopping";
-  const bufTotal = pendingBufferTotal(w);
-  const batchTags: ReturnType<typeof h>[] = [];
-  if (bufTotal > 0) {
-    batchTags.push(
-      h(
-        NTag,
-        { size: "tiny", type: "warning", bordered: false, round: true, class: "worker-dd-row__buf-tag" },
-        { default: () => `buffer ${bufTotal}` }
-      )
-    );
-  }
-  for (const p of w.pendingBatches) {
-    batchTags.push(
-      h(
-        NTag,
-        {
-          size: "tiny",
-          bordered: false,
-          round: true,
-          class: "worker-dd-row__batch-tag",
-          title: `${p.agentName}: ${p.count} tasks accumulating toward batch of ${p.batchSize}`,
-        },
-        { default: () => `${p.agentName.slice(0, 18)}${p.agentName.length > 18 ? "…" : ""} ${p.count}/${p.batchSize}` }
-      )
-    );
-  }
-  const rowChildren: ReturnType<typeof h>[] = [
+  const llmRaw = w.runtime?.llmAdapter;
+  const llmTag =
+    typeof llmRaw === "string" && llmRaw.trim() !== ""
+      ? h(
+          NTag,
+          {
+            size: "tiny",
+            type: "info",
+            bordered: false,
+            round: true,
+            class: "worker-dd-row__llm-tag",
+            title: `LLM adapter: ${llmRaw}`,
+          },
+          { default: () => formatLlmProviderShort(llmRaw) }
+        )
+      : null;
+
+  return h("div", { class: "worker-dd-row worker-dd-row--simple" }, [
     h("span", {
       class: [
         "worker-dd-row__dot",
@@ -392,56 +422,12 @@ function renderWorkerLabel(option: DropdownOption) {
               ),
             ]
           : []),
-        ...batchTags,
+        ...(llmTag ? [llmTag] : []),
       ]),
     ]),
-    h(
-      "span",
-      { class: statusPillClass(w.status) },
-      w.status
-    ),
+    h("span", { class: statusPillClass(w.status) }, w.status),
     h("span", { class: "worker-dd-row__seen" }, formatWorkerSeen(w.lastSeenAt)),
-  ];
-  if (detail) {
-    rowChildren.push(
-      h(
-        "button",
-        {
-          type: "button",
-          class: "worker-dd-row__expand",
-          title: expanded ? "Hide details" : "Show details",
-          onClick: (e: MouseEvent) => {
-            e.preventDefault();
-            e.stopPropagation();
-            toggleWorkerDetail(w.workerId);
-          },
-        },
-        h(expanded ? ChevronDownIcon : ChevronRightIcon, { size: 14 })
-      )
-    );
-  } else {
-    rowChildren.push(h("span", { class: "worker-dd-row__expand-spacer", "aria-hidden": "true" }));
-  }
-  const children: ReturnType<typeof h>[] = [h("div", { class: "worker-dd-row" }, rowChildren)];
-  if (detail && expanded) {
-    if (w.tasksInProgress.length > 0) {
-      children.push(
-        h("div", { class: "worker-dd-sub" }, [
-          h("span", { class: "worker-dd-sub__label" }, "Running · "),
-          runningTasksSummary(w.tasksInProgress),
-        ])
-      );
-    }
-    if (w.pendingBatches.length > 0) {
-      children.push(
-        h("div", { class: "worker-dd-sub worker-dd-sub--pending" }, [
-          h("span", { class: "worker-dd-sub__label" }, "Waiting · "),
-          pendingBatchesSummary(w.pendingBatches),
-        ])
-      );
-    }
-  }
-  return h("div", { class: "worker-dd-stack" }, children);
+  ]);
 }
 </script>
 
@@ -463,7 +449,7 @@ function renderWorkerLabel(option: DropdownOption) {
                 :show-arrow="true"
                 @select="onWorkerDropdownSelect"
               >
-                <NButton quaternary size="small" class="workers-trigger" title="Worker status and heartbeats">
+                <NButton quaternary size="small" class="workers-trigger" title="Workers — pick one to open details">
                   <CpuIcon :size="14" class="workers-trigger__icon" />
                   <span class="workers-trigger__label">Workers</span>
                   <span v-if="workersLoading" class="workers-trigger__count workers-trigger__count--muted">
@@ -473,7 +459,12 @@ function renderWorkerLabel(option: DropdownOption) {
                     <span class="workers-trigger__count workers-trigger__count--err">—</span>
                   </template>
                   <template v-else>
-                    <span class="workers-trigger__count">{{ liveWorkerCount }} live</span>
+                    <span class="workers-trigger__count">
+                      {{ liveWorkerCount }} live
+                      <span v-if="liveWorkerProviderSummary" class="workers-trigger__live-providers">{{
+                        liveWorkerProviderSummary
+                      }}</span>
+                    </span>
                     <span v-if="remoteWorkerCount > 0" class="workers-trigger__count workers-trigger__count--muted">
                       · {{ remoteWorkerCount }} remote
                     </span>
@@ -561,7 +552,10 @@ function renderWorkerLabel(option: DropdownOption) {
                   but not yet claimed by any worker are not listed here.
                 </NAlert>
 
-                <NDivider title-placement="left">Runtime (ENV snapshot)</NDivider>
+                <NDivider title-placement="left">Configuration (runtime snapshot)</NDivider>
+                <p class="worker-drawer-runtime-hint">
+                  Includes enrichment tuning, <code>LLM_ADAPTER</code>, and Cursor-related env (no secrets).
+                </p>
                 <NDescriptions
                   v-if="selectedWorker.runtime && Object.keys(selectedWorker.runtime).length"
                   :column="1"
@@ -571,11 +565,13 @@ function renderWorkerLabel(option: DropdownOption) {
                   bordered
                 >
                   <NDescriptionsItem
-                    v-for="key in Object.keys(selectedWorker.runtime).sort()"
+                    v-for="key in sortRuntimeKeys(Object.keys(selectedWorker.runtime))"
                     :key="key"
                     :label="formatRuntimeLabel(key)"
                   >
-                    {{ formatRuntimeValue(key, selectedWorker.runtime[key]) }}
+                    <span class="worker-drawer-runtime-val">{{
+                      formatRuntimeValue(key, selectedWorker.runtime[key])
+                    }}</span>
                   </NDescriptionsItem>
                 </NDescriptions>
                 <NText v-else depth="3" class="worker-drawer-empty">
@@ -617,10 +613,15 @@ function renderWorkerLabel(option: DropdownOption) {
 
         <main class="main">
           <template v-if="!projectStore.selectedProjectId">
-            <img
-              src="https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjV0cTJibmdkZmJ0YmZ5ODJoa3BqMHlibTU1eTBmdmpleW5lbmlscyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/a3kvBNAcxPv9TdEnkq/giphy.gif"
-              alt="No project selected" />
-            <NAlert type="info" class="no-project-alert">
+            <div class="no-project-orbit-wrap" :style="noProjectOrbitStageStyle">
+              <img
+                class="no-project-orbit-img"
+                src="https://media1.giphy.com/media/v1.Y2lkPTc5MGI3NjExcjV0cTJibmdkZmJ0YmZ5ODJoa3BqMHlibTU1eTBmdmpleW5lbmlscyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/a3kvBNAcxPv9TdEnkq/giphy.gif"
+                alt="No project selected"
+                draggable="false"
+              />
+            </div>
+            <NAlert type="info">
               Select a project in the header to browse its data.
             </NAlert>
           </template>
@@ -703,6 +704,12 @@ function renderWorkerLabel(option: DropdownOption) {
   white-space: nowrap;
 }
 
+.workers-trigger__live-providers {
+  font-weight: 400;
+  opacity: 0.88;
+  white-space: normal;
+}
+
 .workers-trigger__count--muted {
   background: var(--n-color-hover);
   color: var(--n-text-color-3);
@@ -755,8 +762,63 @@ function renderWorkerLabel(option: DropdownOption) {
   width: 100%;
 }
 
+.no-project-orbit-wrap {
+  position: relative;
+  width: 100%;
+  min-height: calc(2 * var(--orbit-hh) + min(132px, 30vw) + 24px);
+  overflow: hidden;
+}
+
+.no-project-orbit-img {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: block;
+  width: min(132px, 30vw);
+  height: auto;
+  animation: no-project-orbit-rect var(--orbit-duration) linear infinite;
+  animation-delay: var(--orbit-delay);
+}
+
+@keyframes no-project-orbit-rect {
+  0% {
+    transform: translate(-50%, -50%) translate(calc(-1 * var(--orbit-hw)), calc(-1 * var(--orbit-hh))) rotate(-4deg);
+  }
+  25% {
+    transform: translate(-50%, -50%) translate(var(--orbit-hw), calc(-1 * var(--orbit-hh))) rotate(5deg);
+  }
+  50% {
+    transform: translate(-50%, -50%) translate(var(--orbit-hw), var(--orbit-hh)) rotate(-3deg);
+  }
+  75% {
+    transform: translate(-50%, -50%) translate(calc(-1 * var(--orbit-hw)), var(--orbit-hh)) rotate(4deg);
+  }
+  100% {
+    transform: translate(-50%, -50%) translate(calc(-1 * var(--orbit-hw)), calc(-1 * var(--orbit-hh))) rotate(-4deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .no-project-orbit-img {
+    animation: none;
+    transform: translate(-50%, -50%);
+  }
+}
+
 .worker-drawer-body {
   padding-bottom: 0.5rem;
+}
+
+.worker-drawer-runtime-hint {
+  margin: 0 0 0.65rem;
+  font-size: 12px;
+  color: var(--n-text-color-3);
+  line-height: 1.45;
+}
+
+.worker-drawer-runtime-val {
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .worker-drawer-meta {
@@ -861,6 +923,10 @@ function renderWorkerLabel(option: DropdownOption) {
   font-size: 13px;
 }
 
+.worker-dd-row--simple {
+  grid-template-columns: 10px minmax(0, 1fr) auto auto;
+}
+
 .worker-dd-row__nameblock {
   min-width: 0;
 }
@@ -879,7 +945,8 @@ function renderWorkerLabel(option: DropdownOption) {
 }
 
 .worker-dd-row__buf-tag,
-.worker-dd-row__batch-tag {
+.worker-dd-row__batch-tag,
+.worker-dd-row__llm-tag {
   flex-shrink: 0;
   font-size: 10px !important;
   line-height: 1.35 !important;

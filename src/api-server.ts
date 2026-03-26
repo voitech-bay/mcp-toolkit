@@ -52,11 +52,15 @@ import {
   handlePostEnrichmentEnqueue,
   handleGetEnrichmentQueue,
   handleGetEnrichmentRunsList,
+  handleGetEnrichmentBatchDetail,
   handlePostEnrichmentStop,
   handlePostEnrichmentRestart,
   handlePostWorkerHeartbeat,
   handleGetWorkers,
   handlePostEnrichmentWorkerBatchEvent,
+  handleGetEnrichmentPromptSettings,
+  handlePatchEnrichmentPromptSettings,
+  handlePostEnrichmentPromptPreview,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
@@ -402,6 +406,14 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/enrichment/batch":
+        if (req.method === "GET") {
+          await handleGetEnrichmentBatchDetail(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/enrichment/stop":
         if (req.method === "POST") {
           await handlePostEnrichmentStop(req, res);
@@ -413,6 +425,24 @@ const server = createServer(async (req, res) => {
       case "/api/enrichment/restart":
         if (req.method === "POST") {
           await handlePostEnrichmentRestart(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/enrichment/prompt-settings":
+        if (req.method === "GET") {
+          await handleGetEnrichmentPromptSettings(req, res);
+        } else if (req.method === "PATCH") {
+          await handlePatchEnrichmentPromptSettings(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/enrichment/prompt-preview":
+        if (req.method === "POST") {
+          await handlePostEnrichmentPromptPreview(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -561,6 +591,9 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  POST /api/enrichment/enqueue");
   console.log("  GET  /api/enrichment/queue?projectId=<id>");
   console.log("  GET  /api/enrichment/runs?projectId=<id>");
+  console.log("  GET  /api/enrichment/batch?batchId=<id>&projectId=<id>");
+  console.log("  GET|PATCH /api/enrichment/prompt-settings?projectId=<id>");
+  console.log("  POST /api/enrichment/prompt-preview");
   console.log("  POST /api/enrichment/stop");
   console.log("  POST /api/enrichment/restart");
   console.log("  POST /api/enrichment/worker-batch-event");

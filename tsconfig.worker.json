@@ -3,7 +3,9 @@
   "include": [
     "src/workers/**/*.ts",
     "src/services/supabase.ts",
-    "src/services/worker-registry.ts"
+    "src/services/worker-registry.ts",
+    "src/services/enrichment-prompt-config.ts",
+    "src/services/enrichment-entity-assembler.ts"
   ],
   "exclude": ["node_modules", "dist"]
 }

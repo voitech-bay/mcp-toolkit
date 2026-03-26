@@ -50,10 +50,21 @@ import {
   enqueueEnrichmentTasks,
   listEnrichmentQueueTasksForProject,
   listEnrichmentAgentRunsForProject,
+  getEnrichmentBatchDetail,
   stopEnrichmentQueueTask,
   restartEnrichmentQueueTask,
+  getEnrichmentPromptSettingsEffective,
+  getEnrichmentPromptSettingsRow,
+  upsertEnrichmentPromptSettings,
+  getEnrichmentAgentResultsMapForEntity,
+  getEnrichmentAgentByName,
   type EnrichmentEntityType,
 } from "./services/supabase.js";
+import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
+import {
+  resolvePromptForBatch,
+  type EnrichmentEntityType as PromptEntityType,
+} from "./services/prompt-resolver.js";
 import {
   buildReplyContextPrompt,
   generateContextText,
@@ -1738,6 +1749,58 @@ export async function handleGetEnrichmentRunsList(
   res.end(JSON.stringify({ data: result.data, total: result.total }));
 }
 
+/** GET /api/enrichment/batch?batchId=&projectId= (optional project check) */
+export async function handleGetEnrichmentBatchDetail(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const batchId = params.get("batchId")?.trim();
+  if (!batchId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "batchId is required" }));
+    return;
+  }
+  const projectId = params.get("projectId")?.trim() ?? null;
+  const result = await getEnrichmentBatchDetail(client, batchId);
+  if (result.error) {
+    const notFound = result.error === "Batch not found";
+    res.writeHead(notFound ? 404 : 500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  if (!result.data) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Batch not found" }));
+    return;
+  }
+  if (projectId && result.data.batch.project_id !== projectId) {
+    res.writeHead(403);
+    res.end(JSON.stringify({ error: "batch does not belong to this project" }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      batch: result.data.batch,
+      runs: result.data.runs,
+    })
+  );
+}
+
 /** POST /api/enrichment/stop — body: { projectId, queueTaskId } */
 export async function handlePostEnrichmentStop(
   req: IncomingMessage,
@@ -1945,6 +2008,245 @@ export async function handleGetWorkers(
   } catch {
     res.end(JSON.stringify(getActiveWorkers()));
   }
+}
+
+function parseEntityTypeForPromptArg(raw: string | undefined): PromptEntityType {
+  if (raw === "company" || raw === "contact" || raw === "both") return raw;
+  return "both";
+}
+
+/** GET /api/enrichment/prompt-settings?projectId=uuid */
+export async function handleGetEnrichmentPromptSettings(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query: projectId" }));
+    return;
+  }
+  const [effective, projectRowRes, globalRowRes] = await Promise.all([
+    getEnrichmentPromptSettingsEffective(client, projectId),
+    getEnrichmentPromptSettingsRow(client, projectId),
+    getEnrichmentPromptSettingsRow(client, null),
+  ]);
+  if (projectRowRes.error || globalRowRes.error) {
+    res.writeHead(500);
+    res.end(
+      JSON.stringify({
+        error: projectRowRes.error ?? globalRowRes.error ?? "Failed to load prompt settings rows",
+      })
+    );
+    return;
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      effective,
+      projectRow: projectRowRes.data,
+      globalRow: globalRowRes.data,
+    })
+  );
+}
+
+/** PATCH /api/enrichment/prompt-settings — body: { projectId: string | null, global_prompt_prefix?, global_prompt_suffix?, companies_placeholder_config? } */
+export async function handlePatchEnrichmentPromptSettings(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "PATCH") {
+    res.writeHead(405, { Allow: "PATCH" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const raw = await getParsedBody(req);
+  if (!isRecord(raw)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const projectIdRaw = raw.projectId;
+  const projectId =
+    projectIdRaw === null
+      ? null
+      : typeof projectIdRaw === "string"
+        ? projectIdRaw.trim() || null
+        : undefined;
+  if (projectId === undefined) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required (null for global row)" }));
+    return;
+  }
+  const patch: {
+    global_prompt_prefix?: string;
+    global_prompt_suffix?: string;
+    companies_placeholder_config?: Record<string, unknown>;
+    prompt_profiles?: Record<string, unknown>;
+  } = {};
+  if (typeof raw.global_prompt_prefix === "string") {
+    patch.global_prompt_prefix = raw.global_prompt_prefix;
+  }
+  if (typeof raw.global_prompt_suffix === "string") {
+    patch.global_prompt_suffix = raw.global_prompt_suffix;
+  }
+  if (raw.companies_placeholder_config !== undefined) {
+    if (!isRecord(raw.companies_placeholder_config)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "companies_placeholder_config must be an object" }));
+      return;
+    }
+    patch.companies_placeholder_config = raw.companies_placeholder_config;
+  }
+  if (raw.prompt_profiles !== undefined) {
+    if (!isRecord(raw.prompt_profiles)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "prompt_profiles must be an object" }));
+      return;
+    }
+    patch.prompt_profiles = raw.prompt_profiles;
+  }
+  if (Object.keys(patch).length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "No fields to update" }));
+    return;
+  }
+  const result = await upsertEnrichmentPromptSettings(client, projectId, patch);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true, row: result.data }));
+}
+
+/** POST /api/enrichment/prompt-preview — resolved prompt using same pipeline as the worker (company entities). */
+export async function handlePostEnrichmentPromptPreview(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const raw = await getParsedBody(req);
+  if (!isRecord(raw)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const projectId = parseString(raw.projectId);
+  const prompt = typeof raw.prompt === "string" ? raw.prompt : "";
+  const agentName = parseString(raw.agentName);
+  const batchSize = Math.max(
+    1,
+    Math.min(100, Number.parseInt(String(raw.batchSize ?? "1"), 10) || 1)
+  );
+  const rowKind = raw.rowKind === "contact" ? "contact" : "company";
+  if (!projectId || !agentName) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and agentName are required" }));
+    return;
+  }
+  const companyIdsRaw = raw.companyIds;
+  const companyIds = Array.isArray(companyIdsRaw)
+    ? companyIdsRaw
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+        .slice(0, 40)
+    : [];
+
+  if (rowKind === "company" && companyIds.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "companyIds (non-empty array) required when rowKind is company" }));
+    return;
+  }
+
+  const { data: agentRow } = await getEnrichmentAgentByName(client, agentName);
+  const entityType = parseEntityTypeForPromptArg(agentRow?.entity_type);
+
+  const systemPromptType =
+    typeof raw.systemPromptType === "string" ? raw.systemPromptType.trim() : "";
+  const settings = await getEnrichmentPromptSettingsEffective(
+    client,
+    projectId,
+    systemPromptType || undefined
+  );
+
+  if (rowKind === "contact") {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "Contact preview is not implemented; use the table preview for contact rows.",
+      })
+    );
+    return;
+  }
+
+  const assembled = await buildCompanyEntitiesForPrompt(
+    client,
+    projectId,
+    companyIds,
+    settings.companies_placeholder_config
+  );
+  if (assembled.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: assembled.error }));
+    return;
+  }
+  const entities = assembled.entities;
+  const refId = companyIds[0] ?? "";
+  const agentResultsByAgentName = refId
+    ? (await getEnrichmentAgentResultsMapForEntity(client, projectId, "company", refId)).data
+    : {};
+
+  const resolvedPrompt = resolvePromptForBatch(prompt, entities, {
+    batchSize,
+    entityType,
+    rowKind: "company",
+    agentResultsByAgentName,
+  });
+  const finalPrompt = `${settings.global_prompt_prefix}${resolvedPrompt}${settings.global_prompt_suffix}`;
+
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      resolvedPrompt,
+      finalPrompt,
+      entityCount: entities.length,
+    })
+  );
 }
 
 /** POST /api/enrichment/worker-batch-event — worker notifies UI that a batch run is starting (same auth as worker heartbeat). */

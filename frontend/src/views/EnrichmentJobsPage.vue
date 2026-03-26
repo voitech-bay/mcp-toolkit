@@ -19,6 +19,11 @@ import {
 import type { DataTableColumns, SelectOption } from "naive-ui";
 import { useIntervalFn } from "@vueuse/core";
 import { useProjectStore } from "../stores/project";
+import {
+  fetchEnrichmentBatchDetail,
+  type EnrichmentBatchDetailBatch,
+  type EnrichmentBatchDetailRun,
+} from "../composables/useEnrichmentBatchDetail";
 
 interface QueueTaskRow {
   id: string;
@@ -46,6 +51,7 @@ interface AgentRunRow {
   operation_name: string | null;
   company_id: string | null;
   contact_id: string | null;
+  batch_id?: string | null;
   status: string;
   started_at: string;
   finished_at: string | null;
@@ -129,11 +135,30 @@ function entityLabel(row: { company_id: string | null; contact_id: string | null
   return "—";
 }
 
+/** Prefer human-readable worker; queue `claimed_by` may be a worker UUID from RPC. */
+function isProbablyUuid(s: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s.trim());
+}
+
+function queueWorkerDisplay(row: QueueTaskRow): string {
+  const m = row.meta;
+  if (m && typeof m.worker_name === "string" && m.worker_name.trim()) {
+    return m.worker_name.trim();
+  }
+  const cb = row.claimed_by?.trim();
+  if (cb && !isProbablyUuid(cb)) return cb;
+  if (cb) return cb;
+  return "—";
+}
+
 function runWorkerName(row: AgentRunRow): string {
   const m = row.meta;
   if (m && typeof m.worker_name === "string" && m.worker_name.trim()) return m.worker_name.trim();
-  const w = row.input?.worker_name;
-  if (typeof w === "string" && w.trim()) return w.trim();
+  const inp = row.input;
+  if (inp && typeof inp === "object" && inp !== null) {
+    const w = (inp as Record<string, unknown>).worker_name;
+    if (typeof w === "string" && w.trim()) return w.trim();
+  }
   return "—";
 }
 
@@ -142,6 +167,118 @@ function openJson(title: string, payload: unknown) {
   detailBody.value =
     typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
   detailOpen.value = true;
+}
+
+const batchDetailOpen = ref(false);
+const batchDetailLoading = ref(false);
+const batchDetailError = ref("");
+const batchDetailBatch = ref<EnrichmentBatchDetailBatch | null>(null);
+const batchDetailRuns = ref<EnrichmentBatchDetailRun[]>([]);
+
+const batchRowDetailOpen = ref(false);
+const batchRowDetailTitle = ref("");
+const batchRowDetailBody = ref("");
+
+function openBatchRowDetail(title: string, body: string) {
+  batchRowDetailTitle.value = title;
+  batchRowDetailBody.value = body;
+  batchRowDetailOpen.value = true;
+}
+
+function entityLabelBatchRow(r: EnrichmentBatchDetailRun): string {
+  if (r.company_id) return `company ${r.company_id.slice(0, 8)}…`;
+  if (r.contact_id) return `contact ${r.contact_id.slice(0, 8)}…`;
+  return "—";
+}
+
+function batchRunStatusTagType(
+  status: string
+): "default" | "info" | "success" | "warning" | "error" {
+  switch (status) {
+    case "running":
+      return "info";
+    case "success":
+      return "success";
+    case "error":
+      return "error";
+    default:
+      return "default";
+  }
+}
+
+const batchDetailColumns = computed<DataTableColumns<EnrichmentBatchDetailRun>>(() => [
+  {
+    title: "Entity",
+    key: "entity",
+    width: 200,
+    ellipsis: { tooltip: true },
+    render: (row) => entityLabelBatchRow(row),
+  },
+  {
+    title: "Status",
+    key: "status",
+    width: 96,
+    render: (row) =>
+      h(
+        NTag,
+        { size: "small", type: batchRunStatusTagType(row.status), bordered: false },
+        () => row.status
+      ),
+  },
+  {
+    title: "Error",
+    key: "error",
+    ellipsis: { tooltip: true },
+    render: (row) => row.error?.trim() || "—",
+  },
+  {
+    title: "",
+    key: "actions",
+    width: 120,
+    render: (row) =>
+      h(
+        NButton,
+        {
+          size: "tiny",
+          quaternary: true,
+          disabled: row.status !== "success" && row.status !== "error",
+          onClick: () => {
+            if (row.status === "success") {
+              const raw = row.resultPreview;
+              const text =
+                raw === undefined
+                  ? "(no result)"
+                  : typeof raw === "string"
+                    ? raw
+                    : JSON.stringify(raw, null, 2);
+              openBatchRowDetail(`Result · ${entityLabelBatchRow(row)}`, text);
+            } else if (row.status === "error") {
+              openBatchRowDetail(`Error · ${entityLabelBatchRow(row)}`, row.error ?? "(no message)");
+            }
+          },
+        },
+        { default: () => (row.status === "success" ? "View result" : row.status === "error" ? "View error" : "—") }
+      ),
+  },
+]);
+
+async function openBatchDetailModal(batchId: string) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || !batchId) return;
+  batchDetailOpen.value = true;
+  batchDetailLoading.value = true;
+  batchDetailError.value = "";
+  batchDetailBatch.value = null;
+  batchDetailRuns.value = [];
+  try {
+    const data = await fetchEnrichmentBatchDetail(projectId, batchId);
+    batchDetailBatch.value = data.batch;
+    batchDetailRuns.value = data.runs;
+  } catch (e) {
+    batchDetailError.value = e instanceof Error ? e.message : "Failed to load batch";
+  } finally {
+    batchDetailLoading.value = false;
+  }
 }
 
 const queueColumns = computed<DataTableColumns<QueueTaskRow>>(() => [
@@ -165,7 +302,7 @@ const queueColumns = computed<DataTableColumns<QueueTaskRow>>(() => [
     key: "claimed_by",
     width: 160,
     ellipsis: { tooltip: true },
-    render: (row) => row.claimed_by?.trim() || "—",
+    render: (row) => queueWorkerDisplay(row),
   },
   { title: "Attempts", key: "attempts", width: 72 },
   {
@@ -250,6 +387,26 @@ const runsColumns = computed<DataTableColumns<AgentRunRow>>(() => [
     width: 160,
     ellipsis: { tooltip: true },
     render: (row) => runWorkerName(row),
+  },
+  {
+    title: "Batch",
+    key: "batch_id",
+    width: 120,
+    ellipsis: { tooltip: true },
+    render: (row) => {
+      const bid = row.batch_id?.trim();
+      if (!bid) return "—";
+      return h(
+        NButton,
+        {
+          size: "tiny",
+          quaternary: true,
+          title: bid,
+          onClick: () => void openBatchDetailModal(bid),
+        },
+        { default: () => `${bid.slice(0, 8)}…` }
+      );
+    },
   },
   {
     title: "Queue task",
@@ -533,7 +690,7 @@ onUnmounted(() => {
           :columns="runsColumns"
           :data="runsRows"
           :row-key="(r: AgentRunRow) => r.id"
-          :scroll-x="1200"
+          :scroll-x="1320"
           size="small"
           striped
           bordered
@@ -543,6 +700,50 @@ onUnmounted(() => {
 
     <NModal v-model:show="detailOpen" preset="card" :title="detailTitle" style="width: min(720px, 92vw)" :mask-closable="true">
       <pre class="detail-pre">{{ detailBody }}</pre>
+    </NModal>
+
+    <NModal
+      v-model:show="batchDetailOpen"
+      preset="card"
+      :title="batchDetailBatch ? `Batch · ${batchDetailBatch.agent_name}` : 'Batch detail'"
+      style="width: min(900px, 96vw)"
+      :mask-closable="true"
+    >
+      <NSpin :show="batchDetailLoading">
+        <NAlert v-if="batchDetailError" type="error" :show-icon="true">{{ batchDetailError }}</NAlert>
+        <template v-else-if="batchDetailBatch">
+          <div class="batch-detail-header">
+            <span
+              >Worker: <strong>{{ batchDetailBatch.worker_name }}</strong></span
+            >
+            <span class="muted">{{
+              batchDetailBatch.created_at?.replace("T", " ").slice(0, 19)
+            }}</span>
+            <span class="muted"><code>{{ batchDetailBatch.id }}</code></span>
+          </div>
+          <NDataTable
+            v-if="batchDetailRuns.length"
+            :columns="batchDetailColumns"
+            :data="batchDetailRuns"
+            :row-key="(r: EnrichmentBatchDetailRun) => r.id"
+            size="small"
+            striped
+            bordered
+            :scroll-x="720"
+          />
+          <NEmpty v-else description="No runs linked to this batch." />
+        </template>
+      </NSpin>
+    </NModal>
+
+    <NModal
+      v-model:show="batchRowDetailOpen"
+      preset="card"
+      :title="batchRowDetailTitle"
+      style="width: min(640px, 92vw)"
+      :mask-closable="true"
+    >
+      <pre class="detail-pre">{{ batchRowDetailBody }}</pre>
     </NModal>
   </div>
 </template>
@@ -579,5 +780,14 @@ onUnmounted(() => {
   line-height: 1.45;
   max-height: 60vh;
   overflow: auto;
+}
+
+.batch-detail-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  align-items: baseline;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
 }
 </style>

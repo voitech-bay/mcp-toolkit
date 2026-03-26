@@ -27,6 +27,8 @@ let client: SupabaseClient | null = null;
 /** True only after Realtime reports SUBSCRIBED (not merely after .subscribe() called). */
 let channelReady = false;
 let realtimeChannel: ReturnType<SupabaseClient["channel"]> | null = null;
+/** Prevents synchronous re-entry: `removeChannel` can emit CLOSED while still inside the status callback. */
+let channelStatusHandlerBusy = false;
 
 const subscribersByProject = new Map<string, Set<WsClient>>();
 
@@ -141,15 +143,29 @@ function handleChange(payload: { new?: unknown; old?: unknown }): void {
 }
 
 function teardownRealtimeChannel(supabase: SupabaseClient): void {
-  if (realtimeChannel) {
-    try {
-      void supabase.removeChannel(realtimeChannel);
-    } catch {
-      /* ignore */
-    }
-    realtimeChannel = null;
+  const ch = realtimeChannel;
+  if (!ch) {
+    channelReady = false;
+    return;
   }
+  realtimeChannel = null;
   channelReady = false;
+  try {
+    void supabase.removeChannel(ch);
+  } catch {
+    /* ignore */
+  }
+}
+
+function formatRealtimeSubscribeErr(err: unknown): string {
+  if (err == null) return "";
+  if (typeof err === "string") return err;
+  if (err instanceof Error) return err.message;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
 }
 
 function ensureRealtimeChannel(): void {
@@ -188,12 +204,25 @@ function ensureRealtimeChannel(): void {
         return;
       }
       if (status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") {
-        console.error(
-          "[enrichment-realtime] Realtime channel not ready:",
-          status,
-          err?.message ?? err ?? ""
-        );
-        teardownRealtimeChannel(supabase);
+        if (channelStatusHandlerBusy) {
+          return;
+        }
+        channelStatusHandlerBusy = true;
+        const errPart = formatRealtimeSubscribeErr(err);
+        const line = `[enrichment-realtime] Realtime channel not ready: ${status}${
+          errPart ? ` ${errPart}` : ""
+        }`;
+        try {
+          console.error(line);
+        } finally {
+          setImmediate(() => {
+            try {
+              teardownRealtimeChannel(supabase);
+            } finally {
+              channelStatusHandlerBusy = false;
+            }
+          });
+        }
         return;
       }
       console.log("[enrichment-realtime] Realtime status:", status);

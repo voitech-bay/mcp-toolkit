@@ -2223,7 +2223,11 @@ export async function saveContextSnapshot(
 export const ENRICHMENT_AGENTS_TABLE = "enrichment_agents";
 export const ENRICHMENT_QUEUE_TASKS_TABLE = "enrichment_queue_tasks";
 export const ENRICHMENT_AGENT_RUNS_TABLE = "enrichment_agent_runs";
+/** One row per `processTaskBatch` flush; linked from `enrichment_agent_runs.batch_id`. */
+export const ENRICHMENT_AGENT_BATCHES_TABLE = "enrichment_agent_batches";
 export const ENRICHMENT_AGENT_RESULTS_TABLE = "enrichment_agent_results";
+/** Global + per-project prefix/suffix and `{{companies}}` JSON config. */
+export const ENRICHMENT_PROMPT_SETTINGS_TABLE = "enrichment_prompt_settings";
 
 export type EnrichmentEntityType = "company" | "contact";
 
@@ -2247,6 +2251,10 @@ export interface EnrichmentAgentCellState {
   workerName?: string | null;
   /** Set when status is `running` (from queue `enrichment_agent_run_id`). */
   runPhase?: EnrichmentRunPhase;
+  /** Latest `enrichment_agent_runs.id` when known (for batch / jobs linking). */
+  runId?: string | null;
+  /** `enrichment_agent_batches.id` when this run was part of a multi-entity batch. */
+  batchId?: string | null;
 }
 
 export interface EnrichmentQueueTaskRow {
@@ -2268,6 +2276,24 @@ export interface EnrichmentQueueTaskRow {
   claimed_by?: string | null;
 }
 
+/**
+ * Worker-written fields on `enrichment_agent_runs.input` when a run starts (plus legacy keys).
+ * `agent_prompt` and `batch_*` repeat the same batch context on each row in a multi-entity batch.
+ */
+export type EnrichmentAgentRunInputStart = {
+  worker_name?: string;
+  queue_task_id?: string;
+  meta?: Record<string, unknown>;
+  /** Agent registry `prompt` used for this batch run. */
+  agent_prompt?: string;
+  /** Distinct company ids in this batch (enrichment company targets). */
+  batch_company_ids?: string[];
+  /** Distinct contact uuids in this batch. */
+  batch_contact_ids?: string[];
+  /** Queue task ids in batch order (same batch as `agent_prompt`). */
+  batch_queue_task_ids?: string[];
+};
+
 export interface EnrichmentAgentRunRow {
   id: string;
   queue_task_id: string;
@@ -2276,14 +2302,237 @@ export interface EnrichmentAgentRunRow {
   operation_name: string | null;
   company_id: string | null;
   contact_id: string | null;
+  /** Set when this run was part of a multi-entity batch (`enrichment_agent_batches`). */
+  batch_id?: string | null;
   status: string;
   started_at: string;
   finished_at: string | null;
   error: string | null;
-  input: Record<string, unknown>;
+  input: Record<string, unknown> & Partial<EnrichmentAgentRunInputStart>;
   /** Worker/UI metadata (e.g. worker_name). */
   meta?: Record<string, unknown>;
   created_at: string;
+}
+
+export interface EnrichmentAgentBatchRow {
+  id: string;
+  project_id: string;
+  agent_name: string;
+  worker_name: string;
+  created_at: string;
+  llm_adapter?: string | null;
+  external_agent_id?: string | null;
+  meta?: Record<string, unknown>;
+  updated_at?: string;
+}
+
+export interface EnrichmentPromptSettingsRow {
+  id: string;
+  project_id: string | null;
+  global_prompt_prefix: string;
+  global_prompt_suffix: string;
+  companies_placeholder_config: Record<string, unknown>;
+  prompt_profiles: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+function applyPromptProfileOverlay(
+  base: {
+    global_prompt_prefix: string;
+    global_prompt_suffix: string;
+    companies_placeholder_config: Record<string, unknown>;
+  },
+  profile: unknown
+): {
+  global_prompt_prefix: string;
+  global_prompt_suffix: string;
+  companies_placeholder_config: Record<string, unknown>;
+} {
+  if (!profile || typeof profile !== "object" || Array.isArray(profile)) return base;
+  const o = profile as Record<string, unknown>;
+  let out = { ...base };
+  if (typeof o.global_prompt_prefix === "string") {
+    out = { ...out, global_prompt_prefix: o.global_prompt_prefix };
+  }
+  if (typeof o.global_prompt_suffix === "string") {
+    out = { ...out, global_prompt_suffix: o.global_prompt_suffix };
+  }
+  if (
+    o.companies_placeholder_config !== undefined &&
+    typeof o.companies_placeholder_config === "object" &&
+    o.companies_placeholder_config !== null &&
+    !Array.isArray(o.companies_placeholder_config)
+  ) {
+    out = {
+      ...out,
+      companies_placeholder_config: o.companies_placeholder_config as Record<string, unknown>,
+    };
+  }
+  return out;
+}
+
+/**
+ * Project row if present, else the single global row (`project_id` null), else empty defaults.
+ *
+ * @param profileKey — Optional `ENRICHMENT_SYSTEM_PROMPT_TYPE` from the worker: merges
+ *   `prompt_profiles[profileKey]` from the project row, else from the global row (same key).
+ */
+export async function getEnrichmentPromptSettingsEffective(
+  client: SupabaseClient,
+  projectId: string,
+  profileKey?: string
+): Promise<{
+  global_prompt_prefix: string;
+  global_prompt_suffix: string;
+  companies_placeholder_config: Record<string, unknown>;
+}> {
+  const trimmed = profileKey?.trim() ?? "";
+
+  if (!trimmed) {
+    const { data: projRow } = await client
+      .from(ENRICHMENT_PROMPT_SETTINGS_TABLE)
+      .select("global_prompt_prefix, global_prompt_suffix, companies_placeholder_config")
+      .eq("project_id", projectId)
+      .maybeSingle();
+
+    if (projRow) {
+      const p = projRow as EnrichmentPromptSettingsRow;
+      return {
+        global_prompt_prefix: p.global_prompt_prefix ?? "",
+        global_prompt_suffix: p.global_prompt_suffix ?? "",
+        companies_placeholder_config:
+          (p.companies_placeholder_config as Record<string, unknown>) ?? {},
+      };
+    }
+
+    const { data: globalRow } = await client
+      .from(ENRICHMENT_PROMPT_SETTINGS_TABLE)
+      .select("global_prompt_prefix, global_prompt_suffix, companies_placeholder_config")
+      .is("project_id", null)
+      .maybeSingle();
+
+    if (globalRow) {
+      const g = globalRow as EnrichmentPromptSettingsRow;
+      return {
+        global_prompt_prefix: g.global_prompt_prefix ?? "",
+        global_prompt_suffix: g.global_prompt_suffix ?? "",
+        companies_placeholder_config:
+          (g.companies_placeholder_config as Record<string, unknown>) ?? {},
+      };
+    }
+
+    return {
+      global_prompt_prefix: "",
+      global_prompt_suffix: "",
+      companies_placeholder_config: {},
+    };
+  }
+
+  const [{ data: projRow }, { data: globalRow }] = await Promise.all([
+    client
+      .from(ENRICHMENT_PROMPT_SETTINGS_TABLE)
+      .select(
+        "global_prompt_prefix, global_prompt_suffix, companies_placeholder_config, prompt_profiles"
+      )
+      .eq("project_id", projectId)
+      .maybeSingle(),
+    client
+      .from(ENRICHMENT_PROMPT_SETTINGS_TABLE)
+      .select(
+        "global_prompt_prefix, global_prompt_suffix, companies_placeholder_config, prompt_profiles"
+      )
+      .is("project_id", null)
+      .maybeSingle(),
+  ]);
+
+  const pRow = projRow as EnrichmentPromptSettingsRow | null;
+  const gRow = globalRow as EnrichmentPromptSettingsRow | null;
+
+  const base = pRow
+    ? {
+        global_prompt_prefix: pRow.global_prompt_prefix ?? "",
+        global_prompt_suffix: pRow.global_prompt_suffix ?? "",
+        companies_placeholder_config:
+          (pRow.companies_placeholder_config as Record<string, unknown>) ?? {},
+      }
+    : gRow
+      ? {
+          global_prompt_prefix: gRow.global_prompt_prefix ?? "",
+          global_prompt_suffix: gRow.global_prompt_suffix ?? "",
+          companies_placeholder_config:
+            (gRow.companies_placeholder_config as Record<string, unknown>) ?? {},
+        }
+      : {
+          global_prompt_prefix: "",
+          global_prompt_suffix: "",
+          companies_placeholder_config: {},
+        };
+
+  const projProfiles = (pRow?.prompt_profiles as Record<string, unknown> | undefined) ?? {};
+  const globalProfiles = (gRow?.prompt_profiles as Record<string, unknown> | undefined) ?? {};
+  const overlay = projProfiles[trimmed] ?? globalProfiles[trimmed];
+  return applyPromptProfileOverlay(base, overlay);
+}
+
+/** Single row: `projectId` null selects the global defaults row. */
+export async function getEnrichmentPromptSettingsRow(
+  client: SupabaseClient,
+  projectId: string | null
+): Promise<{ data: EnrichmentPromptSettingsRow | null; error: string | null }> {
+  let q = client.from(ENRICHMENT_PROMPT_SETTINGS_TABLE).select("*");
+  if (projectId) q = q.eq("project_id", projectId);
+  else q = q.is("project_id", null);
+  const { data, error } = await q.maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: (data as EnrichmentPromptSettingsRow | null) ?? null, error: null };
+}
+
+export async function upsertEnrichmentPromptSettings(
+  client: SupabaseClient,
+  projectId: string | null,
+  patch: {
+    global_prompt_prefix?: string;
+    global_prompt_suffix?: string;
+    companies_placeholder_config?: Record<string, unknown>;
+    prompt_profiles?: Record<string, unknown>;
+  }
+): Promise<{ data: EnrichmentPromptSettingsRow | null; error: string | null }> {
+  const existing = await getEnrichmentPromptSettingsRow(client, projectId);
+  if (existing.error) return { data: null, error: existing.error };
+  const now = new Date().toISOString();
+  if (existing.data) {
+    const update: Record<string, unknown> = { updated_at: now };
+    if (patch.global_prompt_prefix !== undefined)
+      update.global_prompt_prefix = patch.global_prompt_prefix;
+    if (patch.global_prompt_suffix !== undefined)
+      update.global_prompt_suffix = patch.global_prompt_suffix;
+    if (patch.companies_placeholder_config !== undefined)
+      update.companies_placeholder_config = patch.companies_placeholder_config;
+    if (patch.prompt_profiles !== undefined) update.prompt_profiles = patch.prompt_profiles;
+    const { data, error } = await client
+      .from(ENRICHMENT_PROMPT_SETTINGS_TABLE)
+      .update(update)
+      .eq("id", existing.data.id)
+      .select()
+      .single();
+    if (error) return { data: null, error: error.message };
+    return { data: data as EnrichmentPromptSettingsRow, error: null };
+  }
+  const { data, error } = await client
+    .from(ENRICHMENT_PROMPT_SETTINGS_TABLE)
+    .insert({
+      project_id: projectId,
+      global_prompt_prefix: patch.global_prompt_prefix ?? "",
+      global_prompt_suffix: patch.global_prompt_suffix ?? "",
+      companies_placeholder_config: patch.companies_placeholder_config ?? {},
+      prompt_profiles: patch.prompt_profiles ?? {},
+      updated_at: now,
+    })
+    .select()
+    .single();
+  if (error) return { data: null, error: error.message };
+  return { data: data as EnrichmentPromptSettingsRow, error: null };
 }
 
 export interface EnrichmentAgentResultRow {
@@ -2295,6 +2544,38 @@ export interface EnrichmentAgentResultRow {
   agent_result: Record<string, unknown>;
   created_at: string;
   updated_at: string;
+}
+
+/** Latest `agent_result` per agent name for `{{agent:Name.key}}` (reference entity). */
+export async function getEnrichmentAgentResultsMapForEntity(
+  client: SupabaseClient,
+  projectId: string,
+  rowKind: "company" | "contact",
+  entityId: string
+): Promise<{ data: Record<string, unknown>; error: string | null }> {
+  const col = rowKind === "company" ? "company_id" : "contact_id";
+  const { data, error } = await client
+    .from(ENRICHMENT_AGENT_RESULTS_TABLE)
+    .select("agent_name, agent_result")
+    .eq("project_id", projectId)
+    .eq(col, entityId);
+  if (error) return { data: {}, error: error.message };
+  const out: Record<string, unknown> = {};
+  for (const row of (data ?? []) as Array<{
+    agent_name: string;
+    agent_result: unknown;
+  }>) {
+    const ar = row.agent_result;
+    if (
+      row.agent_name &&
+      ar &&
+      typeof ar === "object" &&
+      !Array.isArray(ar)
+    ) {
+      out[row.agent_name] = ar;
+    }
+  }
+  return { data: out, error: null };
 }
 
 function enrichmentEntityKey(entityId: string, agentName: string): string {
@@ -2334,6 +2615,17 @@ function resolveWorkerDisplayName(
   return cb;
 }
 
+/** Latest run id + batch link for UI (`run` row wins over queue `enrichment_agent_run_id`). */
+function batchRunIds(
+  run: EnrichmentAgentRunRow | undefined,
+  task: EnrichmentQueueTaskRow | undefined
+): { runId: string | null; batchId: string | null } {
+  return {
+    runId: run?.id ?? task?.enrichment_agent_run_id ?? null,
+    batchId: run?.batch_id ?? null,
+  };
+}
+
 /**
  * Derive per-cell status from latest queue row, optional result row, and latest run.
  */
@@ -2342,6 +2634,8 @@ export function deriveEnrichmentCellState(
   result: EnrichmentAgentResultRow | undefined,
   run: EnrichmentAgentRunRow | undefined
 ): EnrichmentAgentCellState {
+  const br = batchRunIds(run, task);
+
   if (task) {
     if (task.status === "queued") {
       return {
@@ -2359,6 +2653,8 @@ export function deriveEnrichmentCellState(
         runPhase,
         updatedAt: task.updated_at,
         workerName: resolveWorkerDisplayName(task.claimed_by, run),
+        runId: br.runId,
+        batchId: br.batchId,
       };
     }
     if (task.status === "error") {
@@ -2366,6 +2662,8 @@ export function deriveEnrichmentCellState(
         status: "error",
         updatedAt: task.updated_at,
         error: task.last_error ?? null,
+        runId: br.runId,
+        batchId: br.batchId,
       };
     }
     if (task.status === "done") {
@@ -2374,9 +2672,16 @@ export function deriveEnrichmentCellState(
           status: "success",
           updatedAt: result.updated_at,
           resultPreview: result.agent_result,
+          runId: br.runId,
+          batchId: br.batchId,
         };
       }
-      return { status: "success", updatedAt: task.updated_at };
+      return {
+        status: "success",
+        updatedAt: task.updated_at,
+        runId: br.runId,
+        batchId: br.batchId,
+      };
     }
   }
   if (result) {
@@ -2384,6 +2689,8 @@ export function deriveEnrichmentCellState(
       status: "success",
       updatedAt: result.updated_at,
       resultPreview: result.agent_result,
+      runId: br.runId,
+      batchId: br.batchId,
     };
   }
   if (run) {
@@ -2393,6 +2700,8 @@ export function deriveEnrichmentCellState(
         runPhase: "working",
         updatedAt: run.started_at,
         workerName: resolveWorkerDisplayName(undefined, run),
+        runId: br.runId,
+        batchId: br.batchId,
       };
     }
     if (run.status === "error") {
@@ -2400,6 +2709,8 @@ export function deriveEnrichmentCellState(
         status: "error",
         updatedAt: run.finished_at ?? run.started_at,
         error: run.error ?? null,
+        runId: br.runId,
+        batchId: br.batchId,
       };
     }
     if (run.status === "success") {
@@ -2407,6 +2718,8 @@ export function deriveEnrichmentCellState(
         status: "success",
         updatedAt: run.finished_at ?? run.started_at,
         resultPreview: undefined,
+        runId: br.runId,
+        batchId: br.batchId,
       };
     }
   }
@@ -3036,6 +3349,93 @@ export async function listEnrichmentAgentRunsForProject(
   const { data, error, count } = await q;
   if (error) return { data: [], total: 0, error: error.message };
   return { data: (data ?? []) as EnrichmentAgentRunRow[], total: count ?? 0, error: null };
+}
+
+/** One row per run in `GET /api/enrichment/batch` (batch detail modal). */
+export interface EnrichmentBatchDetailRun {
+  id: string;
+  queue_task_id: string;
+  company_id: string | null;
+  contact_id: string | null;
+  status: string;
+  error: string | null;
+  started_at: string;
+  finished_at: string | null;
+  /** Latest `enrichment_agent_results.agent_result` for this entity+agent when present. */
+  resultPreview?: unknown;
+}
+
+/**
+ * Load batch metadata and all runs in that batch (for UI batch detail).
+ */
+export async function getEnrichmentBatchDetail(
+  client: SupabaseClient,
+  batchId: string
+): Promise<{
+  data: { batch: EnrichmentAgentBatchRow; runs: EnrichmentBatchDetailRun[] } | null;
+  error: string | null;
+}> {
+  const id = batchId.trim();
+  if (!id) return { data: null, error: "batchId is required" };
+
+  const { data: batchRow, error: bErr } = await client
+    .from(ENRICHMENT_AGENT_BATCHES_TABLE)
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (bErr) return { data: null, error: bErr.message };
+  if (!batchRow) return { data: null, error: "Batch not found" };
+
+  const batch = batchRow as EnrichmentAgentBatchRow;
+
+  const { data: runRows, error: rErr } = await client
+    .from(ENRICHMENT_AGENT_RUNS_TABLE)
+    .select("*")
+    .eq("batch_id", id)
+    .order("started_at", { ascending: true });
+
+  if (rErr) return { data: null, error: rErr.message };
+
+  const runs = (runRows ?? []) as EnrichmentAgentRunRow[];
+
+  const { data: resultRows } = await client
+    .from(ENRICHMENT_AGENT_RESULTS_TABLE)
+    .select("*")
+    .eq("project_id", batch.project_id)
+    .eq("agent_name", batch.agent_name);
+
+  const resultByEntity = new Map<string, EnrichmentAgentResultRow>();
+  for (const r of (resultRows ?? []) as EnrichmentAgentResultRow[]) {
+    const key = r.company_id
+      ? `company:${r.company_id}`
+      : r.contact_id
+        ? `contact:${r.contact_id}`
+        : "";
+    if (key) resultByEntity.set(key, r);
+  }
+
+  const detailRuns: EnrichmentBatchDetailRun[] = runs.map((run) => {
+    const key = run.company_id
+      ? `company:${run.company_id}`
+      : run.contact_id
+        ? `contact:${run.contact_id}`
+        : "";
+    const res = key ? resultByEntity.get(key) : undefined;
+    return {
+      id: run.id,
+      queue_task_id: run.queue_task_id,
+      company_id: run.company_id,
+      contact_id: run.contact_id,
+      status: run.status,
+      error: run.error,
+      started_at: run.started_at,
+      finished_at: run.finished_at,
+      ...(res ? { resultPreview: res.agent_result } : {}),
+    };
+  });
+
+  return { data: { batch, runs: detailRuns }, error: null };
 }
 
 /**

@@ -11,14 +11,25 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { uniqueNamesGenerator, starWars } from "unique-names-generator";
 import {
   CONTACTS_TABLE,
+  ENRICHMENT_AGENT_BATCHES_TABLE,
   ENRICHMENT_AGENT_RESULTS_TABLE,
   ENRICHMENT_AGENT_RUNS_TABLE,
   ENRICHMENT_QUEUE_TASKS_TABLE,
-  getCompaniesByIds,
   getEnrichmentAgentByName,
+  getEnrichmentAgentResultsMapForEntity,
+  getEnrichmentPromptSettingsEffective,
   type EnrichmentAgentRegistryRow,
   type EnrichmentQueueTaskRow,
 } from "../services/supabase.js";
+import {
+  createLlmAdapter,
+  type LlmAdapter,
+} from "../services/llm-adapter.js";
+import {
+  resolvePromptForBatch,
+  type EnrichmentEntityType,
+} from "../services/prompt-resolver.js";
+import { buildCompanyEntitiesForPrompt } from "../services/enrichment-entity-assembler.js";
 import type { WorkerPendingBatchProgress } from "../services/worker-registry.js";
 import {
   markWorkerStopping,
@@ -65,6 +76,14 @@ export function getEnrichmentWorkerId(): string {
     cachedGeneratedWorkerId = randomUUID();
   }
   return cachedGeneratedWorkerId;
+}
+
+/**
+ * Selects which `prompt_profiles` entry to merge in `enrichment_prompt_settings` for this process.
+ * Set a different value per worker host/replica to vary prefix/suffix / companies config without redeploying.
+ */
+export function getEnrichmentSystemPromptType(): string {
+  return process.env.ENRICHMENT_SYSTEM_PROMPT_TYPE?.trim() ?? "";
 }
 
 function ensureWorkerName(): string {
@@ -183,10 +202,21 @@ function getWorkerEnv(): {
   };
 }
 
-/** Snapshot of ENRICHMENT_* / heartbeat tuning for the worker details drawer. */
+const DEFAULT_CURSOR_API_BASE = "https://api.cursor.com";
+const DEFAULT_CURSOR_POLL_MS = 5000;
+const DEFAULT_CURSOR_TIMEOUT_MS = 300_000;
+
+/**
+ * Non-secret tuning + LLM adapter identity for heartbeats / worker drawer (in-memory only).
+ * Never includes API keys; `cursorApiKeyConfigured` is yes/no.
+ */
 function buildEnrichmentRuntimeSnapshot(heartbeatIntervalMs: number): Record<string, string | number> {
   const e = getWorkerEnv();
-  return {
+  const rawAdapter = process.env.LLM_ADAPTER?.trim();
+  const llmAdapter =
+    rawAdapter && rawAdapter.length > 0 ? rawAdapter.toLowerCase() : "mock";
+
+  const out: Record<string, string | number> = {
     workerName: e.workerName,
     maxConcurrentAgentRuns: e.maxConcurrentAgentRuns,
     pickLimit: e.pickLimit,
@@ -194,7 +224,31 @@ function buildEnrichmentRuntimeSnapshot(heartbeatIntervalMs: number): Record<str
     lockMinutes: e.lockMinutes,
     batchWaitMs: e.batchWaitMs,
     heartbeatIntervalMs,
+    llmAdapter,
+    cursorApiKeyConfigured: process.env.CURSOR_API_KEY?.trim() ? "yes" : "no",
   };
+
+  const repo = process.env.CURSOR_AGENT_REPO_URL?.trim() ?? "";
+  const ref = process.env.CURSOR_AGENT_REF?.trim() || "main";
+  const apiBase = (
+    process.env.CURSOR_API_BASE_URL?.trim() || DEFAULT_CURSOR_API_BASE
+  ).replace(/\/+$/, "");
+  const pollRaw = Number.parseInt(process.env.CURSOR_AGENT_POLL_INTERVAL_MS ?? "", 10);
+  const timeoutRaw = Number.parseInt(process.env.CURSOR_AGENT_TIMEOUT_MS ?? "", 10);
+  const pollMs =
+    Number.isFinite(pollRaw) && pollRaw >= 100 ? pollRaw : DEFAULT_CURSOR_POLL_MS;
+  const timeoutMs =
+    Number.isFinite(timeoutRaw) && timeoutRaw >= 1000
+      ? timeoutRaw
+      : DEFAULT_CURSOR_TIMEOUT_MS;
+
+  out.cursorAgentRepoUrl = repo || "(not set)";
+  out.cursorAgentRef = ref;
+  out.cursorApiBaseUrl = apiBase;
+  out.cursorPollIntervalMs = pollMs;
+  out.cursorTimeoutMs = timeoutMs;
+
+  return out;
 }
 
 function resolveAgentConfig(row: EnrichmentAgentRegistryRow | null): {
@@ -384,6 +438,65 @@ export async function claimEnrichmentTasks(
 }
 
 /**
+ * Ensure queue rows show which worker claimed them: `claimed_by` + `meta.worker_name`.
+ * Legacy `claim_enrichment_tasks` (without `p_worker_name`) leaves `claimed_by` null; the RPC
+ * may also omit attribution depending on migration state.
+ */
+async function affirmQueueWorkerAttribution(
+  client: SupabaseClient,
+  tasks: EnrichmentQueueTaskRow[],
+  workerName: string
+): Promise<void> {
+  if (tasks.length === 0) return;
+
+  const mergedMeta = (task: EnrichmentQueueTaskRow) => {
+    const prev =
+      task.meta && typeof task.meta === "object" && !Array.isArray(task.meta)
+        ? { ...(task.meta as Record<string, unknown>) }
+        : {};
+    return { ...prev, worker_name: workerName };
+  };
+
+  const patchBoth = (task: EnrichmentQueueTaskRow) =>
+    client
+      .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+      .update({
+        claimed_by: workerName,
+        meta: mergedMeta(task),
+      })
+      .eq("id", task.id);
+
+  const first = await Promise.all(tasks.map((t) => patchBoth(t)));
+  let err = first.find((r) => r.error)?.error;
+
+  if (err && isSchemaCacheMissingColumn(err.message, "claimed_by")) {
+    const second = await Promise.all(
+      tasks.map((task) =>
+        client
+          .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+          .update({ meta: mergedMeta(task) })
+          .eq("id", task.id)
+      )
+    );
+    err = second.find((r) => r.error)?.error;
+  } else if (err && isSchemaCacheMissingColumn(err.message, "meta")) {
+    const second = await Promise.all(
+      tasks.map((task) =>
+        client
+          .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+          .update({ claimed_by: workerName })
+          .eq("id", task.id)
+      )
+    );
+    err = second.find((r) => r.error)?.error;
+  }
+
+  if (err) {
+    log("error", "affirmQueueWorkerAttribution failed", { error: err.message, worker: workerName });
+  }
+}
+
+/**
  * Write latest result for (project, agent, entity). Avoids `.upsert(..., onConflict)` because
  * partial unique indexes are not always valid ON CONFLICT targets for PostgREST, and some DBs
  * may lack those indexes until migrations are applied.
@@ -466,31 +579,120 @@ async function upsertEnrichmentAgentResult(
   return { error: "Task has neither company_id nor contact_id" };
 }
 
-/** Placeholder for OpenAI chat.completions — simulates latency and per-entity outputs. */
-async function executeAgent(
-  prompt: string,
-  entities: Array<{ id: string; data: Record<string, unknown> }>
-): Promise<Map<string, Record<string, unknown>>> {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, 1000 + Math.random() * 2000);
-  });
-  const results = new Map<string, Record<string, unknown>>();
-  for (const entity of entities) {
-    results.set(entity.id, {
-      enriched: true,
-      agent_prompt_length: prompt.length,
-      entity_name: entity.data.name ?? entity.data.domain ?? "unknown",
-      processed_at: new Date().toISOString(),
+function parseEntityTypeForPrompt(raw: string | undefined): EnrichmentEntityType {
+  if (raw === "company" || raw === "contact" || raw === "both") return raw;
+  return "both";
+}
+
+/** Latest `agent_result` per agent name for `{{agent:Name.key}}` (reference entity = first in batch). */
+async function fetchAgentResultsForReferenceEntity(
+  client: SupabaseClient,
+  projectId: string,
+  rowKind: "company" | "contact",
+  entityId: string
+): Promise<Record<string, unknown>> {
+  const { data, error } = await getEnrichmentAgentResultsMapForEntity(
+    client,
+    projectId,
+    rowKind,
+    entityId
+  );
+  if (error) return {};
+  return data;
+}
+
+/** One batch’s prompt + entity lists; written to each run’s `input` for auditing / “prompt to start”. */
+type EnrichmentRunStartContext = {
+  agentPrompt: string;
+  batchCompanyIds: string[];
+  batchContactIds: string[];
+  batchQueueTaskIds: string[];
+};
+
+const PROMPT_SETTINGS_TTL_MS = 45_000;
+const promptSettingsCache = new Map<
+  string,
+  {
+    at: number;
+    settings: Awaited<ReturnType<typeof getEnrichmentPromptSettingsEffective>>;
+  }
+>();
+
+async function getCachedEnrichmentPromptSettings(
+  client: SupabaseClient,
+  projectId: string
+) {
+  const now = Date.now();
+  const profileKey = getEnrichmentSystemPromptType();
+  const cacheKey = `${projectId}::${profileKey}`;
+  const hit = promptSettingsCache.get(cacheKey);
+  if (hit && now - hit.at < PROMPT_SETTINGS_TTL_MS) {
+    return hit.settings;
+  }
+  const settings = await getEnrichmentPromptSettingsEffective(
+    client,
+    projectId,
+    profileKey || undefined
+  );
+  promptSettingsCache.set(cacheKey, { at: now, settings });
+  return settings;
+}
+
+async function updateEnrichmentBatchLlmTrace(
+  client: SupabaseClient,
+  batchId: string,
+  patch: {
+    llm_adapter: string;
+    external_agent_id?: string | null;
+    meta?: Record<string, unknown>;
+  }
+): Promise<void> {
+  const { error } = await client
+    .from(ENRICHMENT_AGENT_BATCHES_TABLE)
+    .update({
+      llm_adapter: patch.llm_adapter,
+      external_agent_id: patch.external_agent_id ?? null,
+      meta: patch.meta ?? {},
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", batchId);
+  if (error) {
+    log("info", "update enrichment_agent_batches llm trace failed", {
+      batchId,
+      error: error.message,
     });
   }
-  return results;
+}
+
+async function insertEnrichmentBatchRow(
+  client: SupabaseClient,
+  projectId: string,
+  agentName: string,
+  workerName: string
+): Promise<{ batchId: string } | { error: string }> {
+  const { data, error } = await client
+    .from(ENRICHMENT_AGENT_BATCHES_TABLE)
+    .insert({
+      project_id: projectId,
+      agent_name: agentName,
+      worker_name: workerName,
+    })
+    .select("id")
+    .single();
+
+  if (error || !data || typeof (data as { id?: unknown }).id !== "string") {
+    return { error: error?.message ?? "Failed to insert enrichment_agent_batches" };
+  }
+  return { batchId: (data as { id: string }).id };
 }
 
 async function insertRunAndLinkTask(
   client: SupabaseClient,
   task: EnrichmentQueueTaskRow,
   workerName: string,
-  nowIso: string
+  nowIso: string,
+  startContext: EnrichmentRunStartContext,
+  batchId: string | null
 ): Promise<{ runId: string } | { error: string }> {
   const runInsert: Record<string, unknown> = {
     queue_task_id: task.id,
@@ -508,9 +710,16 @@ async function insertRunAndLinkTask(
       worker_name: workerName,
       meta: task.meta ?? {},
       queue_task_id: task.id,
+      agent_prompt: startContext.agentPrompt,
+      batch_company_ids: startContext.batchCompanyIds,
+      batch_contact_ids: startContext.batchContactIds,
+      batch_queue_task_ids: startContext.batchQueueTaskIds,
     },
     started_at: nowIso,
   };
+  if (batchId) {
+    runInsert.batch_id = batchId;
+  }
 
   let { data: runRow, error: runErr } = await client
     .from(ENRICHMENT_AGENT_RUNS_TABLE)
@@ -526,6 +735,27 @@ async function insertRunAndLinkTask(
       .insert(withoutMeta)
       .select("id")
       .single();
+    runRow = retry.data;
+    runErr = retry.error;
+  }
+
+  if (runErr && isSchemaCacheMissingColumn(runErr.message, "batch_id")) {
+    const { batch_id: _omitBatch, ...withoutBatch } = runInsert;
+    void _omitBatch;
+    let retry = await client
+      .from(ENRICHMENT_AGENT_RUNS_TABLE)
+      .insert(withoutBatch)
+      .select("id")
+      .single();
+    if (retry.error && isSchemaCacheMissingColumn(retry.error.message, "meta")) {
+      const { meta: _omit, ...withoutMeta } = withoutBatch;
+      void _omit;
+      retry = await client
+        .from(ENRICHMENT_AGENT_RUNS_TABLE)
+        .insert(withoutMeta)
+        .select("id")
+        .single();
+    }
     runRow = retry.data;
     runErr = retry.error;
   }
@@ -611,7 +841,9 @@ async function processTaskBatch(
   tasks: EnrichmentQueueTaskRow[],
   agent: { prompt: string; batch_size: number },
   workerName: string,
-  batchCtx?: ProcessBatchContext
+  adapter: LlmAdapter,
+  batchCtx?: ProcessBatchContext,
+  execOptions?: { signal?: AbortSignal }
 ): Promise<void> {
   if (tasks.length === 0) return;
 
@@ -649,26 +881,86 @@ async function processTaskBatch(
     agent: primaryAgent,
     taskCount: toRun.length,
     batchSizeConfig: agent.batch_size,
+    llmAdapter: adapter.name,
     taskIdsSample: toRun.slice(0, 8).map((t) => t.id),
     ...(batchCtx ?? {}),
   });
 
-  const progressTasks = toRun.map((t) => ({
+  const eligible: EnrichmentQueueTaskRow[] = [];
+  for (const task of toRun) {
+    const { data: freshTask } = await client
+      .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+      .select("status")
+      .eq("id", task.id)
+      .maybeSingle();
+    if (freshTask && (freshTask as { status: string }).status === "cancelled") {
+      log("info", "task cancelled before run", { taskId: task.id, worker: workerName });
+      continue;
+    }
+    eligible.push(task);
+  }
+
+  if (eligible.length === 0) {
+    log("info", "processTaskBatch: skipped (all tasks cancelled)", {
+      worker: workerName,
+      agent: primaryAgent,
+      ...(batchCtx ?? {}),
+    });
+    return;
+  }
+
+  const progressTasks = eligible.map((t) => ({
     taskId: t.id,
     agentName: t.agent_name,
     operationName: t.operation_name,
   }));
 
   postEnrichmentBatchStartedEvent({
-    projectId: toRun[0]!.project_id,
+    projectId: eligible[0]!.project_id,
     agentName: primaryAgent,
     workerName,
-    items: toRun.map((t) => ({
+    items: eligible.map((t) => ({
       taskId: t.id,
       companyId: t.company_id ?? null,
       contactId: t.contact_id ?? null,
     })),
   });
+
+  const runStartContext: EnrichmentRunStartContext = {
+    agentPrompt: agent.prompt,
+    batchCompanyIds: [...new Set(eligible.map((t) => t.company_id).filter(Boolean))] as string[],
+    batchContactIds: [...new Set(eligible.map((t) => t.contact_id).filter(Boolean))] as string[],
+    batchQueueTaskIds: eligible.map((t) => t.id),
+  };
+
+  let batchId: string | null = null;
+  const batchIns = await insertEnrichmentBatchRow(
+    client,
+    eligible[0]!.project_id,
+    primaryAgent,
+    workerName
+  );
+  if ("error" in batchIns) {
+    log("error", "insert enrichment_agent_batches failed", {
+      error: batchIns.error,
+      agent: primaryAgent,
+      worker: workerName,
+      ...(batchCtx ?? {}),
+    });
+    const fin = new Date().toISOString();
+    for (const task of eligible) {
+      await client
+        .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+        .update({
+          status: "error",
+          last_error: batchIns.error,
+          updated_at: fin,
+        })
+        .eq("id", task.id);
+    }
+    return;
+  }
+  batchId = batchIns.batchId;
 
   await withWorkerTasksPresence(progressTasks, async () => {
     type Prepared = {
@@ -678,19 +970,16 @@ async function processTaskBatch(
     };
     const prepared: Prepared[] = [];
 
-    for (const task of toRun) {
-      const { data: freshTask } = await client
-        .from(ENRICHMENT_QUEUE_TASKS_TABLE)
-        .select("status")
-        .eq("id", task.id)
-        .maybeSingle();
-      if (freshTask && (freshTask as { status: string }).status === "cancelled") {
-        log("info", "task cancelled before run", { taskId: task.id, worker: workerName });
-        continue;
-      }
-
+    for (const task of eligible) {
       const startedIso = new Date().toISOString();
-      const ins = await insertRunAndLinkTask(client, task, workerName, startedIso);
+      const ins = await insertRunAndLinkTask(
+        client,
+        task,
+        workerName,
+        startedIso,
+        runStartContext,
+        batchId
+      );
       if ("error" in ins) {
         log("error", "insert run failed", {
           taskId: task.id,
@@ -715,32 +1004,9 @@ async function processTaskBatch(
 
     if (prepared.length === 0) return;
 
-    const companyIds = [
-      ...new Set(prepared.map((p) => p.task.company_id).filter(Boolean)),
-    ] as string[];
     const contactUuids = [
       ...new Set(prepared.map((p) => p.task.contact_id).filter(Boolean)),
     ] as string[];
-
-    const companiesRes = await getCompaniesByIds(client, companyIds);
-    if (companiesRes.error) {
-      const err = companiesRes.error;
-      for (const p of prepared) {
-        const fin = new Date().toISOString();
-        await client
-          .from(ENRICHMENT_AGENT_RUNS_TABLE)
-          .update({ status: "error", finished_at: fin, error: err })
-          .eq("id", p.runId);
-        await client
-          .from(ENRICHMENT_QUEUE_TASKS_TABLE)
-          .update({ status: "error", last_error: err, updated_at: fin })
-          .eq("id", p.task.id);
-      }
-      log("error", "batch fetch companies failed", { error: err, worker: workerName });
-      return;
-    }
-
-    const companyById = new Map(companiesRes.data.map((c) => [c.id, c] as const));
 
     const contactByUuid = new Map<string, Record<string, unknown>>();
     if (contactUuids.length > 0) {
@@ -770,25 +1036,89 @@ async function processTaskBatch(
       }
     }
 
-    const entities = prepared.map((p) => {
-      const t = p.task;
-      let data: Record<string, unknown>;
-      if (t.company_id) {
-        const c = companyById.get(t.company_id);
-        data = c
-          ? { name: c.name, domain: c.domain, tags: c.tags }
-          : { id: t.company_id };
-      } else {
-        data = contactByUuid.get(t.contact_id as string) ?? { id: t.contact_id };
+    const { data: agentRow } = await getEnrichmentAgentByName(client, primaryAgent);
+    const entityType = parseEntityTypeForPrompt(agentRow?.entity_type);
+    const refTask = prepared[0]!.task;
+    const rowKind: "company" | "contact" = refTask.company_id ? "company" : "contact";
+    const refEntityId = (refTask.company_id ?? refTask.contact_id) as string;
+
+    const promptSettings = await getCachedEnrichmentPromptSettings(
+      client,
+      refTask.project_id
+    );
+
+    let entities: Array<{ id: string; data: Record<string, unknown> }>;
+    if (refTask.company_id) {
+      const companyIdsOrdered = prepared.map((p) => p.task.company_id).filter(Boolean) as string[];
+      const assembled = await buildCompanyEntitiesForPrompt(
+        client,
+        refTask.project_id,
+        companyIdsOrdered,
+        promptSettings.companies_placeholder_config
+      );
+      if (assembled.error) {
+        const err = assembled.error;
+        for (const p of prepared) {
+          const fin = new Date().toISOString();
+          await client
+            .from(ENRICHMENT_AGENT_RUNS_TABLE)
+            .update({ status: "error", finished_at: fin, error: err })
+            .eq("id", p.runId);
+          await client
+            .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+            .update({ status: "error", last_error: err, updated_at: fin })
+            .eq("id", p.task.id);
+        }
+        log("error", "assemble company entities failed", { error: err, worker: workerName });
+        return;
       }
-      return { id: p.entityId, data };
+      entities = assembled.entities;
+    } else {
+      entities = prepared.map((p) => {
+        const t = p.task;
+        const data =
+          contactByUuid.get(t.contact_id as string) ?? { id: t.contact_id };
+        return { id: p.entityId, data };
+      });
+    }
+
+    const agentResultsByAgentName = await fetchAgentResultsForReferenceEntity(
+      client,
+      refTask.project_id,
+      rowKind,
+      refEntityId
+    );
+
+    const resolvedPrompt = resolvePromptForBatch(agent.prompt, entities, {
+      batchSize: agent.batch_size,
+      entityType,
+      rowKind,
+      agentResultsByAgentName,
     });
+
+    const finalPrompt = `${promptSettings.global_prompt_prefix}${resolvedPrompt}${promptSettings.global_prompt_suffix}`;
 
     let resultMap: Map<string, Record<string, unknown>>;
     try {
-      resultMap = await executeAgent(agent.prompt, entities);
+      const execOut = await adapter.execute(finalPrompt, entities, {
+        signal: execOptions?.signal,
+      });
+      resultMap = execOut.results;
+      if (batchId) {
+        await updateEnrichmentBatchLlmTrace(client, batchId, {
+          llm_adapter: adapter.name,
+          external_agent_id: execOut.trace?.externalAgentId ?? null,
+          meta: execOut.trace?.meta,
+        });
+      }
     } catch (e) {
       const err = e instanceof Error ? e.message : String(e);
+      if (batchId) {
+        await updateEnrichmentBatchLlmTrace(client, batchId, {
+          llm_adapter: adapter.name,
+          meta: { error: err },
+        });
+      }
       for (const p of prepared) {
         const fin = new Date().toISOString();
         await client
@@ -800,7 +1130,11 @@ async function processTaskBatch(
           .update({ status: "error", last_error: err, updated_at: fin })
           .eq("id", p.task.id);
       }
-      log("error", "executeAgent failed", { error: err, worker: workerName });
+      log("error", "LLM adapter execute failed", {
+        error: err,
+        worker: workerName,
+        adapter: adapter.name,
+      });
       return;
     }
 
@@ -907,6 +1241,7 @@ export async function runEnrichmentWorkerLoop(client: SupabaseClient, options?: 
   signal?: AbortSignal;
 }): Promise<void> {
   const env = getWorkerEnv();
+  const llmAdapter = createLlmAdapter();
   log("info", "worker started", {
     worker: env.workerName,
     maxConcurrentAgentRuns: env.maxConcurrentAgentRuns,
@@ -914,6 +1249,7 @@ export async function runEnrichmentWorkerLoop(client: SupabaseClient, options?: 
     pickIntervalMs: env.pickIntervalMs,
     lockMinutes: env.lockMinutes,
     batchWaitMs: env.batchWaitMs,
+    llmAdapter: llmAdapter.name,
     note: "processTaskBatch / task completed logs only appear in THIS process (not the API server terminal)",
   });
   if (env.batchWaitMs === 0) {
@@ -1004,12 +1340,20 @@ export async function runEnrichmentWorkerLoop(client: SupabaseClient, options?: 
           env.maxConcurrentAgentRuns,
           (batch) => {
             processBatchInvocation.n += 1;
-            return processTaskBatch(client, batch.tasks, batch.agent, env.workerName, {
-              tickId,
-              batchSeq: processBatchInvocation.n,
-              phase,
-              wave,
-            });
+            return processTaskBatch(
+              client,
+              batch.tasks,
+              batch.agent,
+              env.workerName,
+              llmAdapter,
+              {
+                tickId,
+                batchSeq: processBatchInvocation.n,
+                phase,
+                wave,
+              },
+              { signal }
+            );
           },
           env.workerName
         );
@@ -1049,6 +1393,8 @@ export async function runEnrichmentWorkerLoop(client: SupabaseClient, options?: 
         await flushUntilStable("after-empty-claim", false, true);
         break;
       }
+
+      await affirmQueueWorkerAttribution(client, claimed.tasks, env.workerName);
 
       rowsClaimedThisTick += claimed.tasks.length;
       if (claimed.tasks.length >= env.pickLimit) {
@@ -1199,6 +1545,13 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 async function main(): Promise<void> {
   activeWorkerName = getEnrichmentWorkerName();
   const workerId = getEnrichmentWorkerId();
+  const sysPromptType = getEnrichmentSystemPromptType();
+  if (sysPromptType) {
+    log("info", "enrichment prompt profile (ENRICHMENT_SYSTEM_PROMPT_TYPE)", {
+      profile: sysPromptType,
+      worker: activeWorkerName,
+    });
+  }
 
   let client: SupabaseClient;
   try {

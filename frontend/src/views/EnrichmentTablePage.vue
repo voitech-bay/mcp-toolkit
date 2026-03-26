@@ -28,18 +28,35 @@ import {
   NInputNumber,
   NSwitch,
   NPopconfirm,
+  NDrawer,
+  NDrawerContent,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
 import { useIntervalFn } from "@vueuse/core";
-import { PlayIcon, RefreshCwIcon, ClockIcon } from "lucide-vue-next";
+import { PlayIcon, PencilIcon, RefreshCwIcon, ClockIcon } from "lucide-vue-next";
 import { useProjectStore } from "../stores/project";
 import {
   useEnrichmentRealtime,
   type EnrichmentDataPayload,
   type EnrichmentBatchStartedPayload,
 } from "../composables/useEnrichmentRealtime";
+import {
+  fetchEnrichmentBatchDetail,
+  type EnrichmentBatchDetailBatch,
+  type EnrichmentBatchDetailRun,
+} from "../composables/useEnrichmentBatchDetail";
 import type { WorkerEntry } from "../composables/useWorkers";
+import {
+  COMPANY_BASE_KEYS,
+  CONTACT_BASE_KEYS,
+  formatCellValue,
+  parseEnrichmentEntityType,
+  resolvePromptPlaceholders,
+  resolvePromptSegments,
+  resolvePromptSegmentsBatch,
+  type ResolvePromptForBatchOptions,
+} from "@mcp/prompt-resolver";
 
 type EntityTab = "company" | "contact";
 
@@ -55,6 +72,8 @@ interface EnrichmentAgentCellState {
   workerName?: string | null;
   /** When status is `running`: batch accumulator vs. executing agent. */
   runPhase?: EnrichmentRunPhase;
+  runId?: string | null;
+  batchId?: string | null;
 }
 
 interface EnrichmentRunStats {
@@ -101,25 +120,6 @@ const enrichmentWorkers = inject<Ref<WorkerEntry[]>>(
   ref<WorkerEntry[]>([])
 );
 
-/** Base columns shown for each entity tab (fixed set). */
-const COMPANY_BASE_KEYS: readonly string[] = [
-  "name",
-  "domain",
-  "linkedin_url",
-  "tags",
-  "contact_count",
-  "status",
-];
-
-const CONTACT_BASE_KEYS: readonly string[] = [
-  "first_name",
-  "last_name",
-  "company_name",
-  "position",
-  "work_email",
-  "created_at",
-];
-
 const activeTab = ref<EntityTab>("company");
 const checkedRowKeys = ref<DataTableRowKey[]>([]);
 
@@ -154,6 +154,151 @@ const agentFormPrompt = ref("");
 const agentFormBatchSize = ref<number | null>(1);
 const agentFormActive = ref(true);
 const savingAgent = ref(false);
+
+const promptDrawerOpen = ref(false);
+const promptDrawerAgentName = ref("");
+const promptDrawerText = ref("");
+const promptDrawerSaving = ref(false);
+const promptDrawerPreviewOpen = ref(false);
+const promptDrawerPreviewRowIdx = ref(0);
+
+/** DB-backed prefix/suffix + `{{companies}}` JSON (per project override). */
+const promptSettingsOpen = ref(false);
+const promptSettingsLoading = ref(false);
+const promptSettingsSaving = ref(false);
+const promptSettingsError = ref("");
+const promptSettingsPrefix = ref("");
+const promptSettingsSuffix = ref("");
+const promptSettingsConfigText = ref("{}");
+/** Map of profile key -> partial overlay (matches `enrichment_prompt_settings.prompt_profiles`). */
+const promptSettingsProfilesText = ref("{}");
+
+/** Server-side resolved prompt (matches worker pipeline for company batches). */
+const serverPromptPreviewText = ref("");
+const serverPromptPreviewLoading = ref(false);
+const serverPromptPreviewError = ref("");
+/** Simulates `ENRICHMENT_SYSTEM_PROMPT_TYPE` for POST /api/enrichment/prompt-preview. */
+const serverPromptPreviewProfile = ref("");
+
+const promptTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const promptTextareaWrapRef = ref<HTMLDivElement | null>(null);
+const promptAcListRef = ref<HTMLDivElement | null>(null);
+const promptAutocompleteOpen = ref(false);
+const promptAutocompleteItems = ref<{ label: string; insert: string }[]>([]);
+const promptAutocompleteActive = ref(0);
+/** Index of `{{` in `promptDrawerText` for the active autocomplete span. */
+const promptAutocompleteAnchor = ref(-1);
+/** Pixel position of the autocomplete panel relative to `.prompt-drawer-textarea-wrap`. */
+const promptAutocompletePos = ref({ top: 0, left: 0 });
+/** When this changes, reset active index to 0 (typing); unchanged for ArrowUp/Down. */
+const promptAutocompleteSig = ref("");
+
+/** Port of `textarea-caret-position` (MIT) — caret pixel offset inside the textarea box. */
+function getTextareaCaretCoordinates(
+  element: HTMLTextAreaElement,
+  position: number
+): { top: number; left: number; height: number } {
+  const div = document.createElement("div");
+  document.body.appendChild(div);
+
+  const style = div.style;
+  const computed = window.getComputedStyle(element);
+
+  style.whiteSpace = "pre-wrap";
+  style.wordWrap = "break-word";
+  style.position = "absolute";
+  style.visibility = "hidden";
+  style.overflow = "hidden";
+
+  const properties = [
+    "direction",
+    "boxSizing",
+    "width",
+    "height",
+    "overflowX",
+    "overflowY",
+    "borderTopWidth",
+    "borderRightWidth",
+    "borderBottomWidth",
+    "borderLeftWidth",
+    "borderStyle",
+    "paddingTop",
+    "paddingRight",
+    "paddingBottom",
+    "paddingLeft",
+    "fontStyle",
+    "fontVariant",
+    "fontWeight",
+    "fontStretch",
+    "fontSize",
+    "fontSizeAdjust",
+    "lineHeight",
+    "fontFamily",
+    "textAlign",
+    "textTransform",
+    "textIndent",
+    "textDecoration",
+    "letterSpacing",
+    "wordSpacing",
+    "tabSize",
+    "MozTabSize",
+  ] as const;
+
+  for (const prop of properties) {
+    style.setProperty(prop, computed.getPropertyValue(prop));
+  }
+
+  const isFirefox =
+    typeof window !== "undefined" &&
+    (window as Window & { mozInnerScreenX?: number }).mozInnerScreenX != null;
+  if (isFirefox) {
+    if (element.scrollHeight > parseInt(computed.height || "0", 10)) {
+      style.overflowY = "scroll";
+    }
+  } else {
+    style.overflow = "hidden";
+  }
+
+  div.textContent = element.value.substring(0, position);
+  const span = document.createElement("span");
+  span.textContent = element.value.substring(position) || ".";
+  div.appendChild(span);
+
+  const top = span.offsetTop + parseInt(computed.borderTopWidth || "0", 10);
+  const left = span.offsetLeft + parseInt(computed.borderLeftWidth || "0", 10);
+  const lh = computed.lineHeight;
+  let height = parseFloat(lh);
+  if (!Number.isFinite(height) || height <= 0) {
+    const fs = parseFloat(computed.fontSize || "16");
+    height = Number.isFinite(fs) ? fs * 1.25 : 16;
+  }
+
+  document.body.removeChild(div);
+  return { top, left, height };
+}
+
+function updatePromptAutocompletePosition() {
+  const ta = promptTextareaRef.value;
+  const wrap = promptTextareaWrapRef.value;
+  if (!ta || !wrap || !promptAutocompleteOpen.value) return;
+  const caretPos = ta.selectionStart ?? 0;
+  const coords = getTextareaCaretCoordinates(ta, caretPos);
+  const taRect = ta.getBoundingClientRect();
+  const wrapRect = wrap.getBoundingClientRect();
+  const gap = 4;
+  let left = taRect.left - wrapRect.left + coords.left - ta.scrollLeft;
+  let top = taRect.top - wrapRect.top + coords.top - ta.scrollTop + coords.height + gap;
+
+  const wrapW = wrap.clientWidth;
+  const maxW = Math.min(320, wrapW - 8);
+  if (left + maxW > wrapW - 4) {
+    left = Math.max(0, wrapW - maxW - 4);
+  }
+  left = Math.max(0, left);
+  top = Math.max(0, top);
+
+  promptAutocompletePos.value = { top, left };
+}
 
 const entityTypeOptions: SelectOption[] = [
   { label: "Company", value: "company" },
@@ -218,24 +363,410 @@ const { pause: pausePoll, resume: resumePoll } = useIntervalFn(
 const detailOpen = ref(false);
 const detailTitle = ref("");
 const detailBody = ref("");
+const detailBatchId = ref<string | null>(null);
+const detailRunId = ref<string | null>(null);
 
-function openDetail(title: string, body: string) {
+function openDetail(
+  title: string,
+  body: string,
+  opts?: { batchId?: string | null; runId?: string | null }
+) {
   detailTitle.value = title;
   detailBody.value = body;
+  detailBatchId.value = opts?.batchId ?? null;
+  detailRunId.value = opts?.runId ?? null;
   detailOpen.value = true;
 }
 
-function formatCellValue(key: string, val: unknown): string {
-  if (val == null) return "—";
-  if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") return String(val);
-  if (Array.isArray(val)) {
-    if (key === "tags") return val.map((x) => String(x)).join(", ");
-    if (val.length === 0) return "—";
-    return JSON.stringify(val);
-  }
-  if (typeof val === "object") return JSON.stringify(val);
-  return String(val);
+const batchDetailOpen = ref(false);
+const batchDetailLoading = ref(false);
+const batchDetailError = ref("");
+const batchDetailBatch = ref<EnrichmentBatchDetailBatch | null>(null);
+const batchDetailRuns = ref<EnrichmentBatchDetailRun[]>([]);
+
+const batchRowDetailOpen = ref(false);
+const batchRowDetailTitle = ref("");
+const batchRowDetailBody = ref("");
+
+function openBatchRowDetail(title: string, body: string) {
+  batchRowDetailTitle.value = title;
+  batchRowDetailBody.value = body;
+  batchRowDetailOpen.value = true;
 }
+
+function entityLabelBatchRow(r: EnrichmentBatchDetailRun): string {
+  if (r.company_id) return `company ${r.company_id.slice(0, 8)}…`;
+  if (r.contact_id) return `contact ${r.contact_id.slice(0, 8)}…`;
+  return "—";
+}
+
+function batchRunStatusTagType(
+  status: string
+): "default" | "info" | "success" | "warning" | "error" {
+  switch (status) {
+    case "running":
+      return "info";
+    case "success":
+      return "success";
+    case "error":
+      return "error";
+    default:
+      return "default";
+  }
+}
+
+const batchDetailColumns = computed<DataTableColumns<EnrichmentBatchDetailRun>>(() => [
+  {
+    title: "Entity",
+    key: "entity",
+    width: 200,
+    ellipsis: { tooltip: true },
+    render: (row) => entityLabelBatchRow(row),
+  },
+  {
+    title: "Status",
+    key: "status",
+    width: 96,
+    render: (row) =>
+      h(
+        NTag,
+        { size: "small", type: batchRunStatusTagType(row.status), bordered: false },
+        () => row.status
+      ),
+  },
+  {
+    title: "Error",
+    key: "error",
+    ellipsis: { tooltip: true },
+    render: (row) => row.error?.trim() || "—",
+  },
+  {
+    title: "",
+    key: "actions",
+    width: 120,
+    render: (row) =>
+      h(
+        NButton,
+        {
+          size: "tiny",
+          quaternary: true,
+          disabled: row.status !== "success" && row.status !== "error",
+          onClick: () => {
+            if (row.status === "success") {
+              const raw = row.resultPreview;
+              const text =
+                raw === undefined
+                  ? "(no result)"
+                  : typeof raw === "string"
+                    ? raw
+                    : JSON.stringify(raw, null, 2);
+              openBatchRowDetail(`Result · ${entityLabelBatchRow(row)}`, text);
+            } else if (row.status === "error") {
+              openBatchRowDetail(`Error · ${entityLabelBatchRow(row)}`, row.error ?? "(no message)");
+            }
+          },
+        },
+        { default: () => (row.status === "success" ? "View result" : row.status === "error" ? "View error" : "—") }
+      ),
+  },
+]);
+
+async function openBatchDetailModal(batchId: string) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || !batchId) return;
+  batchDetailOpen.value = true;
+  batchDetailLoading.value = true;
+  batchDetailError.value = "";
+  batchDetailBatch.value = null;
+  batchDetailRuns.value = [];
+  try {
+    const data = await fetchEnrichmentBatchDetail(projectId, batchId);
+    batchDetailBatch.value = data.batch;
+    batchDetailRuns.value = data.runs;
+  } catch (e) {
+    batchDetailError.value = e instanceof Error ? e.message : "Failed to load batch";
+  } finally {
+    batchDetailLoading.value = false;
+  }
+}
+
+interface PromptPlaceholderItem {
+  label: string;
+  /** Inner token (inside `{{ }}`), e.g. `name` or `agent:OtherAgent.summary`. */
+  insert: string;
+}
+
+const promptDrawerBatchSize = computed(() => {
+  const n = promptDrawerAgentName.value;
+  const a = agents.value.find((x) => x.name === n);
+  return Math.max(1, Number(a?.batch_size) || 1);
+});
+
+/** Rows included in batch prompt preview (first N on page, capped by batch size). */
+const promptBatchPreviewRowCount = computed(() =>
+  Math.min(promptDrawerBatchSize.value, rows.value.length)
+);
+
+const PROMPT_TOKEN_COMPANIES = "{{companies}}";
+const PROMPT_TOKEN_CONTACTS = "{{contacts}}";
+
+/** Entity fields + `agent:name.key` from other agents’ `resultPreview` (current page). */
+const availablePlaceholders = computed<PromptPlaceholderItem[]>(() => {
+  const currentAgent = promptDrawerAgentName.value;
+  const bs = promptDrawerBatchSize.value;
+
+  if (bs > 1) {
+    const agentInfo = agents.value.find((a) => a.name === currentAgent);
+    const et = parseEnrichmentEntityType(agentInfo?.entity_type ?? activeTab.value);
+    const items: PromptPlaceholderItem[] = [];
+    if (et === "company" || et === "both") {
+      items.push({ label: "All companies in batch (CSV table)", insert: "companies" });
+    }
+    if (et === "contact" || et === "both") {
+      items.push({ label: "All contacts in batch (CSV table)", insert: "contacts" });
+    }
+    return items;
+  }
+
+  const base = activeTab.value === "company" ? COMPANY_BASE_KEYS : CONTACT_BASE_KEYS;
+  const entityKeys = new Set<string>([...base]);
+  for (const row of rows.value) {
+    for (const k of Object.keys(row.entity ?? {})) {
+      entityKeys.add(k);
+    }
+  }
+  const items: PromptPlaceholderItem[] = [];
+  for (const k of [...entityKeys].sort()) {
+    items.push({ label: k, insert: k });
+  }
+  const others = agentNames.value.filter((n) => n !== currentAgent);
+  for (const an of others) {
+    const keySet = new Set<string>();
+    for (const row of rows.value) {
+      const rp = row.agentStates[an]?.resultPreview;
+      if (rp && typeof rp === "object" && !Array.isArray(rp)) {
+        for (const key of Object.keys(rp as Record<string, unknown>)) {
+          keySet.add(key);
+        }
+      }
+    }
+    for (const k of [...keySet].sort()) {
+      const insert = `agent:${an}.${k}`;
+      items.push({ label: `${an} → ${k}`, insert });
+    }
+  }
+  return items;
+});
+
+function rowLabelForPreview(row: EnrichmentTableRow): string {
+  if (activeTab.value === "company") {
+    const n = row.entity.name;
+    const d = row.entity.domain;
+    if (typeof n === "string" && n.trim()) {
+      return typeof d === "string" && d.trim() ? `${n} (${d})` : n;
+    }
+    if (typeof d === "string" && d.trim()) return d;
+    return "Company";
+  }
+  const fn = row.entity.first_name;
+  const ln = row.entity.last_name;
+  const parts = [fn, ln].filter((x) => typeof x === "string" && String(x).trim());
+  return parts.length ? parts.join(" ") : "Contact";
+}
+
+const promptPreviewRowOptions = computed<SelectOption[]>(() =>
+  rows.value.map((row, idx) => ({
+    label: `${rowLabelForPreview(row)} · ${idx + 1}`,
+    value: idx,
+  }))
+);
+
+function buildAgentResultsMap(row: EnrichmentTableRow): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const name of agentNames.value) {
+    const rp = row.agentStates[name]?.resultPreview;
+    if (rp !== undefined && rp !== null) {
+      out[name] = rp;
+    }
+  }
+  return out;
+}
+
+/** `enrichment_agents.entity_type` for the drawer agent (drives `{{companies}}` / `{{contacts}}` like the worker). */
+const promptDrawerEntityType = computed(() => {
+  const a = agents.value.find((x) => x.name === promptDrawerAgentName.value);
+  return parseEnrichmentEntityType(a?.entity_type);
+});
+
+interface PromptPreviewBlock {
+  heading: string;
+  segments: Array<{ resolved: boolean; text: string }>;
+}
+
+const promptPreviewBlocks = computed((): PromptPreviewBlock[] => {
+  const prompt = promptDrawerText.value;
+  const bs = promptDrawerBatchSize.value;
+
+  if (rows.value.length === 0) return [];
+
+  if (bs <= 1) {
+    const row = rows.value[promptDrawerPreviewRowIdx.value];
+    if (!row) return [];
+    return [
+      {
+        heading: "",
+        segments: resolvePromptSegments(prompt, row.entity, buildAgentResultsMap(row)),
+      },
+    ];
+  }
+
+  const n = Math.min(bs, rows.value.length);
+  const batchRows = rows.value.slice(0, n);
+  const heading = `Preview: first ${n} row(s) on this page (batch size ${bs})`;
+  const entities = batchRows.map((row, i) => ({
+    id: String(rowKey(row) ?? i),
+    data: row.entity as Record<string, unknown>,
+  }));
+  const first = batchRows[0];
+  const options: ResolvePromptForBatchOptions = {
+    batchSize: bs,
+    entityType: promptDrawerEntityType.value,
+    rowKind: activeTab.value,
+    agentResultsByAgentName: first ? buildAgentResultsMap(first) : {},
+  };
+  return [{ heading, segments: resolvePromptSegmentsBatch(prompt, entities, options) }];
+});
+
+/** Plain resolved string for tooltip (single-row preview). */
+const promptDrawerPreviewPlainTitle = computed(() => {
+  if (promptDrawerBatchSize.value > 1 || rows.value.length === 0) return "";
+  const r = rows.value[promptDrawerPreviewRowIdx.value];
+  if (!r) return "";
+  return resolvePromptPlaceholders(promptDrawerText.value, r.entity, buildAgentResultsMap(r));
+});
+
+function updatePromptAutocomplete() {
+  const ta = promptTextareaRef.value;
+  if (!ta) return;
+  const val = ta.value;
+  const pos = ta.selectionStart ?? 0;
+  const before = val.slice(0, pos);
+  const openIdx = before.lastIndexOf("{{");
+  if (openIdx === -1) {
+    promptAutocompleteOpen.value = false;
+    return;
+  }
+  const afterOpen = before.slice(openIdx + 2);
+  if (afterOpen.includes("}}")) {
+    promptAutocompleteOpen.value = false;
+    return;
+  }
+  const partial = afterOpen;
+  const p = partial.toLowerCase();
+  const pool = availablePlaceholders.value;
+  const filtered = pool.filter(
+    (it) =>
+      it.insert.toLowerCase().startsWith(p) ||
+      it.label.toLowerCase().includes(p)
+  );
+  if (filtered.length === 0) {
+    promptAutocompleteOpen.value = false;
+    return;
+  }
+  const nextSig = `${openIdx}:${partial}`;
+  if (nextSig !== promptAutocompleteSig.value) {
+    promptAutocompleteSig.value = nextSig;
+    promptAutocompleteActive.value = 0;
+  }
+  promptAutocompleteItems.value = filtered.slice(0, 40);
+  promptAutocompleteAnchor.value = openIdx;
+  promptAutocompleteOpen.value = true;
+  nextTick(() => updatePromptAutocompletePosition());
+}
+
+function onPromptTextareaInput(e: Event) {
+  const ta = e.target as HTMLTextAreaElement;
+  promptDrawerText.value = ta.value;
+  updatePromptAutocomplete();
+}
+
+function applyPromptAutocompleteChoice(index: number) {
+  const ta = promptTextareaRef.value;
+  const items = promptAutocompleteItems.value;
+  if (!ta || !items[index]) return;
+  const choice = items[index];
+  const val = ta.value;
+  const pos = ta.selectionStart ?? 0;
+  const start = promptAutocompleteAnchor.value;
+  if (start < 0) return;
+  const insertion = `{{${choice.insert}}}`;
+  const newVal = val.slice(0, start) + insertion + val.slice(pos);
+  promptDrawerText.value = newVal;
+  promptAutocompleteOpen.value = false;
+  promptAutocompleteAnchor.value = -1;
+  promptAutocompleteSig.value = "";
+  const newPos = start + insertion.length;
+  nextTick(() => {
+    ta.focus();
+    ta.setSelectionRange(newPos, newPos);
+  });
+}
+
+function onPromptTextareaKeydown(e: KeyboardEvent) {
+  if (!promptAutocompleteOpen.value || !promptAutocompleteItems.value.length) return;
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    e.stopPropagation();
+    const n = promptAutocompleteItems.value.length;
+    promptAutocompleteActive.value = (promptAutocompleteActive.value + 1) % n;
+    nextTick(() => updatePromptAutocompletePosition());
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    e.stopPropagation();
+    const n = promptAutocompleteItems.value.length;
+    promptAutocompleteActive.value = (promptAutocompleteActive.value - 1 + n) % n;
+    nextTick(() => updatePromptAutocompletePosition());
+  } else if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    e.stopPropagation();
+    applyPromptAutocompleteChoice(promptAutocompleteActive.value);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    promptAutocompleteOpen.value = false;
+  }
+}
+
+function onPromptTextareaKeyup(e: KeyboardEvent) {
+  if (!promptAutocompleteOpen.value || !promptAutocompleteItems.value.length) {
+    updatePromptAutocomplete();
+    return;
+  }
+  if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+    updatePromptAutocompletePosition();
+    return;
+  }
+  updatePromptAutocomplete();
+}
+
+let promptAcBlurTimer: ReturnType<typeof setTimeout> | undefined;
+function onPromptTextareaBlur() {
+  if (promptAcBlurTimer) clearTimeout(promptAcBlurTimer);
+  promptAcBlurTimer = setTimeout(() => {
+    promptAutocompleteOpen.value = false;
+    promptAcBlurTimer = undefined;
+  }, 180);
+}
+
+watch([promptAutocompleteActive, promptAutocompleteOpen], () => {
+  if (!promptAutocompleteOpen.value) return;
+  nextTick(() => {
+    const el = promptAcListRef.value?.querySelector(
+      ".prompt-drawer-ac__item--active"
+    ) as HTMLElement | null;
+    el?.scrollIntoView({ block: "nearest" });
+  });
+});
 
 function columnTitle(key: string): string {
   const map: Record<string, string> = {
@@ -353,6 +884,204 @@ function openEditAgentModal(row: EnrichmentAgentRegistryRow) {
   agentFormBatchSize.value = Math.max(1, Number(row.batch_size) || 1);
   agentFormActive.value = row.is_active;
   agentModalOpen.value = true;
+}
+
+function openPromptDrawer(name: string) {
+  const reg = registryRows.value.find((r) => r.name === name);
+  const info = agents.value.find((a) => a.name === name);
+  promptDrawerAgentName.value = name;
+  promptDrawerText.value = reg?.prompt ?? info?.prompt ?? "";
+  promptDrawerPreviewOpen.value = false;
+  promptDrawerPreviewRowIdx.value = 0;
+  promptAutocompleteOpen.value = false;
+  promptAutocompleteAnchor.value = -1;
+  promptAutocompleteSig.value = "";
+  serverPromptPreviewText.value = "";
+  serverPromptPreviewError.value = "";
+  promptDrawerOpen.value = true;
+}
+
+/** GET /api/enrichment/prompt-settings returns the project row; older responses nested it under `{ data }`. */
+function promptProfilesFromProjectRowPayload(row: unknown): Record<string, unknown> {
+  if (!row || typeof row !== "object") return {};
+  const o = row as Record<string, unknown>;
+  const direct = o.prompt_profiles;
+  if (direct && typeof direct === "object" && !Array.isArray(direct)) {
+    return direct as Record<string, unknown>;
+  }
+  const inner = o.data;
+  if (inner && typeof inner === "object" && !Array.isArray(inner)) {
+    const d = inner as Record<string, unknown>;
+    const nested = d.prompt_profiles;
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      return nested as Record<string, unknown>;
+    }
+  }
+  return {};
+}
+
+async function loadPromptSettings() {
+  const pid = projectStore.selectedProjectId;
+  if (!pid) return;
+  promptSettingsLoading.value = true;
+  promptSettingsError.value = "";
+  try {
+    const r = await fetch(
+      `/api/enrichment/prompt-settings?projectId=${encodeURIComponent(pid)}`
+    );
+    const j = (await r.json()) as {
+      error?: string;
+      effective?: {
+        global_prompt_prefix?: string;
+        global_prompt_suffix?: string;
+        companies_placeholder_config?: Record<string, unknown>;
+      };
+      projectRow?: unknown;
+    };
+    if (!r.ok) throw new Error(j.error ?? "Failed to load prompt settings");
+    const eff = j.effective;
+    promptSettingsPrefix.value = eff?.global_prompt_prefix ?? "";
+    promptSettingsSuffix.value = eff?.global_prompt_suffix ?? "";
+    promptSettingsConfigText.value = JSON.stringify(
+      eff?.companies_placeholder_config ?? {},
+      null,
+      2
+    );
+    promptSettingsProfilesText.value = JSON.stringify(
+      promptProfilesFromProjectRowPayload(j.projectRow),
+      null,
+      2
+    );
+  } catch (e) {
+    promptSettingsError.value = e instanceof Error ? e.message : "Load failed";
+  } finally {
+    promptSettingsLoading.value = false;
+  }
+}
+
+function openPromptSettingsModal() {
+  promptSettingsOpen.value = true;
+  void loadPromptSettings();
+}
+
+async function savePromptSettings() {
+  const pid = projectStore.selectedProjectId;
+  if (!pid) return;
+  let config: Record<string, unknown>;
+  let profiles: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(promptSettingsConfigText.value || "{}") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("companies_placeholder_config must be a JSON object");
+    }
+    config = parsed as Record<string, unknown>;
+    const pr = JSON.parse(promptSettingsProfilesText.value || "{}") as unknown;
+    if (!pr || typeof pr !== "object" || Array.isArray(pr)) {
+      throw new Error("prompt_profiles must be a JSON object");
+    }
+    profiles = pr as Record<string, unknown>;
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Invalid JSON");
+    return;
+  }
+  promptSettingsSaving.value = true;
+  promptSettingsError.value = "";
+  try {
+    const r = await fetch("/api/enrichment/prompt-settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: pid,
+        global_prompt_prefix: promptSettingsPrefix.value,
+        global_prompt_suffix: promptSettingsSuffix.value,
+        companies_placeholder_config: config,
+        prompt_profiles: profiles,
+      }),
+    });
+    const j = (await r.json()) as { error?: string };
+    if (!r.ok) throw new Error(j.error ?? "Save failed");
+    message.success("Prompt settings saved");
+    promptSettingsOpen.value = false;
+  } catch (e) {
+    promptSettingsError.value = e instanceof Error ? e.message : "Save failed";
+  } finally {
+    promptSettingsSaving.value = false;
+  }
+}
+
+async function fetchServerPromptPreview() {
+  const pid = projectStore.selectedProjectId;
+  if (!pid || activeTab.value !== "company") {
+    message.warning("Server preview needs a project and the company tab.");
+    return;
+  }
+  if (!promptDrawerAgentName.value) return;
+  const n = Math.min(promptDrawerBatchSize.value, rows.value.length);
+  const companyIds = rows.value
+    .slice(0, n)
+    .map((r) => r.entity.company_id as string | undefined)
+    .filter((x): x is string => typeof x === "string" && x.length > 0);
+  if (companyIds.length === 0) {
+    message.warning("No company rows to preview.");
+    return;
+  }
+  serverPromptPreviewLoading.value = true;
+  serverPromptPreviewError.value = "";
+  serverPromptPreviewText.value = "";
+  try {
+    const r = await fetch("/api/enrichment/prompt-preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: pid,
+        prompt: promptDrawerText.value,
+        batchSize: promptDrawerBatchSize.value,
+        agentName: promptDrawerAgentName.value,
+        companyIds,
+        rowKind: "company",
+        systemPromptType: serverPromptPreviewProfile.value.trim() || undefined,
+      }),
+    });
+    const j = (await r.json()) as { error?: string; finalPrompt?: string };
+    if (!r.ok) throw new Error(j.error ?? "Preview failed");
+    serverPromptPreviewText.value = j.finalPrompt ?? "";
+  } catch (e) {
+    serverPromptPreviewError.value = e instanceof Error ? e.message : "Preview failed";
+  } finally {
+    serverPromptPreviewLoading.value = false;
+  }
+}
+
+async function savePromptDrawer() {
+  const name = promptDrawerAgentName.value.trim();
+  if (!name) {
+    message.warning("No agent selected.");
+    return;
+  }
+  promptDrawerSaving.value = true;
+  try {
+    const r = await fetch("/api/enrichment/agents/registry", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, prompt: promptDrawerText.value }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Update failed");
+    const prompt = promptDrawerText.value;
+    const ai = agents.value.findIndex((a) => a.name === name);
+    if (ai >= 0) {
+      agents.value[ai] = { ...agents.value[ai], prompt };
+    }
+    const ri = registryRows.value.findIndex((row) => row.name === name);
+    if (ri >= 0) {
+      registryRows.value[ri] = { ...registryRows.value[ri], prompt };
+    }
+    message.success("Prompt saved.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Save failed");
+  } finally {
+    promptDrawerSaving.value = false;
+  }
 }
 
 function truncatePromptText(s: string, max = 56): string {
@@ -685,6 +1414,13 @@ function workerDisplayName(state: EnrichmentAgentCellState | undefined): string 
   return w;
 }
 
+/** Compact batch id: first 2 + last 2 characters (e.g. `ed…a3`). */
+function shortBatchLabel(batchId: string | null | undefined): string | null {
+  const id = batchId?.trim();
+  if (!id || id.length < 4) return null;
+  return `${id.slice(0, 2)}…${id.slice(-2)}`;
+}
+
 function renderAgentCell(
   agentName: string,
   state: EnrichmentAgentCellState | undefined,
@@ -702,10 +1438,16 @@ function renderAgentCell(
         : typeof raw === "string"
           ? raw
           : JSON.stringify(raw, null, 2);
-    openDetail(`Result · ${agentName}`, text);
+    openDetail(`Result · ${agentName}`, text, {
+      batchId: state?.batchId ?? null,
+      runId: state?.runId ?? null,
+    });
   };
   const onClickError = () => {
-    openDetail(`Error · ${agentName}`, state?.error ?? "(no message)");
+    openDetail(`Error · ${agentName}`, state?.error ?? "(no message)", {
+      batchId: state?.batchId ?? null,
+      runId: state?.runId ?? null,
+    });
   };
 
   function runIconBtn(
@@ -730,8 +1472,26 @@ function renderAgentCell(
     });
   }
 
+  const batchChip = (): ReturnType<typeof h> | null => {
+    const bid = state?.batchId?.trim();
+    const short = shortBatchLabel(bid ?? null);
+    if (!short || !bid) return null;
+    return h(
+      "span",
+      {
+        class: "enrichment-agent-cell__batch-tag",
+        title: `Batch ${bid}`,
+        onClick: (e: MouseEvent) => {
+          e.stopPropagation();
+          void openBatchDetailModal(bid);
+        },
+      },
+      short
+    );
+  };
+
   if (s === "planned") {
-    return h("div", { class: "enrichment-agent-cell enrichment-agent-cell--planned" }, [
+    return h("div", { class: "enrichment-agent-cell enrichment-agent-cell--planned enrichment-agent-cell__main-row" }, [
       h("span", { class: "enrichment-agent-cell__status enrichment-agent-cell__status--muted" }, "No data"),
       runIconBtn("Run", "default", "play"),
     ]);
@@ -799,6 +1559,7 @@ function renderAgentCell(
     ]);
   }
   if (s === "success") {
+    const chip = batchChip();
     return h(
       "div",
       {
@@ -806,12 +1567,25 @@ function renderAgentCell(
         onClick: onClickSuccess,
       },
       [
-        h("span", { class: "enrichment-agent-cell__label enrichment-agent-cell__label--success" }, "Result"),
-        runIconBtn("Rerun", "default"),
+        h(
+          "div",
+          { class: "enrichment-agent-cell__main-row" },
+          [
+            h(
+              "span",
+              { class: "enrichment-agent-cell__label enrichment-agent-cell__label--success" },
+              "Result"
+            ),
+            ...(chip ? [chip] : []),
+            runIconBtn("Rerun", "default")
+
+          ]
+        ),
       ]
     );
   }
   if (s === "error") {
+    const chip = batchChip();
     return h(
       "div",
       {
@@ -819,8 +1593,20 @@ function renderAgentCell(
         onClick: onClickError,
       },
       [
-        h("span", { class: "enrichment-agent-cell__label enrichment-agent-cell__label--error" }, "Error"),
-        runIconBtn("Rerun", "error"),
+        h(
+          "div",
+          { class: "enrichment-agent-cell__main-row" },
+          [
+            h(
+              "span",
+              { class: "enrichment-agent-cell__label enrichment-agent-cell__label--error" },
+              "Error"
+            ),
+            ...(chip ? [chip] : []),
+            runIconBtn("Rerun", "error"),
+
+          ]
+        ),
       ]
     );
   }
@@ -877,7 +1663,17 @@ const agentColumns = computed<DataTableColumns<EnrichmentTableRow>>(() => {
             { default: () => String(batchN) }
           ),
         ]),
-        
+        h(NButton, {
+          size: "tiny",
+          circle: true,
+          title: `Edit prompt for ${name}`,
+          class: 'enrichment-col-head__edit-prompt',
+          renderIcon: () => h(PencilIcon, { size: 14 }),
+          onClick: (e: MouseEvent) => {
+            e.stopPropagation();
+            openPromptDrawer(name);
+          },
+        }),
         h(
           NPopconfirm,
           {
@@ -955,6 +1751,16 @@ watch([page, pageSize], () => {
   checkedRowKeys.value = [];
   void fetchTable();
 });
+
+watch(
+  () => [rows.value.length, promptDrawerOpen.value, promptDrawerAgentName.value] as const,
+  () => {
+    if (!promptDrawerOpen.value) return;
+    const n = rows.value.length;
+    if (n === 0) return;
+    if (promptDrawerPreviewRowIdx.value >= n) promptDrawerPreviewRowIdx.value = 0;
+  }
+);
 
 onMounted(() => {
   void fetchAgents();
@@ -1104,6 +1910,14 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
             Enqueue selected
           </NButton>
           <NButton size="small" quaternary @click="openManageAgents">Manage agents</NButton>
+          <NButton
+            size="small"
+            quaternary
+            :disabled="!projectStore.selectedProjectId"
+            @click="openPromptSettingsModal"
+          >
+            Prompt settings
+          </NButton>
         </NSpace>
         <div class="toolbar-meta">
           <NSpace v-if="workerBatchBufferCount > 0 || agentBatchSizeSummary" size="small" align="center" wrap>
@@ -1166,7 +1980,143 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
       style="width: min(720px, 92vw)"
       :mask-closable="true"
     >
+      <div v-if="detailRunId || detailBatchId" class="detail-meta">
+        <span v-if="detailRunId" class="muted"
+          >Run: <code>{{ detailRunId }}</code></span
+        >
+        <span v-if="detailBatchId" class="muted"
+          >Batch: <code>{{ detailBatchId }}</code></span
+        >
+      </div>
       <pre class="detail-pre">{{ detailBody }}</pre>
+      <NSpace v-if="detailBatchId" style="margin-top: 12px">
+        <NButton size="small" type="primary" @click="openBatchDetailModal(detailBatchId!)">
+          View full batch
+        </NButton>
+      </NSpace>
+    </NModal>
+
+    <NModal
+      v-model:show="batchDetailOpen"
+      preset="card"
+      :title="batchDetailBatch ? `Batch · ${batchDetailBatch.agent_name}` : 'Batch detail'"
+      style="width: min(900px, 96vw)"
+      :mask-closable="true"
+    >
+      <NSpin :show="batchDetailLoading">
+        <NAlert v-if="batchDetailError" type="error" :show-icon="true">{{ batchDetailError }}</NAlert>
+        <template v-else-if="batchDetailBatch">
+          <div class="batch-detail-header">
+            <span
+              >Worker: <strong>{{ batchDetailBatch.worker_name }}</strong></span
+            >
+            <span class="muted">{{
+              batchDetailBatch.created_at?.replace("T", " ").slice(0, 19)
+            }}</span>
+            <span class="muted"><code>{{ batchDetailBatch.id }}</code></span>
+          </div>
+          <NDataTable
+            v-if="batchDetailRuns.length"
+            :columns="batchDetailColumns"
+            :data="batchDetailRuns"
+            :row-key="(r: EnrichmentBatchDetailRun) => r.id"
+            size="small"
+            striped
+            bordered
+            :scroll-x="720"
+          />
+          <NEmpty v-else description="No runs linked to this batch." />
+        </template>
+      </NSpin>
+    </NModal>
+
+    <NModal
+      v-model:show="batchRowDetailOpen"
+      preset="card"
+      :title="batchRowDetailTitle"
+      style="width: min(640px, 92vw)"
+      :mask-closable="true"
+    >
+      <pre class="detail-pre">{{ batchRowDetailBody }}</pre>
+    </NModal>
+
+    <NModal
+      v-model:show="promptSettingsOpen"
+      preset="card"
+      title="Enrichment prompt settings"
+      style="width: min(560px, 96vw)"
+      :mask-closable="true"
+      :segmented="{ content: true, footer: 'soft' }"
+    >
+      <NSpin :show="promptSettingsLoading">
+        <NSpace vertical :size="12" class="prompt-settings-body">
+          <p class="tab-hint">
+            Per-project overrides merge with global defaults. Prefix and suffix wrap the resolved agent
+            prompt (after <code v-text="'{{}}'" /> expansion), matching the worker. Optional
+            <code>prompt_profiles</code> lets each worker pick a named overlay via
+            <code>ENRICHMENT_SYSTEM_PROMPT_TYPE</code> in its env.
+          </p>
+          <NAlert v-if="promptSettingsError" type="error" :show-icon="true">
+            {{ promptSettingsError }}
+          </NAlert>
+          <div>
+            <div class="prompt-drawer-label">Global prefix (prepend)</div>
+            <NInput
+              v-model:value="promptSettingsPrefix"
+              type="textarea"
+              size="small"
+              :autosize="{ minRows: 2, maxRows: 8 }"
+              placeholder="Optional text before the resolved prompt"
+            />
+          </div>
+          <div>
+            <div class="prompt-drawer-label">Global suffix (append)</div>
+            <NInput
+              v-model:value="promptSettingsSuffix"
+              type="textarea"
+              size="small"
+              :autosize="{ minRows: 2, maxRows: 8 }"
+              placeholder="Optional text after the resolved prompt"
+            />
+          </div>
+          <div>
+            <div class="prompt-drawer-label"><code>companies_placeholder_config</code> (JSON)</div>
+            <NInput
+              v-model:value="promptSettingsConfigText"
+              type="textarea"
+              size="small"
+              :autosize="{ minRows: 8, maxRows: 22 }"
+              placeholder="{}"
+              class="prompt-settings-json"
+            />
+          </div>
+          <div>
+            <div class="prompt-drawer-label"><code>prompt_profiles</code> (JSON)</div>
+            <NInput
+              v-model:value="promptSettingsProfilesText"
+              type="textarea"
+              size="small"
+              :autosize="{ minRows: 4, maxRows: 14 }"
+              placeholder='e.g. { "gpu": { "global_prompt_prefix": "..." } }'
+              class="prompt-settings-json"
+            />
+          </div>
+        </NSpace>
+      </NSpin>
+      <template #footer>
+        <NSpace justify="end" size="small">
+          <NButton size="small" @click="promptSettingsOpen = false">Close</NButton>
+          <NButton
+            type="primary"
+            size="small"
+            :loading="promptSettingsSaving"
+            :disabled="promptSettingsLoading"
+            @click="savePromptSettings"
+          >
+            Save
+          </NButton>
+        </NSpace>
+      </template>
     </NModal>
 
     <NModal
@@ -1267,6 +2217,139 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
         </NSpace>
       </template>
     </NModal>
+
+    <NDrawer v-model:show="promptDrawerOpen" :width="560" placement="right" :trap-focus="false">
+      <NDrawerContent :title="`Edit prompt · ${promptDrawerAgentName}`" closable>
+        <div class="prompt-drawer-body">
+          <div class="prompt-drawer-field">
+            <div class="prompt-drawer-label">Prompt</div>
+            <div ref="promptTextareaWrapRef" class="prompt-drawer-textarea-wrap">
+              <textarea
+                ref="promptTextareaRef"
+                class="prompt-drawer-textarea"
+                rows="14"
+                :value="promptDrawerText"
+                placeholder="Use {{field}} or {{agent:OtherAgent.result_key}}"
+                @input="onPromptTextareaInput"
+                @keydown="onPromptTextareaKeydown"
+                @keyup="onPromptTextareaKeyup"
+                @click="updatePromptAutocomplete"
+                @scroll="updatePromptAutocompletePosition"
+                @blur="onPromptTextareaBlur"
+              />
+              <div
+                v-if="promptAutocompleteOpen && promptAutocompleteItems.length"
+                ref="promptAcListRef"
+                class="prompt-drawer-ac"
+                role="listbox"
+                :style="{
+                  top: `${promptAutocompletePos.top}px`,
+                  left: `${promptAutocompletePos.left}px`,
+                }"
+              >
+                <button
+                  v-for="(it, idx) in promptAutocompleteItems"
+                  :key="`${it.insert}-${idx}`"
+                  type="button"
+                  class="prompt-drawer-ac__item"
+                  :class="{ 'prompt-drawer-ac__item--active': idx === promptAutocompleteActive }"
+                  role="option"
+                  :aria-selected="idx === promptAutocompleteActive"
+                  @mousedown.prevent="applyPromptAutocompleteChoice(idx)"
+                >
+                  <code class="prompt-drawer-ac__insert" v-text="'{{' + it.insert + '}}'" />
+                  <span class="prompt-drawer-ac__label">{{ it.label }}</span>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="prompt-drawer-preview-toggle">
+            <NSwitch v-model:value="promptDrawerPreviewOpen" size="small" />
+            <span class="prompt-drawer-preview-toggle__text">Preview resolved prompt</span>
+          </div>
+
+          <div v-show="promptDrawerPreviewOpen" class="prompt-drawer-preview">
+            <NEmpty v-if="rows.length === 0" description="No rows on this page to preview." size="small" />
+            <template v-else>
+              <NSelect
+                v-if="promptDrawerBatchSize <= 1"
+                v-model:value="promptDrawerPreviewRowIdx"
+                :options="promptPreviewRowOptions"
+                filterable
+                size="small"
+                class="prompt-drawer-preview__select"
+              />
+              <p v-else class="prompt-drawer-preview__hint">
+                Batch size {{ promptDrawerBatchSize }}: preview uses the first
+                {{ promptBatchPreviewRowCount }} row(s) on this page. CSV for
+                <code>{{ PROMPT_TOKEN_COMPANIES }}</code> /
+                <code>{{ PROMPT_TOKEN_CONTACTS }}</code> follows the same rules as the worker
+                (agent entity type + tab). Cell values are from this table, not
+                <code>companies_placeholder_config</code> — use Worker-aligned (server) for assembled rows.
+              </p>
+              <div class="prompt-drawer-preview-blocks" :title="promptDrawerPreviewPlainTitle || undefined">
+                <template v-for="(block, bi) in promptPreviewBlocks" :key="bi">
+                  <div v-if="block.heading" class="prompt-drawer-preview__heading">{{ block.heading }}</div>
+                  <pre class="prompt-drawer-preview-pre"><template v-for="(seg, si) in block.segments" :key="si"><span v-if="seg.resolved" class="prompt-drawer-preview-ok">{{ seg.text }}</span><span v-else class="prompt-drawer-preview-bad">{{ seg.text }}</span></template></pre>
+                </template>
+              </div>
+              <div v-if="activeTab === 'company'" class="prompt-drawer-worker-preview">
+                <div class="prompt-drawer-worker-preview__row">
+                  <span class="prompt-drawer-worker-preview__label">Worker-aligned (server)</span>
+                  <NSpace size="small" align="center" wrap>
+                    <NInput
+                      v-model:value="serverPromptPreviewProfile"
+                      size="tiny"
+                      placeholder="Profile (ENV: ENRICHMENT_SYSTEM_PROMPT_TYPE)"
+                      style="min-width: 200px; max-width: 280px"
+                      clearable
+                    />
+                    <NButton
+                      size="tiny"
+                      :loading="serverPromptPreviewLoading"
+                      :disabled="rows.length === 0"
+                      @click="fetchServerPromptPreview"
+                    >
+                      Load
+                    </NButton>
+                  </NSpace>
+                </div>
+                <p class="prompt-drawer-worker-preview__hint">
+                  Same pipeline as the worker (assembly + prefix/suffix + optional
+                  <code>prompt_profiles</code> overlay) for the first
+                  {{ Math.min(promptDrawerBatchSize, rows.length) }} company id(s) on this page.
+                </p>
+                <NAlert v-if="serverPromptPreviewError" type="error" size="small" :show-icon="true">
+                  {{ serverPromptPreviewError }}
+                </NAlert>
+                <pre v-if="serverPromptPreviewText" class="prompt-drawer-preview-pre prompt-drawer-worker-preview__pre">{{
+                  serverPromptPreviewText
+                }}</pre>
+              </div>
+            </template>
+          </div>
+        </div>
+        <template #footer>
+          <div class="prompt-drawer-footer">
+            <NSpace justify="end" size="small">
+              <NButton size="small" :disabled="promptDrawerSaving" @click="promptDrawerOpen = false">
+                Cancel
+              </NButton>
+              <NButton
+                type="primary"
+                size="small"
+                :loading="promptDrawerSaving"
+                :disabled="!promptDrawerAgentName.trim()"
+                @click="savePromptDrawer"
+              >
+                Save
+              </NButton>
+            </NSpace>
+          </div>
+        </template>
+      </NDrawerContent>
+    </NDrawer>
   </div>
 </template>
 
@@ -1382,6 +2465,10 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
   padding: 0 6px;
   line-height: 1.35;
 }
+.enrichment-page :deep(.enrichment-col-head__edit-prompt) {
+  margin-left: auto;
+  margin-right: 4px;
+}
 .enrichment-page :deep(.enrichment-agent-cell--queued) {
   flex-direction: row;
   flex-wrap: wrap;
@@ -1433,12 +2520,27 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
   flex-shrink: 0;
   max-width: min(100%, 10rem);
 }
+.enrichment-page :deep(.enrichment-agent-cell__batch-tag) {
+  margin-right: auto;
+  font-size: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New",
+    monospace;
+  letter-spacing: 0.02em;
+  padding: 0 0.35rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--n-th-icon-color) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--n-border-color) 45%, transparent);
+  cursor: pointer;
+  flex-shrink: 0;
+  line-height: 1.45;
+  user-select: none;
+}
 .enrichment-page :deep(.enrichment-agent-cell__main-row) {
   display: flex;
   flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: 8px;
   width: 100%;
   min-width: 0;
@@ -1448,8 +2550,8 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--n-loading-color) 28%, transparent);
 }
 .enrichment-page :deep(.enrichment-agent-cell--failed) {
-  background: color-mix(in srgb, var(--n-border-color-modal) 35%, transparent);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--n-border-color-popover) 55%, transparent);
+  background: color-mix(in srgb, #e88080 20%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #e88080 55%, transparent);
 }
 .enrichment-page :deep(.enrichment-agent-cell__row) {
   display: inline-flex;
@@ -1475,6 +2577,204 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
   line-height: 1.45;
   max-height: 60vh;
   overflow: auto;
+}
+
+.detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.batch-detail-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  align-items: baseline;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.prompt-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.prompt-drawer-field {
+  width: 100%;
+}
+.prompt-drawer-label {
+  font-size: 0.75rem;
+  opacity: 0.75;
+  margin-bottom: 0.35rem;
+}
+.prompt-drawer-textarea-wrap {
+  position: relative;
+  z-index: 0;
+}
+.prompt-drawer-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 280px;
+  padding: 0.5rem 0.65rem;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  border-radius: var(--n-border-radius);
+  border: 1px solid var(--n-border-color);
+  background: var(--n-color-modal);
+  color: var(--n-text-color);
+  resize: vertical;
+}
+.prompt-drawer-textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--n-primary-color) 35%, transparent);
+  border-color: var(--n-primary-color);
+}
+.prompt-drawer-ac {
+  position: absolute;
+  margin: 0;
+  z-index: 20;
+  min-width: min(100%, 200px);
+  max-width: min(100%, 320px);
+  width: max-content;
+  max-height: 220px;
+  overflow: auto;
+  border-radius: var(--n-border-radius);
+  border: 1px solid var(--n-border-color);
+  background: var(--n-color-popover);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+}
+.prompt-drawer-ac__item:first-child {
+  border-top-left-radius: calc(var(--n-border-radius) - 1px);
+  border-top-right-radius: calc(var(--n-border-radius) - 1px);
+}
+.prompt-drawer-ac__item:last-child {
+  border-bottom-left-radius: calc(var(--n-border-radius) - 1px);
+  border-bottom-right-radius: calc(var(--n-border-radius) - 1px);
+}
+.prompt-drawer-ac__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 0.4rem 0.65rem;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  color: var(--n-text-color);
+}
+.prompt-drawer-ac__item:hover:not(.prompt-drawer-ac__item--active) {
+  background: color-mix(in srgb, var(--n-primary-color) 10%, transparent);
+}
+.prompt-drawer-ac__item--active {
+  background: color-mix(in srgb, var(--n-primary-color) 24%, transparent);
+  box-shadow: inset 3px 0 0 var(--n-primary-color);
+}
+.prompt-drawer-ac__item--active .prompt-drawer-ac__insert {
+  color: var(--n-primary-color);
+  font-weight: 600;
+}
+.prompt-drawer-ac__insert {
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+.prompt-drawer-ac__label {
+  font-size: 0.7rem;
+  opacity: 0.75;
+}
+.prompt-drawer-preview-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.prompt-drawer-preview-toggle__text {
+  font-size: 0.8125rem;
+}
+.prompt-drawer-preview {
+  padding-top: 0.25rem;
+}
+.prompt-drawer-preview__select {
+  width: 100%;
+  margin-bottom: 0.5rem;
+}
+.prompt-drawer-preview__hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+.prompt-drawer-preview-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.prompt-drawer-preview__heading {
+  font-size: 0.75rem;
+  font-weight: 600;
+  opacity: 0.85;
+  margin-bottom: 0.25rem;
+}
+.prompt-drawer-preview-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  padding: 0.5rem 0.65rem;
+  border-radius: var(--n-border-radius);
+  border: 1px solid var(--n-border-color);
+  background: color-mix(in srgb, var(--n-border-color) 18%, transparent);
+  max-height: 240px;
+  overflow: auto;
+}
+.prompt-drawer-preview-ok {
+  color: var(--n-text-color);
+}
+.prompt-drawer-preview-bad {
+  color: var(--n-error-color, #d03050);
+  font-weight: 600;
+}
+.prompt-drawer-worker-preview {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--n-border-color);
+}
+.prompt-drawer-worker-preview__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.35rem;
+}
+.prompt-drawer-worker-preview__label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  opacity: 0.85;
+}
+.prompt-drawer-worker-preview__hint {
+  margin: 0 0 0.5rem;
+  font-size: 0.7rem;
+  opacity: 0.65;
+  line-height: 1.4;
+}
+.prompt-drawer-worker-preview__pre {
+  max-height: 200px;
+}
+.prompt-settings-body {
+  width: 100%;
+}
+.prompt-settings-json {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.75rem;
+}
+.prompt-drawer-footer {
+  width: 100%;
+  padding-top: 0.25rem;
 }
 </style>
 
