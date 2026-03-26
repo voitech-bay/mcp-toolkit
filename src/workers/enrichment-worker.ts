@@ -497,6 +497,21 @@ async function affirmQueueWorkerAttribution(
 }
 
 /**
+ * LLMs sometimes put the company UUID in `contact_id`. For company queue tasks, strip
+ * `contact_id` from stored JSON; the canonical id is `enrichment_agent_results.company_id`.
+ */
+function sanitizeAgentResultForTask(
+  task: EnrichmentQueueTaskRow,
+  agentResult: Record<string, unknown>
+): Record<string, unknown> {
+  const out = { ...agentResult };
+  if (task.company_id) {
+    delete out.contact_id;
+  }
+  return out;
+}
+
+/**
  * Write latest result for (project, agent, entity). Avoids `.upsert(..., onConflict)` because
  * partial unique indexes are not always valid ON CONFLICT targets for PostgREST, and some DBs
  * may lack those indexes until migrations are applied.
@@ -510,7 +525,7 @@ async function upsertEnrichmentAgentResult(
   agentResult: Record<string, unknown>
 ): Promise<{ error: string | null }> {
   const agent_result = {
-    ...agentResult,
+    ...sanitizeAgentResultForTask(task, agentResult),
     worker_name: workerName,
     queue_task_id: task.id,
     run_id: runId,
