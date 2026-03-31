@@ -9,17 +9,24 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   getSupabase,
   getLatestCreatedAt,
+  getLatestUpdatedAt,
   getProjectById,
   getActiveSyncRun,
   CONTACTS_TABLE,
   LINKEDIN_MESSAGES_TABLE,
   SENDERS_TABLE,
-  getCompanyIdsByDomains,
-  ensureCompanies,
+  FLOWS_TABLE,
+  FLOW_LEADS_TABLE,
+  CONTACT_LISTS_TABLE,
+  COMPANIES_TABLE,
   createSyncRun,
   updateSyncRun,
   insertSyncLogEntry,
   type SyncRunStatus,
+  getCollectedAnalyticsDays,
+  replaceAnalyticsSnapshotsForDay,
+  getFlowsForProject,
+  addCompaniesToProject,
 } from "./supabase.js";
 import {
   CONTACTS_COLUMNS,
@@ -27,18 +34,30 @@ import {
   LINKEDIN_MESSAGES_COLUMNS,
   LINKEDIN_MESSAGES_SYNC_OMIT_UNLESS_IN_API,
   SENDERS_COLUMNS,
+  FLOWS_COLUMNS,
+  FLOW_LEADS_COLUMNS,
+  CONTACT_LISTS_COLUMNS,
+  mapCompanyForSupabase,
   pickColumns,
 } from "./supabase-schema.js";
 import {
   fetchContactsIncremental,
   fetchLinkedInMessagesIncremental,
   fetchSendersIncremental,
+  fetchFlowsIncremental,
+  fetchFlowLeadsIncremental,
+  fetchContactListsIncremental,
+  fetchCompaniesIncremental,
+  fetchLeadsMetricsForRange,
+  dayBoundsUtc,
+  enumerateDatesInclusive,
   type ApiCredentials,
   type FetchLogger,
 } from "./source-api.js";
 import { syncEventBus } from "./sync-event-bus.js";
 
 const CHUNK_SIZE = 100;
+const METRICS_REQUEST_DELAY_MS = 800;
 const LOG_PREFIX = "[sync]";
 const UPSERT_MAX_RETRIES = 3;
 const UPSERT_RETRY_DELAY_MS = 1500;
@@ -110,6 +129,9 @@ function createSyncLogger(
 const CONTACTS_ALLOWED = new Set<string>(CONTACTS_COLUMNS);
 const LINKEDIN_MESSAGES_ALLOWED = new Set<string>(LINKEDIN_MESSAGES_COLUMNS);
 const SENDERS_ALLOWED = new Set<string>(SENDERS_COLUMNS);
+const FLOWS_ALLOWED = new Set<string>(FLOWS_COLUMNS);
+const FLOW_LEADS_ALLOWED = new Set<string>(FLOW_LEADS_COLUMNS);
+const CONTACT_LISTS_ALLOWED = new Set<string>(CONTACT_LISTS_COLUMNS);
 
 /** Whitelist to Contacts columns; omit backfilled columns unless present in API row. */
 function mapContactForSupabase(row: Record<string, unknown>): Record<string, unknown> {
@@ -144,67 +166,31 @@ function mapSenderForSupabase(row: Record<string, unknown>): Record<string, unkn
   return pickColumns(row, SENDERS_ALLOWED);
 }
 
-/** Normalize domain: lowercase, trim. Return null if empty or invalid. */
-function normalizeDomain(domain: unknown): string | null {
-  if (domain == null) return null;
-  const s = typeof domain === "string" ? domain.trim().toLowerCase() : String(domain).trim().toLowerCase();
-  return s.length > 0 ? s : null;
+function mapFlowForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+  const base = { ...row };
+  if (base.uuid == null && base.id != null) {
+    base.uuid = base.id;
+  }
+  delete base.id;
+  return pickColumns(base, FLOWS_ALLOWED);
 }
 
-/** Derive domain from contact: work_email_domain, or from work_email (part after @). */
-function contactDomain(contact: Record<string, unknown>): string | null {
-  const fromDomain = normalizeDomain(contact.work_email_domain);
-  if (fromDomain) return fromDomain;
-  const email = contact.work_email;
-  if (typeof email !== "string" || !email.includes("@")) return null;
-  const after = email.split("@")[1];
-  return normalizeDomain(after ?? "");
+function mapContactListForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+  const base = { ...row };
+  if (base.uuid == null && base.id != null) {
+    base.uuid = base.id;
+  }
+  delete base.id;
+  return pickColumns(base, CONTACT_LISTS_ALLOWED);
 }
 
-/**
- * Resolve company_id for each contact: ensure a company row exists per unique domain
- * (from work_email_domain or work_email), then set contact.company_id. Mutates rows in place.
- */
-async function resolveContactCompanyIds(
-  client: SupabaseClient,
-  contacts: Record<string, unknown>[],
-  logger: SyncLogger
-): Promise<{ error: string | null }> {
-  const domainToMeta = new Map<string, { name?: string }>();
-  for (const c of contacts) {
-    const domain = contactDomain(c);
-    if (!domain) continue;
-    if (!domainToMeta.has(domain)) {
-      domainToMeta.set(domain, {
-        name: typeof c.company_name === "string" ? c.company_name : undefined,
-      });
-    }
+function mapFlowLeadForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+  const base = { ...row };
+  if (base.uuid == null && base.id != null) {
+    base.uuid = base.id;
   }
-  const domains = [...domainToMeta.keys()];
-  if (domains.length === 0) return { error: null };
-
-  const { map: existing, error: getErr } = await getCompanyIdsByDomains(client, domains);
-  if (getErr) return { error: getErr };
-
-  const missing = domains.filter((d) => !existing[d]);
-  if (missing.length > 0) {
-    await logger.log("companies: ensuring", { count: missing.length, domains: missing.slice(0, 10) });
-    const toInsert = missing.map((d) => ({
-      domain: d,
-      name: domainToMeta.get(d)?.name ?? d,
-      linkedin_url: null,
-    }));
-    const { map: inserted, error: ensureErr } = await ensureCompanies(client, toInsert);
-    if (ensureErr) return { error: ensureErr };
-    for (const [d, id] of Object.entries(inserted)) existing[d] = id;
-  }
-
-  for (const c of contacts) {
-    const domain = contactDomain(c);
-    const id = domain ? existing[domain] : null;
-    if (id) c.company_id = id;
-  }
-  return { error: null };
+  delete base.id;
+  return pickColumns(base, FLOW_LEADS_ALLOWED);
 }
 
 /** Set project_id on every row. Mutates in place. */
@@ -293,9 +279,13 @@ async function upsertChunk(
 }
 
 export interface SyncResult {
+  companies: { fetched: number; upserted: number; error: string | null };
   contacts: { fetched: number; upserted: number; error: string | null };
   linkedin_messages: { fetched: number; upserted: number; error: string | null };
   senders: { fetched: number; upserted: number; error: string | null };
+  contact_lists: { fetched: number; upserted: number; error: string | null };
+  flows: { fetched: number; upserted: number; error: string | null };
+  flow_leads: { fetched: number; upserted: number; error: string | null };
   error: string | null;
 }
 
@@ -310,12 +300,27 @@ async function latestCreatedAt(
   return latest;
 }
 
+/** Resolve latest updated_at for a table (Flows); on error return null. */
+async function latestUpdatedAt(
+  client: SupabaseClient,
+  table: string,
+  projectId?: string | null
+): Promise<string | null> {
+  const { latest, error } = await getLatestUpdatedAt(client, table, projectId);
+  if (error) return null;
+  return latest;
+}
+
 export async function syncSupabaseFromSource(projectId?: string, existingRunId?: string): Promise<SyncResult> {
   const client = getSupabase();
   const result: SyncResult = {
+    companies: { fetched: 0, upserted: 0, error: null },
     contacts: { fetched: 0, upserted: 0, error: null },
     linkedin_messages: { fetched: 0, upserted: 0, error: null },
     senders: { fetched: 0, upserted: 0, error: null },
+    contact_lists: { fetched: 0, upserted: 0, error: null },
+    flows: { fetched: 0, upserted: 0, error: null },
+    flow_leads: { fetched: 0, upserted: 0, error: null },
     error: null,
   };
 
@@ -369,21 +374,103 @@ export async function syncSupabaseFromSource(projectId?: string, existingRunId?:
   const rlsHint =
     " Use SUPABASE_SERVICE_ROLE_KEY (not anon key) so sync bypasses Row Level Security.";
 
-  // Resolve latest created_at per table, filtered by project_id so each project syncs independently
-  const [contactsLatest, messagesLatest, sendersLatest] = await Promise.all([
+  // Resolve watermark timestamps per table. Companies use updated_at so both new and
+  // modified company rows are picked up on each incremental sync.
+  const [
+    companiesLatest,
+    contactsLatest,
+    messagesLatest,
+    sendersLatest,
+    contactListsLatestUpdated,
+    flowsLatestUpdated,
+    flowLeadsLatest,
+  ] = await Promise.all([
+    latestUpdatedAt(client, COMPANIES_TABLE, null),
     latestCreatedAt(client, CONTACTS_TABLE, projectId),
     latestCreatedAt(client, LINKEDIN_MESSAGES_TABLE, projectId),
     latestCreatedAt(client, SENDERS_TABLE, projectId),
+    latestUpdatedAt(client, CONTACT_LISTS_TABLE, projectId),
+    latestUpdatedAt(client, FLOWS_TABLE, projectId),
+    latestCreatedAt(client, FLOW_LEADS_TABLE, projectId),
   ]);
   await logger.log("cursors resolved", {
+    companiesSinceUpdated: companiesLatest ?? "null",
     contactsSince: contactsLatest ?? "null",
     messagesSince: messagesLatest ?? "null",
     sendersSince: sendersLatest ?? "null",
+    contactListsSinceUpdated: contactListsLatestUpdated ?? "null",
+    flowsSinceUpdated: flowsLatestUpdated ?? "null",
+    flowLeadsSince: flowLeadsLatest ?? "null",
   });
+
+  const fetchLog: FetchLogger = (msg, data) => logger.log(msg, data);
+
+  // --- Companies (incremental, global — no project_id) ---
+  await logger.log("companies: fetching from source");
+  const companiesRes = await fetchCompaniesIncremental(companiesLatest, credentials, fetchLog);
+  result.companies.fetched = companiesRes.data.length;
+  if (companiesRes.error) {
+    result.companies.error = companiesRes.error;
+    await logger.logError("companies: fetch error", { error: companiesRes.error, since: companiesLatest ?? "full" });
+  } else {
+    await logger.log("companies: fetched", { count: result.companies.fetched });
+    const mappedCompanies = companiesRes.data.map(mapCompanyForSupabase);
+    const companyChunkCount = Math.ceil(mappedCompanies.length / CHUNK_SIZE);
+    let companyErrors: string[] = [];
+    for (let i = 0; i < mappedCompanies.length; i += CHUNK_SIZE) {
+      const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
+      const chunk = mappedCompanies.slice(i, i + CHUNK_SIZE);
+      const upsertResult = await upsertChunk(client, COMPANIES_TABLE, chunk, "id");
+      result.companies.upserted += upsertResult.inserted;
+      if (upsertResult.inserted > 0) {
+        await logger.logUpsert(COMPANIES_TABLE, upsertResult.inserted);
+      }
+      const failedCompanyIds = new Set(
+        upsertResult.failed.map((f) => f.row.id as string).filter(Boolean)
+      );
+      const companyIdsToLink = chunk
+        .map((r) => r.id as string)
+        .filter((id) => id && !failedCompanyIds.has(id));
+      if (projectId && companyIdsToLink.length > 0) {
+        const { error: pcError } = await addCompaniesToProject(client, projectId, companyIdsToLink);
+        if (pcError) {
+          await logger.logError("companies: project_companies link error", {
+            error: pcError,
+            chunkIndex: chunkIdx,
+            companyCount: companyIdsToLink.length,
+          });
+        }
+      }
+      if (upsertResult.error) {
+        const errMsg = upsertResult.error + (upsertResult.error.includes("row-level security") ? rlsHint : "");
+        companyErrors.push(`chunk ${chunkIdx}/${companyChunkCount}: ${errMsg}`);
+        await logger.logError("companies: upsert error", {
+          error: errMsg,
+          chunkIndex: chunkIdx,
+          totalChunks: companyChunkCount,
+          chunkSize: chunk.length,
+          rowsInserted: upsertResult.inserted,
+          rowsFailed: upsertResult.failed.length,
+        });
+        for (const f of upsertResult.failed) {
+          await logger.logError("companies: failed row", {
+            error: f.error,
+            id: f.row.id as string ?? null,
+            name: f.row.name as string ?? null,
+            created_at: f.row.created_at as string ?? null,
+          });
+        }
+        continue;
+      }
+    }
+    if (companyErrors.length > 0) {
+      result.companies.error = `${companyErrors.length} chunk(s) failed: ${companyErrors.join("; ")}`;
+    }
+    await logger.log("companies: upserted", { count: result.companies.upserted });
+  }
 
   // --- Contacts (incremental: only rows with created_at > contactsLatest) ---
   await logger.log("contacts: fetching from source");
-  const fetchLog: FetchLogger = (msg, data) => logger.log(msg, data);
   const contactsRes = await fetchContactsIncremental(contactsLatest, credentials, fetchLog);
   result.contacts.fetched = contactsRes.data.length;
   if (contactsRes.error) {
@@ -398,17 +485,6 @@ export async function syncSupabaseFromSource(projectId?: string, existingRunId?:
     for (let i = 0; i < mappedContacts.length; i += CHUNK_SIZE) {
       const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
       const chunk = mappedContacts.slice(i, i + CHUNK_SIZE);
-      const resolveResult = await resolveContactCompanyIds(client, chunk, logger);
-      if (resolveResult.error) {
-        contactErrors.push(`chunk ${chunkIdx}: company_id resolve failed: ${resolveResult.error}`);
-        await logger.logError("contacts: resolve company_id error", {
-          error: resolveResult.error,
-          chunkIndex: chunkIdx,
-          totalChunks: contactChunkCount,
-          chunkSize: chunk.length,
-        });
-        continue;
-      }
       const upsertResult = await upsertChunk(client, CONTACTS_TABLE, chunk, "uuid");
       result.contacts.upserted += upsertResult.inserted;
       if (upsertResult.inserted > 0) {
@@ -432,7 +508,7 @@ export async function syncSupabaseFromSource(projectId?: string, existingRunId?:
             name: f.row.name as string ?? null,
             created_at: f.row.created_at as string ?? null,
             project_id: f.row.project_id as string ?? null,
-            company_id: f.row.company_id as string ?? null,
+            company_uuid: f.row.company_uuid as string ?? null,
             rowKeys: Object.keys(f.row),
           });
         }
@@ -557,14 +633,177 @@ export async function syncSupabaseFromSource(projectId?: string, existingRunId?:
     await logger.log("senders: upserted", { count: result.senders.upserted });
   }
 
+  // --- Contact lists (GET /leads/api/lists, incremental by updated_at) ---
+  await logger.log("contact_lists: fetching from source");
+  const contactListsRes = await fetchContactListsIncremental(contactListsLatestUpdated, credentials, fetchLog);
+  result.contact_lists.fetched = contactListsRes.data.length;
+  if (contactListsRes.error) {
+    result.contact_lists.error = contactListsRes.error;
+    await logger.logError("contact_lists: fetch error", {
+      error: contactListsRes.error,
+      sinceUpdated: contactListsLatestUpdated ?? "full",
+    });
+  } else {
+    await logger.log("contact_lists: fetched", { count: result.contact_lists.fetched });
+    const mappedLists = contactListsRes.data.map(mapContactListForSupabase);
+    if (projectId) injectProjectId(mappedLists, projectId);
+    const listsChunkCount = Math.ceil(mappedLists.length / CHUNK_SIZE);
+    let listsErrors: string[] = [];
+    for (let i = 0; i < mappedLists.length; i += CHUNK_SIZE) {
+      const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
+      const chunk = mappedLists.slice(i, i + CHUNK_SIZE);
+      const upsertResult = await upsertChunk(client, CONTACT_LISTS_TABLE, chunk, "uuid");
+      result.contact_lists.upserted += upsertResult.inserted;
+      if (upsertResult.inserted > 0) {
+        await logger.logUpsert(CONTACT_LISTS_TABLE, upsertResult.inserted);
+      }
+      if (upsertResult.error) {
+        const errMsg = upsertResult.error + (upsertResult.error.includes("row-level security") ? rlsHint : "");
+        listsErrors.push(`chunk ${chunkIdx}/${listsChunkCount}: ${errMsg}`);
+        await logger.logError("contact_lists: upsert error", {
+          error: errMsg,
+          chunkIndex: chunkIdx,
+          totalChunks: listsChunkCount,
+          chunkSize: chunk.length,
+          rowsInserted: upsertResult.inserted,
+          rowsFailed: upsertResult.failed.length,
+        });
+        for (const f of upsertResult.failed) {
+          await logger.logError("contact_lists: failed row", {
+            error: f.error,
+            uuid: f.row.uuid as string ?? null,
+            name: f.row.name as string ?? null,
+            updated_at: f.row.updated_at as string ?? null,
+            project_id: f.row.project_id as string ?? null,
+          });
+        }
+        continue;
+      }
+    }
+    if (listsErrors.length > 0) {
+      result.contact_lists.error = `${listsErrors.length} chunk(s) failed: ${listsErrors.join("; ")}`;
+    }
+    await logger.log("contact_lists: upserted", { count: result.contact_lists.upserted });
+  }
+
+  // --- Flows (incremental by updated_at) ---
+  await logger.log("flows: fetching from source");
+  const flowsRes = await fetchFlowsIncremental(flowsLatestUpdated, credentials, fetchLog);
+  result.flows.fetched = flowsRes.data.length;
+  if (flowsRes.error) {
+    result.flows.error = flowsRes.error;
+    await logger.logError("flows: fetch error", { error: flowsRes.error, sinceUpdated: flowsLatestUpdated ?? "full" });
+  } else {
+    await logger.log("flows: fetched", { count: result.flows.fetched });
+    const mappedFlows = flowsRes.data.map(mapFlowForSupabase);
+    if (projectId) injectProjectId(mappedFlows, projectId);
+    const flowsChunkCount = Math.ceil(mappedFlows.length / CHUNK_SIZE);
+    let flowsErrors: string[] = [];
+    for (let i = 0; i < mappedFlows.length; i += CHUNK_SIZE) {
+      const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
+      const chunk = mappedFlows.slice(i, i + CHUNK_SIZE);
+      const upsertResult = await upsertChunk(client, FLOWS_TABLE, chunk, "uuid");
+      result.flows.upserted += upsertResult.inserted;
+      if (upsertResult.inserted > 0) {
+        await logger.logUpsert(FLOWS_TABLE, upsertResult.inserted);
+      }
+      if (upsertResult.error) {
+        const errMsg = upsertResult.error + (upsertResult.error.includes("row-level security") ? rlsHint : "");
+        flowsErrors.push(`chunk ${chunkIdx}/${flowsChunkCount}: ${errMsg}`);
+        await logger.logError("flows: upsert error", {
+          error: errMsg,
+          chunkIndex: chunkIdx,
+          totalChunks: flowsChunkCount,
+          chunkSize: chunk.length,
+          rowsInserted: upsertResult.inserted,
+          rowsFailed: upsertResult.failed.length,
+        });
+        for (const f of upsertResult.failed) {
+          await logger.logError("flows: failed row", {
+            error: f.error,
+            uuid: f.row.uuid as string ?? null,
+            name: f.row.name as string ?? null,
+            updated_at: f.row.updated_at as string ?? null,
+            project_id: f.row.project_id as string ?? null,
+          });
+        }
+        continue;
+      }
+    }
+    if (flowsErrors.length > 0) {
+      result.flows.error = `${flowsErrors.length} chunk(s) failed: ${flowsErrors.join("; ")}`;
+    }
+    await logger.log("flows: upserted", { count: result.flows.upserted });
+  }
+
+  // --- Flow leads (incremental by created_at) ---
+  await logger.log("flow_leads: fetching from source");
+  const flowLeadsRes = await fetchFlowLeadsIncremental(flowLeadsLatest, credentials, fetchLog);
+  result.flow_leads.fetched = flowLeadsRes.data.length;
+  if (flowLeadsRes.error) {
+    result.flow_leads.error = flowLeadsRes.error;
+    await logger.logError("flow_leads: fetch error", { error: flowLeadsRes.error, since: flowLeadsLatest ?? "full" });
+  } else {
+    await logger.log("flow_leads: fetched", { count: result.flow_leads.fetched });
+    const mappedFlowLeads = flowLeadsRes.data.map(mapFlowLeadForSupabase);
+    if (projectId) injectProjectId(mappedFlowLeads, projectId);
+    const flChunkCount = Math.ceil(mappedFlowLeads.length / CHUNK_SIZE);
+    let flErrors: string[] = [];
+    for (let i = 0; i < mappedFlowLeads.length; i += CHUNK_SIZE) {
+      const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
+      const chunk = mappedFlowLeads.slice(i, i + CHUNK_SIZE);
+      const upsertResult = await upsertChunk(client, FLOW_LEADS_TABLE, chunk, "uuid");
+      result.flow_leads.upserted += upsertResult.inserted;
+      if (upsertResult.inserted > 0) {
+        await logger.logUpsert(FLOW_LEADS_TABLE, upsertResult.inserted);
+      }
+      if (upsertResult.error) {
+        const errMsg = upsertResult.error + (upsertResult.error.includes("row-level security") ? rlsHint : "");
+        flErrors.push(`chunk ${chunkIdx}/${flChunkCount}: ${errMsg}`);
+        await logger.logError("flow_leads: upsert error", {
+          error: errMsg,
+          chunkIndex: chunkIdx,
+          totalChunks: flChunkCount,
+          chunkSize: chunk.length,
+          rowsInserted: upsertResult.inserted,
+          rowsFailed: upsertResult.failed.length,
+        });
+        for (const f of upsertResult.failed) {
+          await logger.logError("flow_leads: failed row", {
+            error: f.error,
+            uuid: f.row.uuid as string ?? null,
+            flow_uuid: f.row.flow_uuid as string ?? null,
+            lead_uuid: f.row.lead_uuid as string ?? null,
+            created_at: f.row.created_at as string ?? null,
+            project_id: f.row.project_id as string ?? null,
+          });
+        }
+        continue;
+      }
+    }
+    if (flErrors.length > 0) {
+      result.flow_leads.error = `${flErrors.length} chunk(s) failed: ${flErrors.join("; ")}`;
+    }
+    await logger.log("flow_leads: upserted", { count: result.flow_leads.upserted });
+  }
+
   const hasError =
     result.error != null ||
+    result.companies.error != null ||
     result.contacts.error != null ||
     result.linkedin_messages.error != null ||
-    result.senders.error != null;
+    result.senders.error != null ||
+    result.contact_lists.error != null ||
+    result.flows.error != null ||
+    result.flow_leads.error != null;
   const status: SyncRunStatus = result.error != null ? "error" : hasError ? "partial" : "success";
   await logger.log("sync finished", {
     ok: !hasError,
+    companies: {
+      fetched: result.companies.fetched,
+      upserted: result.companies.upserted,
+      error: result.companies.error != null,
+    },
     contacts: {
       fetched: result.contacts.fetched,
       upserted: result.contacts.upserted,
@@ -580,6 +819,21 @@ export async function syncSupabaseFromSource(projectId?: string, existingRunId?:
       upserted: result.senders.upserted,
       error: result.senders.error != null,
     },
+    contact_lists: {
+      fetched: result.contact_lists.fetched,
+      upserted: result.contact_lists.upserted,
+      error: result.contact_lists.error != null,
+    },
+    flows: {
+      fetched: result.flows.fetched,
+      upserted: result.flows.upserted,
+      error: result.flows.error != null,
+    },
+    flow_leads: {
+      fetched: result.flow_leads.fetched,
+      upserted: result.flow_leads.upserted,
+      error: result.flow_leads.error != null,
+    },
   });
 
   if (runId) {
@@ -591,4 +845,178 @@ export async function syncSupabaseFromSource(projectId?: string, existingRunId?:
     syncEventBus.emitComplete(runId, result as unknown as Record<string, unknown>);
   }
   return result;
+}
+
+export interface AnalyticsSyncResult {
+  daysRequested: string[];
+  daysSkippedAlreadyCollected: string[];
+  daysSynced: string[];
+  rowsInserted: number;
+  /** Successful per-flow metrics fetches (sender_profiles with `flows` filter) across the run. */
+  flowsProcessed: number;
+  /** Per-day or step errors (partial sync). */
+  errors: string[];
+  error: string | null;
+}
+
+/**
+ * For each calendar day in [dateFrom, dateTo] that has no AnalyticsSnapshots yet, for each flow
+ * eligible that day (created_at date ≤ day), call POST /leads/api/leads/metrics with
+ * group_by sender_profiles and flows: [flow.uuid], tag rows with flow_uuid, and store.
+ * Does not use the main sync run lock.
+ */
+export async function syncAnalyticsSnapshots(
+  projectId: string,
+  dateFrom: string,
+  dateTo: string
+): Promise<AnalyticsSyncResult> {
+  const empty = (): AnalyticsSyncResult => ({
+    daysRequested: [],
+    daysSkippedAlreadyCollected: [],
+    daysSynced: [],
+    rowsInserted: 0,
+    flowsProcessed: 0,
+    errors: [],
+    error: null,
+  });
+
+  const client = getSupabase();
+  if (!client) {
+    return {
+      ...empty(),
+      error: "Supabase is not configured (SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY)",
+    };
+  }
+
+  const range = enumerateDatesInclusive(dateFrom, dateTo);
+  if (!range || range.length === 0) {
+    return { ...empty(), error: "Invalid date range (use YYYY-MM-DD)" };
+  }
+
+  const { data: project, error: projectError } = await getProjectById(client, projectId);
+  if (projectError) {
+    return { ...empty(), error: `Failed to load project: ${projectError}` };
+  }
+  if (!project) {
+    return { ...empty(), error: `Project not found: ${projectId}` };
+  }
+
+  const baseUrl = project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL;
+  const apiKey = project.source_api_key ?? process.env.SOURCE_API_KEY;
+  if (!baseUrl || !apiKey) {
+    return {
+      ...empty(),
+      error: "SOURCE_API_BASE_URL and SOURCE_API_KEY (or project credentials) are required",
+    };
+  }
+  const credentials: ApiCredentials = { baseUrl, apiKey };
+
+  const { dates: collected, error: colErr } = await getCollectedAnalyticsDays(client, projectId);
+  if (colErr) {
+    return { ...empty(), error: `Failed to list collected days: ${colErr}` };
+  }
+  const collectedSet = new Set(collected);
+
+  const daysRequested = range;
+  const daysSkippedAlreadyCollected: string[] = [];
+  const daysSynced: string[] = [];
+  const errors: string[] = [];
+  let rowsInserted = 0;
+  let flowsProcessed = 0;
+
+  const fetchLog: FetchLogger = async (msg, data) => {
+    console.log(`${LOG_PREFIX} ${msg}`, data ?? "");
+  };
+
+  const { flows: allFlows, error: flowsLoadErr } = await getFlowsForProject(client, projectId);
+  if (flowsLoadErr) {
+    return { ...empty(), error: `Failed to load flows: ${flowsLoadErr}` };
+  }
+
+  console.log(`${LOG_PREFIX} analytics: ${allFlows.length} flow(s) for project; per-day metrics use sender_profiles + flows filter only`);
+
+  for (const day of range) {
+    if (collectedSet.has(day)) {
+      daysSkippedAlreadyCollected.push(day);
+      continue;
+    }
+
+    const bounds = dayBoundsUtc(day);
+    if (!bounds) {
+      errors.push(`${day}: invalid day`);
+      continue;
+    }
+
+    const dayEligible = allFlows.filter((f) => {
+      const createdDay = f.created_at.slice(0, 10);
+      return createdDay <= day;
+    });
+
+    const combined: Array<{
+      group_by: string;
+      group_uuid: string | null;
+      metrics: Record<string, unknown>;
+      flow_uuid?: string | null;
+    }> = [];
+
+    for (let fi = 0; fi < dayEligible.length; fi++) {
+      const flow = dayEligible[fi];
+      await fetchLog(`analytics: day ${day} flow ${fi + 1}/${dayEligible.length} (${flow.uuid})`, {});
+
+      const sendersRes = await fetchLeadsMetricsForRange(
+        {
+          fromIso: bounds.fromIso,
+          toIso: bounds.toIso,
+          groupBy: "sender_profiles",
+          flows: [flow.uuid],
+        },
+        credentials,
+        fetchLog
+      );
+
+      if (sendersRes.error) {
+        errors.push(`${day} flow ${flow.uuid}: ${sendersRes.error}`);
+      } else {
+        flowsProcessed += 1;
+        for (const r of sendersRes.rows) {
+          combined.push({
+            group_by: "sender_profiles",
+            group_uuid: r.group_uuid,
+            metrics: r.metrics,
+            flow_uuid: flow.uuid,
+          });
+        }
+      }
+
+      await sleep(METRICS_REQUEST_DELAY_MS);
+    }
+
+    const { error: repErr } = await replaceAnalyticsSnapshotsForDay(client, projectId, day, combined);
+    if (repErr) {
+      errors.push(`${day} store: ${repErr}`);
+      continue;
+    }
+
+    daysSynced.push(day);
+    rowsInserted += combined.length;
+    collectedSet.add(day);
+    console.log(`${LOG_PREFIX} analytics: stored day ${day} (${combined.length} row(s), ${dayEligible.length} flow(s) eligible)`);
+  }
+
+  console.log(`${LOG_PREFIX} analytics sync finished`, {
+    daysSynced: daysSynced.length,
+    flowsProcessed,
+    rowsInserted,
+    errors: errors.length,
+  });
+
+  return {
+    daysRequested,
+    daysSkippedAlreadyCollected,
+    daysSynced,
+    rowsInserted,
+    flowsProcessed,
+    errors,
+    error: null,
+  };
 }

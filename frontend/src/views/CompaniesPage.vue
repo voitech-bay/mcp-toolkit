@@ -48,8 +48,8 @@ interface CompanyRow {
   id: string;
   company_id: string;
   name: string | null;
-  domain: string;
-  linkedin_url: string | null;
+  domain: string | null;
+  linkedin: string | null;
   created_at: string;
   /** Tag values from companies.tags (jsonb). */
   tags: string[];
@@ -233,7 +233,7 @@ async function fetchCompanies() {
         company_id: (row.company_id as string) ?? (row.project_company_id as string),
         name: row.name as string | null,
         domain: row.domain as string,
-        linkedin_url: row.linkedin_url as string | null,
+        linkedin: row.linkedin as string | null,
         created_at: row.created_at as string,
         tags: normalizeCompanyTags(row.tags),
         in_project: true,
@@ -318,14 +318,14 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     },
   },
   {
-    key: "linkedin_url",
+    key: "linkedin",
     title: "LinkedIn",
     width: 100,
     render: (row) => {
-      if (!row.linkedin_url) return "—";
+      if (!row.linkedin) return "—";
       return h(
         "a",
-        { href: row.linkedin_url, target: "_blank", rel: "noopener", style: "color: inherit" },
+        { href: row.linkedin, target: "_blank", rel: "noopener", style: "color: inherit" },
         [h(LinkIcon, { size: 13 })]
       );
     },

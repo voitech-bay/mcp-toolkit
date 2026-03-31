@@ -53,7 +53,7 @@ interface ContactWithConversations {
   name: string | null;
   position: string | null;
   avatar_url: string | null;
-  company_id: string | null;
+  company_uuid: string | null;
   conversations: Array<{ conversationUuid: string; messageCount: number; lastMessageAt: string | null }>;
 }
 
@@ -371,7 +371,7 @@ const contactCompanyName = computed(() => {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 });
 const contactCompanyId = computed(() => {
-  const v = dialogueContact.value?.company_id;
+  const v = dialogueContact.value?.company_uuid;
   return typeof v === "string" && v.trim() ? v.trim() : null;
 });
 
@@ -525,7 +525,7 @@ function onReceiverCompanyAttached(payload: { companyId: string; companyName: st
   if (!dialogueContact.value) return;
   dialogueContact.value = {
     ...dialogueContact.value,
-    company_id: payload.companyId,
+    company_uuid: payload.companyId,
     company_name: payload.companyName,
   };
   // Trigger hypothesis fetch for the newly attached company

@@ -22,7 +22,7 @@ const props = defineProps<{
     last_name: string | null;
     name: string | null;
     position: string | null;
-    company_id: string | null;
+    company_uuid: string | null;
     conversations: Array<{ conversationUuid: string; messageCount: number; lastMessageAt: string | null }>;
   }>;
 }>();

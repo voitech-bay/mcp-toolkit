@@ -6,7 +6,12 @@ const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_K
 export const LINKEDIN_MESSAGES_TABLE = "LinkedinMessages";
 export const SENDERS_TABLE = "Senders";
 export const CONTACTS_TABLE = "Contacts";
-/** Core companies table; domain is unique. Contacts link via company_id. */
+export const FLOWS_TABLE = "Flows";
+export const FLOW_LEADS_TABLE = "FlowLeads";
+/** GetSales GET /leads/api/lists — contact list segments (list_uuid on Contacts). */
+export const CONTACT_LISTS_TABLE = "ContactLists";
+export const ANALYTICS_SNAPSHOTS_TABLE = "AnalyticsSnapshots";
+/** Core companies table. Contacts link via company_uuid (equals companies.id). */
 export const COMPANIES_TABLE = "companies";
 export const CONTEXT_SNAPSHOTS_TABLE = "ContextSnapshots";
 
@@ -110,12 +115,31 @@ export async function updateProjectCredentials(
 /**
  * Get entity counts (Contacts, LinkedinMessages, Senders) filtered by project_id.
  */
+const ZERO_COUNTS: TableCounts = {
+  companies: 0,
+  contacts: 0,
+  linkedin_messages: 0,
+  senders: 0,
+  contact_lists: 0,
+  flows: 0,
+  flow_leads: 0,
+};
+
 export async function getProjectEntityCounts(
   client: SupabaseClient,
   projectId: string
 ): Promise<{ counts: TableCounts; error: string | null }> {
   try {
-    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+    const [
+      companiesRes,
+      contactsRes,
+      messagesRes,
+      sendersRes,
+      contactListsRes,
+      flowsRes,
+      flowLeadsRes,
+    ] = await Promise.all([
+      client.from(COMPANIES_TABLE).select("*", { count: "exact", head: true }),
       client
         .from(CONTACTS_TABLE)
         .select("*", { count: "exact", head: true })
@@ -128,22 +152,38 @@ export async function getProjectEntityCounts(
         .from(SENDERS_TABLE)
         .select("*", { count: "exact", head: true })
         .eq("project_id", projectId),
+      client
+        .from(CONTACT_LISTS_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
+      client.from(FLOWS_TABLE).select("*", { count: "exact", head: true }).eq("project_id", projectId),
+      client
+        .from(FLOW_LEADS_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
     ]);
-    const zeroCounts: TableCounts = { contacts: 0, linkedin_messages: 0, senders: 0 };
-    if (contactsRes.error) return { counts: zeroCounts, error: contactsRes.error.message };
-    if (messagesRes.error) return { counts: zeroCounts, error: messagesRes.error.message };
-    if (sendersRes.error) return { counts: zeroCounts, error: sendersRes.error.message };
+    if (companiesRes.error) return { counts: ZERO_COUNTS, error: companiesRes.error.message };
+    if (contactsRes.error) return { counts: ZERO_COUNTS, error: contactsRes.error.message };
+    if (messagesRes.error) return { counts: ZERO_COUNTS, error: messagesRes.error.message };
+    if (sendersRes.error) return { counts: ZERO_COUNTS, error: sendersRes.error.message };
+    if (contactListsRes.error) return { counts: ZERO_COUNTS, error: contactListsRes.error.message };
+    if (flowsRes.error) return { counts: ZERO_COUNTS, error: flowsRes.error.message };
+    if (flowLeadsRes.error) return { counts: ZERO_COUNTS, error: flowLeadsRes.error.message };
     return {
       counts: {
+        companies: companiesRes.count ?? 0,
         contacts: contactsRes.count ?? 0,
         linkedin_messages: messagesRes.count ?? 0,
         senders: sendersRes.count ?? 0,
+        contact_lists: contactListsRes.count ?? 0,
+        flows: flowsRes.count ?? 0,
+        flow_leads: flowLeadsRes.count ?? 0,
       },
       error: null,
     };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: message };
+    return { counts: { ...ZERO_COUNTS }, error: message };
   }
 }
 
@@ -156,8 +196,30 @@ export async function getProjectLatestRows(
   limit: number = DEFAULT_LATEST_LIMIT
 ): Promise<{ latest: LatestRows; error: string | null }> {
   const n = Math.min(Math.max(limit, 1), 100);
+  const emptyLatest = (): LatestRows => ({
+    companies: [],
+    contacts: [],
+    linkedin_messages: [],
+    senders: [],
+    contact_lists: [],
+    flows: [],
+    flow_leads: [],
+  });
   try {
-    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+    const [
+      companiesRes,
+      contactsRes,
+      messagesRes,
+      sendersRes,
+      contactListsRes,
+      flowsRes,
+      flowLeadsRes,
+    ] = await Promise.all([
+      client
+        .from(COMPANIES_TABLE)
+        .select("id, name, domain, created_at")
+        .order("created_at", { ascending: false })
+        .limit(n),
       client
         .from(CONTACTS_TABLE)
         .select("*")
@@ -176,20 +238,46 @@ export async function getProjectLatestRows(
         .eq("project_id", projectId)
         .order("created_at", { ascending: false })
         .limit(n),
+      client
+        .from(CONTACT_LISTS_TABLE)
+        .select("uuid, name, team_id, created_at, updated_at, project_id")
+        .eq("project_id", projectId)
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
+        .from(FLOWS_TABLE)
+        .select("uuid, name, status, created_at, updated_at, project_id")
+        .eq("project_id", projectId)
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
+        .from(FLOW_LEADS_TABLE)
+        .select("uuid, flow_uuid, lead_uuid, status, created_at, updated_at, project_id")
+        .eq("project_id", projectId)
+        .order("created_at", { ascending: false })
+        .limit(n),
     ]);
     const latest: LatestRows = {
+      companies: companiesRes.data ?? [],
       contacts: contactsRes.data ?? [],
       linkedin_messages: messagesRes.data ?? [],
       senders: sendersRes.data ?? [],
+      contact_lists: contactListsRes.data ?? [],
+      flows: flowsRes.data ?? [],
+      flow_leads: flowLeadsRes.data ?? [],
     };
+    if (companiesRes.error) return { latest, error: companiesRes.error.message };
     if (contactsRes.error) return { latest, error: contactsRes.error.message };
     if (messagesRes.error) return { latest, error: messagesRes.error.message };
     if (sendersRes.error) return { latest, error: sendersRes.error.message };
+    if (contactListsRes.error) return { latest, error: contactListsRes.error.message };
+    if (flowsRes.error) return { latest, error: flowsRes.error.message };
+    if (flowLeadsRes.error) return { latest, error: flowLeadsRes.error.message };
     return { latest, error: null };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return {
-      latest: { contacts: [], linkedin_messages: [], senders: [] },
+      latest: emptyLatest(),
       error: message,
     };
   }
@@ -320,13 +408,13 @@ export async function getCompanyIdsByDomains(
 }
 
 /**
- * Ensure companies exist by domain. Inserts missing rows (name/linkedin_url optional),
+ * Ensure companies exist by domain. Inserts missing rows (name/linkedin optional),
  * then returns domain -> id for all given domains. Uses upsert on domain so existing
- * rows are updated with provided name/linkedin_url when given.
+ * rows are updated with provided name/linkedin when given.
  */
 export async function ensureCompanies(
   client: SupabaseClient,
-  rows: Array<{ domain: string; name?: string | null; linkedin_url?: string | null }>
+  rows: Array<{ domain: string; name?: string | null; linkedin?: string | null }>
 ): Promise<{ map: Record<string, string>; error: string | null }> {
   if (rows.length === 0) return { map: {}, error: null };
   const { data, error } = await client
@@ -335,7 +423,7 @@ export async function ensureCompanies(
       rows.map((r) => ({
         domain: r.domain,
         name: r.name ?? r.domain,
-        linkedin_url: r.linkedin_url ?? null,
+        linkedin: r.linkedin ?? null,
       })),
       { onConflict: "domain" }
     )
@@ -1118,9 +1206,16 @@ export async function getContacts(
 // --- Table counts (for /api/supabase-state) ---
 
 export interface TableCounts {
+  companies: number;
   contacts: number;
   linkedin_messages: number;
   senders: number;
+  /** GET /leads/api/lists */
+  contact_lists: number;
+  /** GET /flows/api/flows */
+  flows: number;
+  /** POST /flows/api/flows-leads/list */
+  flow_leads: number;
 }
 
 /**
@@ -1149,13 +1244,129 @@ export async function getLatestCreatedAt(
   return { latest, error: null };
 }
 
+/**
+ * Returns the latest updated_at (ISO string) for the table, or null if empty.
+ * Used by incremental Flows sync (cursor on updated_at).
+ */
+export async function getLatestUpdatedAt(
+  client: SupabaseClient,
+  table: string,
+  projectId?: string | null
+): Promise<{ latest: string | null; error: string | null }> {
+  let query = client
+    .from(table)
+    .select("updated_at")
+    .order("updated_at", { ascending: false })
+    .limit(1);
+  if (projectId) {
+    query = query.eq("project_id", projectId);
+  }
+  const { data, error } = await query.maybeSingle();
+  if (error) return { latest: null, error: error.message };
+  const raw = data?.updated_at;
+  if (raw == null) return { latest: null, error: null };
+  const latest = typeof raw === "string" ? raw : (raw as Date).toISOString?.() ?? String(raw);
+  return { latest, error: null };
+}
+
+/**
+ * Load all flows for a project (uuid + created_at) for per-flow analytics and filtering by day.
+ */
+export async function getFlowsForProject(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ flows: Array<{ uuid: string; created_at: string }>; error: string | null }> {
+  const { data, error } = await client
+    .from(FLOWS_TABLE)
+    .select("uuid, created_at")
+    .eq("project_id", projectId);
+  if (error) return { flows: [], error: error.message };
+  const flows: Array<{ uuid: string; created_at: string }> = [];
+  for (const row of data ?? []) {
+    const r = row as { uuid?: unknown; created_at?: unknown };
+    const uuid = typeof r.uuid === "string" ? r.uuid : String(r.uuid ?? "");
+    const rawCa = r.created_at;
+    const created_at =
+      typeof rawCa === "string"
+        ? rawCa
+        : rawCa instanceof Date
+          ? rawCa.toISOString()
+          : String(rawCa ?? "");
+    flows.push({ uuid, created_at });
+  }
+  return { flows, error: null };
+}
+
+/**
+ * Distinct snapshot_date values already stored for analytics (YYYY-MM-DD).
+ */
+export async function getCollectedAnalyticsDays(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ dates: string[]; error: string | null }> {
+  const { data, error } = await client
+    .from(ANALYTICS_SNAPSHOTS_TABLE)
+    .select("snapshot_date")
+    .eq("project_id", projectId);
+  if (error) return { dates: [], error: error.message };
+  const set = new Set<string>();
+  for (const row of data ?? []) {
+    const raw = (row as { snapshot_date?: unknown }).snapshot_date;
+    if (typeof raw === "string") {
+      set.add(raw.slice(0, 10));
+    } else if (raw instanceof Date) {
+      set.add(raw.toISOString().slice(0, 10));
+    }
+  }
+  return { dates: [...set].sort(), error: null };
+}
+
+const ANALYTICS_INSERT_CHUNK = 100;
+
+/**
+ * Replace all AnalyticsSnapshots rows for one calendar day (delete then insert).
+ * Safe to re-run after partial failure.
+ */
+export async function replaceAnalyticsSnapshotsForDay(
+  client: SupabaseClient,
+  projectId: string,
+  snapshotDateYyyyMmDd: string,
+  rows: Array<{
+    group_by: string;
+    group_uuid: string | null;
+    metrics: Record<string, unknown>;
+    flow_uuid?: string | null;
+  }>
+): Promise<{ error: string | null }> {
+  const { error: delErr } = await client
+    .from(ANALYTICS_SNAPSHOTS_TABLE)
+    .delete()
+    .eq("project_id", projectId)
+    .eq("snapshot_date", snapshotDateYyyyMmDd);
+  if (delErr) return { error: delErr.message };
+  if (rows.length === 0) return { error: null };
+  for (let i = 0; i < rows.length; i += ANALYTICS_INSERT_CHUNK) {
+    const slice = rows.slice(i, i + ANALYTICS_INSERT_CHUNK).map((r) => ({
+      project_id: projectId,
+      snapshot_date: snapshotDateYyyyMmDd,
+      group_by: r.group_by,
+      group_uuid: r.group_uuid,
+      metrics: r.metrics,
+      flow_uuid: r.flow_uuid ?? null,
+    }));
+    const { error: insErr } = await client.from(ANALYTICS_SNAPSHOTS_TABLE).insert(slice);
+    if (insErr) return { error: insErr.message };
+  }
+  return { error: null };
+}
+
 // --- All companies (global browse, with per-project membership flag) ---
 
 export interface AllCompanyRow {
   id: string;
   name: string | null;
-  domain: string;
-  linkedin_url: string | null;
+  domain: string | null;
+  linkedin: string | null;
   created_at: string;
   /** Tag values (from companies.tags jsonb). */
   tags: string[];
@@ -1239,7 +1450,8 @@ export async function getContactsProfileForPromptByUuids(
 }
 
 /**
- * Set company_id (and optionally company_name) on a contact row.
+ * Set company_uuid (and optionally company_name) on a contact row.
+ * company_uuid is the direct FK to companies.id.
  */
 export async function updateContactCompany(
   client: SupabaseClient,
@@ -1247,7 +1459,7 @@ export async function updateContactCompany(
   companyId: string,
   companyName: string | null
 ): Promise<{ error: string | null }> {
-  const update: Record<string, unknown> = { company_id: companyId };
+  const update: Record<string, unknown> = { company_uuid: companyId };
   if (companyName != null) update.company_name = companyName;
   const { error } = await client
     .from(CONTACTS_TABLE)
@@ -1301,8 +1513,8 @@ export async function getAllCompanies(
   const rows: AllCompanyRow[] = ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
     id: r.id as string,
     name: (r.name as string) ?? null,
-    domain: r.domain as string,
-    linkedin_url: (r.linkedin_url as string) ?? null,
+    domain: (r.domain as string) ?? null,
+    linkedin: (r.linkedin as string) ?? null,
     created_at: r.created_at as string,
     tags: parseCompanyTagsColumn(r.tags),
     in_project: r.id as string in pcMap,
@@ -1365,7 +1577,10 @@ export interface ProjectCompanyRow {
   created_at: string;
   name: string | null;
   domain: string | null;
-  linkedin_url: string | null;
+  linkedin: string | null;
+  website: string | null;
+  industry: string | null;
+  employees_range: string | null;
   /** Tag values (companies.tags jsonb). */
   tags: string[];
   hypotheses: Array<{ id: string; name: string }>;
@@ -1373,24 +1588,179 @@ export interface ProjectCompanyRow {
   contacts_preview: ProjectCompanyContact[];
 }
 
+/** Contact lists synced for a project (for filters / dropdowns). */
+export async function listContactListsForProject(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ data: Array<{ uuid: string; name: string }>; error: string | null }> {
+  const { data, error } = await client
+    .from(CONTACT_LISTS_TABLE)
+    .select("uuid, name")
+    .eq("project_id", projectId)
+    .order("name", { ascending: true });
+  if (error) return { data: [], error: error.message };
+  const rows = (data ?? []) as Array<{ uuid?: string; name?: string }>;
+  return {
+    data: rows
+      .filter((r) => typeof r.uuid === "string")
+      .map((r) => ({ uuid: r.uuid as string, name: typeof r.name === "string" ? r.name : "(unnamed)" })),
+    error: null,
+  };
+}
+
 /**
  * List companies in a project (joining project_companies -> companies).
  * Also joins hypothesis_targets -> hypotheses to return which hypotheses each company appears in.
  * Supports optional search (name/domain ilike) and pagination with total count.
+ * Optional listUuid: only companies that have at least one contact in the project on that list (Contacts.list_uuid).
  */
 export async function getProjectCompanies(
   client: SupabaseClient,
   projectId: string,
-  options?: { search?: string | null; limit?: number; offset?: number; companyId?: string | null }
+  options?: {
+    search?: string | null;
+    limit?: number;
+    offset?: number;
+    companyId?: string | null;
+    /** Filter to companies with contacts on this GetSales list (ContactLists.uuid). */
+    listUuid?: string | null;
+  }
 ): Promise<{ data: ProjectCompanyRow[]; total: number; error: string | null }> {
   const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
   const offset = Math.max(options?.offset ?? 0, 0);
+
+  const search = options?.search?.trim().toLowerCase() ?? "";
+  let searchPattern: string | null = null;
+  if (search.length > 0) {
+    const escaped = search.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+    searchPattern = `%${escaped}%`;
+  }
+
+  const listFilter = options?.listUuid?.trim();
+  if (listFilter) {
+    const { data: countRaw, error: countErr } = await client.rpc(
+      "count_project_companies_for_contact_list",
+      {
+        p_project_id: projectId,
+        p_list_uuid: listFilter,
+        p_search_pattern: searchPattern,
+        p_company_id: options?.companyId ?? null,
+      }
+    );
+    if (countErr) return { data: [], total: 0, error: countErr.message };
+
+    const total =
+      typeof countRaw === "number"
+        ? countRaw
+        : Number.parseInt(String(countRaw ?? 0), 10);
+    if (!Number.isFinite(total)) {
+      return { data: [], total: 0, error: "invalid count from server" };
+    }
+
+    const { data: pageRows, error: pageErr } = await client.rpc(
+      "page_project_companies_for_contact_list",
+      {
+        p_project_id: projectId,
+        p_list_uuid: listFilter,
+        p_limit: limit,
+        p_offset: offset,
+        p_search_pattern: searchPattern,
+        p_company_id: options?.companyId ?? null,
+      }
+    );
+    if (pageErr) return { data: [], total: 0, error: pageErr.message };
+
+    const pagePairs = (pageRows ?? []) as Array<{ pc_id: string; company_id: string }>;
+    if (pagePairs.length === 0) return { data: [], total, error: null };
+
+    const pcIds = pagePairs.map((p) => p.pc_id);
+    const orderIndex = new Map(pcIds.map((id, i) => [id, i]));
+
+    const { data: rawRowsData, error: fetchErr } = await client
+      .from(PROJECT_COMPANIES_TABLE)
+      .select(
+        `id, status, created_at, company_id,
+         companies!inner(id, name, domain, linkedin, tags, website, industry, employees_range),
+         hypothesis_targets(hypothesis_id, hypotheses(id, name))`
+      )
+      .eq("project_id", projectId)
+      .in("id", pcIds);
+
+    if (fetchErr) return { data: [], total: 0, error: fetchErr.message };
+
+    const rawRows = (rawRowsData ?? []) as Array<Record<string, unknown>>;
+    rawRows.sort((a, b) => {
+      const ia = orderIndex.get(a.id as string) ?? 0;
+      const ib = orderIndex.get(b.id as string) ?? 0;
+      return ia - ib;
+    });
+
+    const companyIds = rawRows
+      .map((r) => {
+        const c = r.companies as Record<string, unknown> | null;
+        return (c?.id ?? r.company_id) as string;
+      })
+      .filter(Boolean);
+
+    const contactsByCompany: Record<string, ProjectCompanyContact[]> = {};
+    const contactCountByCompany: Record<string, number> = {};
+    if (companyIds.length > 0) {
+      const { data: contactData } = await client
+        .from(CONTACTS_TABLE)
+        .select("company_uuid, first_name, last_name, position, project_id")
+        .in("company_uuid", companyIds)
+        .order("created_at", { ascending: false })
+        .limit(companyIds.length * 10);
+
+      for (const c of (contactData ?? []) as Array<Record<string, unknown>>) {
+        const cid = c.company_uuid as string;
+        if (!contactsByCompany[cid]) contactsByCompany[cid] = [];
+        contactCountByCompany[cid] = (contactCountByCompany[cid] ?? 0) + 1;
+        if (contactsByCompany[cid].length < 10) {
+          contactsByCompany[cid].push({
+            first_name: (c.first_name as string) ?? null,
+            last_name: (c.last_name as string) ?? null,
+            position: (c.position as string) ?? null,
+            project_id: (c.project_id as string) ?? null,
+          });
+        }
+      }
+    }
+
+    const rows: ProjectCompanyRow[] = rawRows.map((row) => {
+      const company = (row.companies as Record<string, unknown> | null) ?? {};
+      const companyId = (company.id ?? row.company_id) as string;
+      const targets = (row.hypothesis_targets as Array<Record<string, unknown>> | null) ?? [];
+      const hypotheses = targets
+        .map((t) => t.hypotheses as Record<string, unknown> | null)
+        .filter((h): h is Record<string, unknown> => h != null && typeof h.id === "string")
+        .map((h) => ({ id: h.id as string, name: h.name as string }));
+      return {
+        project_company_id: row.id as string,
+        company_id: companyId,
+        status: (row.status as string) ?? null,
+        created_at: row.created_at as string,
+        name: (company.name as string) ?? null,
+        domain: (company.domain as string) ?? null,
+        linkedin: (company.linkedin as string) ?? null,
+        website: (company.website as string) ?? null,
+        industry: (company.industry as string) ?? null,
+        employees_range: (company.employees_range as string) ?? null,
+        tags: parseCompanyTagsColumn(company.tags),
+        hypotheses,
+        contact_count: contactCountByCompany[companyId] ?? 0,
+        contacts_preview: contactsByCompany[companyId] ?? [],
+      };
+    });
+
+    return { data: rows, total, error: null };
+  }
 
   let query = client
     .from(PROJECT_COMPANIES_TABLE)
     .select(
       `id, status, created_at, company_id,
-       companies!inner(id, name, domain, linkedin_url, tags),
+       companies!inner(id, name, domain, linkedin, tags, website, industry, employees_range),
        hypothesis_targets(hypothesis_id, hypotheses(id, name))`,
       { count: "exact" }
     )
@@ -1400,11 +1770,8 @@ export async function getProjectCompanies(
     query = query.eq("company_id", options.companyId);
   }
 
-  const search = options?.search?.trim().toLowerCase() ?? "";
-  if (search.length > 0) {
-    const escaped = search.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
-    const pattern = `%${escaped}%`;
-    query = query.or(`name.ilike.${pattern},domain.ilike.${pattern}`, {
+  if (searchPattern) {
+    query = query.or(`name.ilike.${searchPattern},domain.ilike.${searchPattern}`, {
       referencedTable: "companies",
     });
   }
@@ -1433,13 +1800,13 @@ export async function getProjectCompanies(
   if (companyIds.length > 0) {
     const { data: contactData } = await client
       .from(CONTACTS_TABLE)
-      .select("company_id, first_name, last_name, position, project_id")
-      .in("company_id", companyIds)
+      .select("company_uuid, first_name, last_name, position, project_id")
+      .in("company_uuid", companyIds)
       .order("created_at", { ascending: false })
       .limit(companyIds.length * 10); // generous upper bound per page
 
     for (const c of (contactData ?? []) as Array<Record<string, unknown>>) {
-      const cid = c.company_id as string;
+      const cid = c.company_uuid as string;
       if (!contactsByCompany[cid]) contactsByCompany[cid] = [];
       contactCountByCompany[cid] = (contactCountByCompany[cid] ?? 0) + 1;
       if (contactsByCompany[cid].length < 10) {
@@ -1468,7 +1835,10 @@ export async function getProjectCompanies(
       created_at: row.created_at as string,
       name: (company.name as string) ?? null,
       domain: (company.domain as string) ?? null,
-      linkedin_url: (company.linkedin_url as string) ?? null,
+      linkedin: (company.linkedin as string) ?? null,
+      website: (company.website as string) ?? null,
+      industry: (company.industry as string) ?? null,
+      employees_range: (company.employees_range as string) ?? null,
       tags: parseCompanyTagsColumn(company.tags),
       hypotheses,
       contact_count: contactCountByCompany[companyId] ?? 0,
@@ -1531,7 +1901,7 @@ export interface HypothesisTargetRow {
   company_id: string | null;
   name: string | null;
   domain: string | null;
-  linkedin_url: string | null;
+  linkedin: string | null;
   status: string | null;
 }
 
@@ -1545,7 +1915,7 @@ export async function getHypothesisTargets(
   const { data, error } = await client
     .from(HYPOTHESIS_TARGETS_TABLE)
     .select(
-      "id, score, project_company_id, project_companies!inner(id, status, companies!inner(id, name, domain, linkedin_url))"
+      "id, score, project_company_id, project_companies!inner(id, status, companies!inner(id, name, domain, linkedin))"
     )
     .eq("hypothesis_id", hypothesisId)
     .order("score", { ascending: false });
@@ -1562,7 +1932,7 @@ export async function getHypothesisTargets(
       company_id: (company.id as string) ?? null,
       name: (company.name as string) ?? null,
       domain: (company.domain as string) ?? null,
-      linkedin_url: (company.linkedin_url as string) ?? null,
+      linkedin: (company.linkedin as string) ?? null,
       status: (pc.status as string) ?? null,
     };
   });
@@ -1662,28 +2032,56 @@ export async function getTableCounts(
   client: SupabaseClient
 ): Promise<{ counts: TableCounts; error: string | null }> {
   try {
-    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+    const [
+      companiesRes,
+      contactsRes,
+      messagesRes,
+      sendersRes,
+      contactListsRes,
+      flowsRes,
+      flowLeadsRes,
+    ] = await Promise.all([
+      client.from(COMPANIES_TABLE).select("*", { count: "exact", head: true }),
       client.from(CONTACTS_TABLE).select("*", { count: "exact", head: true }),
       client.from(LINKEDIN_MESSAGES_TABLE).select("*", { count: "exact", head: true }),
       client.from(SENDERS_TABLE).select("*", { count: "exact", head: true }),
+      client.from(CONTACT_LISTS_TABLE).select("*", { count: "exact", head: true }),
+      client.from(FLOWS_TABLE).select("*", { count: "exact", head: true }),
+      client.from(FLOW_LEADS_TABLE).select("*", { count: "exact", head: true }),
     ]);
-    const contacts = contactsRes.count ?? 0;
-    const linkedin_messages = messagesRes.count ?? 0;
-    const senders = sendersRes.count ?? 0;
-    if (contactsRes.error) return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: contactsRes.error.message };
-    if (messagesRes.error) return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: messagesRes.error.message };
-    if (sendersRes.error) return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: sendersRes.error.message };
-    return { counts: { contacts, linkedin_messages, senders }, error: null };
+    if (companiesRes.error) return { counts: ZERO_COUNTS, error: companiesRes.error.message };
+    if (contactsRes.error) return { counts: ZERO_COUNTS, error: contactsRes.error.message };
+    if (messagesRes.error) return { counts: ZERO_COUNTS, error: messagesRes.error.message };
+    if (sendersRes.error) return { counts: ZERO_COUNTS, error: sendersRes.error.message };
+    if (contactListsRes.error) return { counts: ZERO_COUNTS, error: contactListsRes.error.message };
+    if (flowsRes.error) return { counts: ZERO_COUNTS, error: flowsRes.error.message };
+    if (flowLeadsRes.error) return { counts: ZERO_COUNTS, error: flowLeadsRes.error.message };
+    return {
+      counts: {
+        companies: companiesRes.count ?? 0,
+        contacts: contactsRes.count ?? 0,
+        linkedin_messages: messagesRes.count ?? 0,
+        senders: sendersRes.count ?? 0,
+        contact_lists: contactListsRes.count ?? 0,
+        flows: flowsRes.count ?? 0,
+        flow_leads: flowLeadsRes.count ?? 0,
+      },
+      error: null,
+    };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    return { counts: { contacts: 0, linkedin_messages: 0, senders: 0 }, error: message };
+    return { counts: { ...ZERO_COUNTS }, error: message };
   }
 }
 
 export interface LatestRows {
+  companies: unknown[];
   contacts: unknown[];
   linkedin_messages: unknown[];
   senders: unknown[];
+  contact_lists: unknown[];
+  flows: unknown[];
+  flow_leads: unknown[];
 }
 
 const DEFAULT_LATEST_LIMIT = 10;
@@ -1697,25 +2095,66 @@ export async function getLatestRows(
   limit: number = DEFAULT_LATEST_LIMIT
 ): Promise<{ latest: LatestRows; error: string | null }> {
   const n = Math.min(Math.max(limit, 1), 100);
+  const emptyLatest = (): LatestRows => ({
+    companies: [],
+    contacts: [],
+    linkedin_messages: [],
+    senders: [],
+    contact_lists: [],
+    flows: [],
+    flow_leads: [],
+  });
   try {
-    const [contactsRes, messagesRes, sendersRes] = await Promise.all([
+    const [
+      companiesRes,
+      contactsRes,
+      messagesRes,
+      sendersRes,
+      contactListsRes,
+      flowsRes,
+      flowLeadsRes,
+    ] = await Promise.all([
+      client.from(COMPANIES_TABLE).select("id, name, domain, created_at").order("created_at", { ascending: false }).limit(n),
       client.from(CONTACTS_TABLE).select("*").order("created_at", { ascending: false }).limit(n),
       client.from(LINKEDIN_MESSAGES_TABLE).select("*").order("created_at", { ascending: false }).limit(n),
       client.from(SENDERS_TABLE).select("*").order("created_at", { ascending: false }).limit(n),
+      client
+        .from(CONTACT_LISTS_TABLE)
+        .select("uuid, name, team_id, created_at, updated_at, project_id")
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
+        .from(FLOWS_TABLE)
+        .select("uuid, name, status, created_at, updated_at, project_id")
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
+        .from(FLOW_LEADS_TABLE)
+        .select("uuid, flow_uuid, lead_uuid, status, created_at, updated_at, project_id")
+        .order("created_at", { ascending: false })
+        .limit(n),
     ]);
     const latest: LatestRows = {
+      companies: companiesRes.data ?? [],
       contacts: contactsRes.data ?? [],
       linkedin_messages: messagesRes.data ?? [],
       senders: sendersRes.data ?? [],
+      contact_lists: contactListsRes.data ?? [],
+      flows: flowsRes.data ?? [],
+      flow_leads: flowLeadsRes.data ?? [],
     };
+    if (companiesRes.error) return { latest, error: companiesRes.error.message };
     if (contactsRes.error) return { latest, error: contactsRes.error.message };
     if (messagesRes.error) return { latest, error: messagesRes.error.message };
     if (sendersRes.error) return { latest, error: sendersRes.error.message };
+    if (contactListsRes.error) return { latest, error: contactListsRes.error.message };
+    if (flowsRes.error) return { latest, error: flowsRes.error.message };
+    if (flowLeadsRes.error) return { latest, error: flowLeadsRes.error.message };
     return { latest, error: null };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return {
-      latest: { contacts: [], linkedin_messages: [], senders: [] },
+      latest: emptyLatest(),
       error: message,
     };
   }
@@ -1896,7 +2335,7 @@ export async function getConversationsList(
   if (leadUuids.length > 0) {
     const { data: contacts } = await client
       .from(CONTACTS_TABLE)
-      .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_id")
+      .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_uuid")
       .in("uuid", leadUuids);
     for (const c of (contacts ?? []) as Array<Record<string, unknown>>) {
       if (c.uuid) contactMap.set(c.uuid as string, c);
@@ -1913,14 +2352,14 @@ export async function getConversationsList(
     }
   }
 
-  // Collect unique company_ids to batch-resolve hypothesis counts
+  // Collect unique company UUIDs to batch-resolve hypothesis counts
   const companyIds = [...new Set(
     [...contactMap.values()]
-      .map((c) => c.company_id as string | null)
+      .map((c) => c.company_uuid as string | null)
       .filter(Boolean) as string[]
   )];
 
-  // Map company_id → number of hypotheses it belongs to (in this project)
+  // Map company_uuid → number of hypotheses it belongs to (in this project)
   const hypothesisCountByCompany = new Map<string, number>();
   if (companyIds.length > 0) {
     const { data: pcRows } = await client
@@ -1975,7 +2414,7 @@ export async function getConversationsList(
 
     const contact = group.lead_uuid ? contactMap.get(group.lead_uuid) ?? null : null;
     const sender = group.sender_profile_uuid ? senderMap.get(group.sender_profile_uuid) ?? null : null;
-    const companyId = contact ? ((contact.company_id as string | null) ?? null) : null;
+    const companyId = contact ? ((contact.company_uuid as string | null) ?? null) : null;
 
     const lastMessageIsOutbox = lastMsgType === "outbox";
     const replyTag = deriveConversationReplyTag({
@@ -2081,7 +2520,7 @@ export interface ContactWithConversations {
   name: string | null;
   position: string | null;
   avatar_url: string | null;
-  company_id: string | null;
+  company_uuid: string | null;
   conversations: Array<{ conversationUuid: string; messageCount: number; lastMessageAt: string | null }>;
 }
 
@@ -2092,8 +2531,8 @@ export async function getContactsByCompany(
 ): Promise<{ data: ContactWithConversations[]; error: string | null }> {
   const { data: contacts, error: cErr } = await client
     .from(CONTACTS_TABLE)
-    .select("uuid, first_name, last_name, name, position, avatar_url, company_id")
-    .eq("company_id", companyId)
+    .select("uuid, first_name, last_name, name, position, avatar_url, company_uuid")
+    .eq("company_uuid", companyId)
     .eq("project_id", projectId)
     .order("created_at", { ascending: false })
     .limit(50);
@@ -2142,7 +2581,7 @@ export async function getContactsByCompany(
       name: (c.name as string | null) ?? null,
       position: (c.position as string | null) ?? null,
       avatar_url: (c.avatar_url as string | null) ?? null,
-      company_id: (c.company_id as string | null) ?? null,
+      company_uuid: (c.company_uuid as string | null) ?? null,
       conversations,
     };
   });
@@ -2896,14 +3335,21 @@ export async function getContactsForProjectPage(
   client: SupabaseClient,
   projectId: string,
   limit: number,
-  offset: number
+  offset: number,
+  /** Optional: only contacts on this GetSales list (Contacts.list_uuid). */
+  listUuid?: string | null
 ): Promise<{ data: Record<string, unknown>[]; total: number; error: string | null }> {
   const lim = Math.min(Math.max(limit, 1), 100);
   const off = Math.max(offset, 0);
-  const { data, error, count } = await client
+  let q = client
     .from(CONTACTS_TABLE)
     .select("*", { count: "exact" })
-    .eq("project_id", projectId)
+    .eq("project_id", projectId);
+  const lf = listUuid?.trim();
+  if (lf) {
+    q = q.eq("list_uuid", lf);
+  }
+  const { data, error, count } = await q
     .order("created_at", { ascending: false })
     .order("uuid", { ascending: true })
     .range(off, off + lim - 1);
@@ -3050,7 +3496,12 @@ export async function getEnrichmentTableData(
   projectId: string,
   entityType: EnrichmentEntityType,
   limit: number,
-  offset: number
+  offset: number,
+  /**
+   * Company tab: companies with ≥1 contact on this list (Contacts.list_uuid).
+   * Contact tab: contacts with this list_uuid.
+   */
+  listUuid?: string | null
 ): Promise<{
   total: number;
   agentNames: string[];
@@ -3065,7 +3516,12 @@ export async function getEnrichmentTableData(
   let baseError: string | null = null;
 
   if (entityType === "company") {
-    const pc = await getProjectCompanies(client, projectId, { limit: lim, offset: off });
+    const listFilter = listUuid?.trim() || undefined;
+    const pc = await getProjectCompanies(client, projectId, {
+      limit: lim,
+      offset: off,
+      ...(listFilter ? { listUuid: listFilter } : {}),
+    });
     baseError = pc.error;
     total = pc.total;
     baseRows = pc.data.map((r) => ({
@@ -3075,14 +3531,18 @@ export async function getEnrichmentTableData(
       created_at: r.created_at,
       name: r.name,
       domain: r.domain,
-      linkedin_url: r.linkedin_url,
+      website: r.website,
+      industry: r.industry,
+      employees_range: r.employees_range,
+      linkedin: r.linkedin,
       tags: r.tags,
       hypotheses: r.hypotheses,
       contact_count: r.contact_count,
       contacts_preview: r.contacts_preview,
     }));
   } else {
-    const c = await getContactsForProjectPage(client, projectId, lim, off);
+    const listFilter = listUuid?.trim() || undefined;
+    const c = await getContactsForProjectPage(client, projectId, lim, off, listFilter ?? null);
     baseError = c.error;
     total = c.total;
     baseRows = c.data;

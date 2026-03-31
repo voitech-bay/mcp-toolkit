@@ -47,6 +47,7 @@ import {
   createEnrichmentAgent,
   updateEnrichmentAgent,
   getEnrichmentTableData,
+  listContactListsForProject,
   enqueueEnrichmentTasks,
   listEnrichmentQueueTasksForProject,
   listEnrichmentAgentRunsForProject,
@@ -58,6 +59,7 @@ import {
   upsertEnrichmentPromptSettings,
   getEnrichmentAgentResultsMapForEntity,
   getEnrichmentAgentByName,
+  getCollectedAnalyticsDays,
   type EnrichmentEntityType,
 } from "./services/supabase.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
@@ -70,7 +72,7 @@ import {
   generateContextText,
   type BuildContextNodes,
 } from "./services/reply-context-prompt.js";
-import { syncSupabaseFromSource } from "./services/sync-supabase.js";
+import { syncSupabaseFromSource, syncAnalyticsSnapshots } from "./services/sync-supabase.js";
 import {
   getActiveWorkers,
   isWorkerHeartbeatAuthOk,
@@ -197,6 +199,73 @@ export async function handleSupabaseSync(
   syncSupabaseFromSource(projectId, runId).catch((err) => {
     console.error("[sync] background sync error:", err);
   });
+}
+
+/** GET /api/analytics-collected-days?projectId= — distinct snapshot dates already stored. */
+export async function handleAnalyticsCollectedDays(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const projectId = getQueryParams(req).get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing projectId query parameter" }));
+    return;
+  }
+  const { dates, error } = await getCollectedAnalyticsDays(client, projectId);
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ dates }));
+}
+
+/** POST /api/analytics-sync — body: { projectId, dateFrom, dateTo } (YYYY-MM-DD). */
+export async function handleAnalyticsSync(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const body = (await getParsedBody(req)) as
+    | { projectId?: string; dateFrom?: string; dateTo?: string }
+    | undefined;
+  const projectId = body?.projectId?.trim();
+  const dateFrom = body?.dateFrom?.trim();
+  const dateTo = body?.dateTo?.trim();
+  if (!projectId || !dateFrom || !dateTo) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include projectId, dateFrom, and dateTo (YYYY-MM-DD)" }));
+    return;
+  }
+  const result = await syncAnalyticsSnapshots(projectId, dateFrom, dateTo);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify(result));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify(result));
 }
 
 /** Parse query string from req.url. */
@@ -1426,7 +1495,39 @@ export async function handleGetEnrichmentAgents(
   res.end(JSON.stringify({ data: result.data }));
 }
 
-/** GET /api/enrichment-table?entityType=company|contact&projectId=...&limit=&offset= */
+/** GET /api/contact-lists?projectId= — ContactLists rows for dropdowns (synced from GetSales). */
+export async function handleGetContactLists(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const result = await listContactListsForProject(client, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error, data: [] }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** GET /api/enrichment-table?entityType=company|contact&projectId=...&limit=&offset=&listUuid= */
 export async function handleGetEnrichmentTable(
   req: IncomingMessage,
   res: ServerResponse
@@ -1458,7 +1559,9 @@ export async function handleGetEnrichmentTable(
   }
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
-  const result = await getEnrichmentTableData(client, projectId, entityType, limit, offset);
+  const listUuidRaw = params.get("listUuid")?.trim();
+  const listUuid = listUuidRaw ? listUuidRaw : null;
+  const result = await getEnrichmentTableData(client, projectId, entityType, limit, offset, listUuid);
   if (result.error) {
     res.writeHead(500);
     res.end(

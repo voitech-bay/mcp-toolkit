@@ -7,19 +7,36 @@
 export const COMPANY_BASE_KEYS: readonly string[] = [
   "name",
   "domain",
-  "linkedin_url",
+  "website",
+  "industry",
+  "employees_range",
+  "linkedin",
   "tags",
   "contact_count",
   "status",
+  "hypotheses",
 ];
 
 /** Base columns for contact CSV / field tokens (matches EnrichmentTablePage.vue). */
 export const CONTACT_BASE_KEYS: readonly string[] = [
+  "name",
   "first_name",
   "last_name",
-  "company_name",
+  "title",
   "position",
+  "company_name",
+  "company_uuid",
   "work_email",
+  "personal_email",
+  "linkedin_url",
+  "linkedin",
+  "headline",
+  "location",
+  "tags",
+  "status",
+  "linkedin_status",
+  "list_uuid",
+  "connections_number",
   "created_at",
 ];
 
@@ -44,6 +61,23 @@ const PLACEHOLDER_RE = /\{\{([^}]+)\}\}/g;
 /** CSV / tooltip cell formatting (same rules as the enrichment table). */
 export function formatCellValue(key: string, val: unknown): string {
   if (val == null) return "—";
+  if (key === "hypotheses" && Array.isArray(val)) {
+    const parts = val
+      .map((x) =>
+        x && typeof x === "object" && "name" in (x as object)
+          ? String((x as { name: unknown }).name ?? "")
+          : ""
+      )
+      .filter(Boolean);
+    return parts.length ? parts.join(", ") : "—";
+  }
+  if (key === "location" && val && typeof val === "object" && !Array.isArray(val)) {
+    try {
+      return JSON.stringify(val);
+    } catch {
+      return "—";
+    }
+  }
   if (typeof val === "string" || typeof val === "number" || typeof val === "boolean") {
     return String(val);
   }

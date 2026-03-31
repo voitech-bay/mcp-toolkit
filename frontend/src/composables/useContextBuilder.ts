@@ -141,7 +141,7 @@ export interface HypothesisTargetRow {
   company_id: string | null;
   name: string | null;
   domain: string | null;
-  linkedin_url: string | null;
+  linkedin: string | null;
   status: string | null;
 }
 

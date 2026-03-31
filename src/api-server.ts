@@ -14,6 +14,8 @@ import {
   handleSupabaseState,
   handleSupabaseTableQuery,
   handleSupabaseSync,
+  handleAnalyticsCollectedDays,
+  handleAnalyticsSync,
   handleConversation,
   handleGetCompanyContext,
   handleSetCompanyContext,
@@ -48,6 +50,7 @@ import {
   handleGetEnrichmentAgentsRegistry,
   handlePostEnrichmentAgent,
   handlePutEnrichmentAgent,
+  handleGetContactLists,
   handleGetEnrichmentTable,
   handlePostEnrichmentEnqueue,
   handleGetEnrichmentQueue,
@@ -250,6 +253,22 @@ const server = createServer(async (req, res) => {
       case "/api/supabase-sync":
         await handleSupabaseSync(req, res);
         return;
+      case "/api/analytics-collected-days":
+        if (req.method === "GET") {
+          await handleAnalyticsCollectedDays(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/analytics-sync":
+        if (req.method === "POST") {
+          await handleAnalyticsSync(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/supabase-table-query":
         await handleSupabaseTableQuery(req, res);
         return;
@@ -383,6 +402,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/enrichment/agents":
         await handleGetEnrichmentAgents(req, res);
+        return;
+      case "/api/contact-lists":
+        await handleGetContactLists(req, res);
         return;
       case "/api/enrichment-table":
         await handleGetEnrichmentTable(req, res);
@@ -562,6 +584,8 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /health");
   console.log("  GET  /api/supabase-state");
   console.log("  POST /api/supabase-sync");
+  console.log("  GET  /api/analytics-collected-days?projectId=<id>");
+  console.log("  POST /api/analytics-sync");
   console.log("  GET  /api/supabase-table-query");
   console.log("  GET  /api/conversation");
   console.log("  GET  /api/company-context");

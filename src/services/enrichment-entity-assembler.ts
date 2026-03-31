@@ -23,7 +23,7 @@ const SAFE_COL = /^[a-zA-Z0-9_]+$/;
 function pickCompanySelectColumns(
   cfg: NormalizedCompaniesPlaceholderConfig
 ): string {
-  const base = ["id", "name", "domain", "tags", "linkedin_url"];
+  const base = ["id", "name", "domain", "tags", "linkedin"];
   const extra = cfg.include.companyBase.extraCompanyColumns.filter((c) =>
     SAFE_COL.test(c)
   );
@@ -104,7 +104,7 @@ async function fetchProjectCompaniesBatch(
     .from(PROJECT_COMPANIES_TABLE)
     .select(
       `id, status, created_at, company_id,
-       companies!inner(id, name, domain, linkedin_url, tags),
+       companies!inner(id, name, domain, linkedin, tags),
        hypothesis_targets(hypothesis_id, hypotheses(id, name))`
     )
     .eq("project_id", projectId)

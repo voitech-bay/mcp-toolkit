@@ -36,7 +36,7 @@ interface ContactRow {
   work_email_domain?: string | null;
   work_email?: string | null;
   email?: string | null;
-  company_id?: string | null;
+  company_uuid?: string | null;
   project_id?: string | null;
   created_at?: string | null;
 }
@@ -167,15 +167,14 @@ async function addContext() {
 }
 
 // --- Company name resolution ---
-// Map company_id → company name; populated lazily per visible page
+// Map company_uuid → company name; populated lazily per visible page
 const companyNameCache = ref<Record<string, string>>({});
 
 async function resolveCompanyNames(rows: ContactRow[]) {
-  const ids = [...new Set(rows.map((r) => r.company_id).filter(Boolean) as string[])];
+  const ids = [...new Set(rows.map((r) => r.company_uuid).filter(Boolean) as string[])];
   const missing = ids.filter((id) => !(id in companyNameCache.value));
   if (missing.length === 0) return;
   try {
-    // Request only the IDs we actually need
     const params = new URLSearchParams();
     params.set("ids", missing.join(","));
     const r = await fetch(`/api/companies/by-ids?${params.toString()}`);
@@ -194,7 +193,7 @@ watch(data, (rows) => {
 }, { immediate: true });
 
 function resolvedCompanyName(row: ContactRow): string {
-  if (row.company_id && companyNameCache.value[row.company_id]) return companyNameCache.value[row.company_id];
+  if (row.company_uuid && companyNameCache.value[row.company_uuid]) return companyNameCache.value[row.company_uuid];
   return "—";
 }
 
@@ -210,7 +209,7 @@ function openAttachModal(row: ContactRow) {
 function onCompanyAttached(payload: { contactId: string; companyId: string; companyName: string }) {
   const row = attachTargetRow.value;
   if (row) {
-    row.company_id = payload.companyId;
+    row.company_uuid = payload.companyId;
     row.company_name = payload.companyName;
     companyNameCache.value = { ...companyNameCache.value, [payload.companyId]: payload.companyName };
   }
@@ -330,8 +329,8 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
     title: "Company(from DB)",
     width: 200,
     render: (row) => {
-      // Show resolved name if company_id is set (even while cache is loading)
-      if (row.company_id) {
+      // Show resolved name if company_uuid is set (even while cache is loading)
+      if (row.company_uuid) {
         const name = resolvedCompanyName(row);
         return h(NTag, { title: name, type: "success", bordered: false, size: "small" }, name);
       }
@@ -421,7 +420,7 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
         :columns="columns"
         :data="data"
         :scroll-x="1200"
-        :row-key="(r: ContactRow) => (r.id ?? `${r.company_id ?? ''}/${r.first_name ?? ''}/${r.last_name ?? ''}/${r.position ?? ''}`)"
+        :row-key="(r: ContactRow) => (r.id ?? `${r.company_uuid ?? ''}/${r.first_name ?? ''}/${r.last_name ?? ''}/${r.position ?? ''}`)"
         v-model:checked-row-keys="checkedKeys"
         remote
         :pagination="pagination"

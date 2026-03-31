@@ -32,16 +32,22 @@ let channelStatusHandlerBusy = false;
 
 const subscribersByProject = new Map<string, Set<WsClient>>();
 
-/** Per-browser pagination + tab; client sends JSON after connect and when it changes. */
+/** Per-browser pagination + tab + optional company list filter; client sends JSON after connect and when it changes. */
 const wsTableParams = new WeakMap<
   WsClient,
-  { entityType: EnrichmentEntityType; limit: number; offset: number }
+  { entityType: EnrichmentEntityType; limit: number; offset: number; listUuid: string | null }
 >();
 
-const DEFAULT_TABLE_PARAMS: { entityType: EnrichmentEntityType; limit: number; offset: number } = {
+const DEFAULT_TABLE_PARAMS: {
+  entityType: EnrichmentEntityType;
+  limit: number;
+  offset: number;
+  listUuid: string | null;
+} = {
   entityType: "company",
   limit: 25,
   offset: 0,
+  listUuid: null,
 };
 
 const BROADCAST_DEBOUNCE_MS = 150;
@@ -84,8 +90,9 @@ async function pushEnrichmentDataForProject(projectId: string): Promise<void> {
   for (const ws of set) {
     if (ws.readyState !== ws.OPEN) continue;
     const p = wsTableParams.get(ws) ?? DEFAULT_TABLE_PARAMS;
+    const listFilter = p.listUuid?.trim() ? p.listUuid.trim() : null;
     const [tableResult, agentsResult] = await Promise.all([
-      getEnrichmentTableData(client, projectId, p.entityType, p.limit, p.offset),
+      getEnrichmentTableData(client, projectId, p.entityType, p.limit, p.offset, listFilter),
       listEnrichmentAgentsForEntityType(client, p.entityType),
     ]);
     const err = tableResult.error ?? agentsResult.error ?? null;
@@ -97,6 +104,7 @@ async function pushEnrichmentDataForProject(projectId: string): Promise<void> {
           entityType: p.entityType,
           limit: p.limit,
           offset: p.offset,
+          listUuid: p.listUuid ?? null,
           total: tableResult.total,
           agentNames: tableResult.agentNames,
           rows: tableResult.rows,
@@ -308,11 +316,14 @@ export function attachEnrichmentTableSocket(ws: WsClient, projectId: string): vo
         entityType?: unknown;
         limit?: unknown;
         offset?: unknown;
+        listUuid?: unknown;
       };
       const entityType = parseEntityType(j.entityType);
       const limit = Math.min(Math.max(Number(j.limit) || DEFAULT_TABLE_PARAMS.limit, 1), 100);
       const offset = Math.max(Number(j.offset) || 0, 0);
-      wsTableParams.set(ws, { entityType, limit, offset });
+      const listUuidRaw =
+        typeof j.listUuid === "string" && j.listUuid.trim() ? j.listUuid.trim() : null;
+      wsTableParams.set(ws, { entityType, limit, offset, listUuid: listUuidRaw });
       void pushEnrichmentDataForProject(projectId);
     } catch {
       /* ignore invalid client messages */

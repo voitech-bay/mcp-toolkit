@@ -1,13 +1,21 @@
 export interface TableCounts {
+  companies: number;
   contacts: number;
   linkedin_messages: number;
   senders: number;
+  contact_lists: number;
+  flows: number;
+  flow_leads: number;
 }
 
 export interface LatestRows {
+  companies: Record<string, unknown>[];
   contacts: Record<string, unknown>[];
   linkedin_messages: Record<string, unknown>[];
   senders: Record<string, unknown>[];
+  contact_lists: Record<string, unknown>[];
+  flows: Record<string, unknown>[];
+  flow_leads: Record<string, unknown>[];
 }
 
 export interface StateResponse {
@@ -17,9 +25,13 @@ export interface StateResponse {
 }
 
 export interface SyncResult {
+  companies: { fetched: number; upserted: number; error: string | null };
   contacts: { fetched: number; upserted: number; error: string | null };
   linkedin_messages: { fetched: number; upserted: number; error: string | null };
   senders: { fetched: number; upserted: number; error: string | null };
+  contact_lists: { fetched: number; upserted: number; error: string | null };
+  flows: { fetched: number; upserted: number; error: string | null };
+  flow_leads: { fetched: number; upserted: number; error: string | null };
   error: string | null;
 }
 

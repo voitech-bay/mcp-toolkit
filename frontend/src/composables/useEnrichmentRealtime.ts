@@ -9,6 +9,8 @@ export type EnrichmentDataPayload = {
   entityType: "company" | "contact";
   limit: number;
   offset: number;
+  /** Same filter as GET /api/enrichment-table?listUuid= (companies + contacts). */
+  listUuid?: string | null;
   total: number;
   agentNames: string[];
   rows: unknown[];
@@ -32,7 +34,12 @@ export type EnrichmentBatchStartedPayload = {
  */
 export function useEnrichmentRealtime(
   projectId: Ref<string | null>,
-  tableParams: Ref<{ entityType: "company" | "contact"; limit: number; offset: number }>,
+  tableParams: Ref<{
+    entityType: "company" | "contact";
+    limit: number;
+    offset: number;
+    listUuid: string | null;
+  }>,
   options: {
     onEnrichmentData: (payload: EnrichmentDataPayload) => void;
     pausePoll: () => void;

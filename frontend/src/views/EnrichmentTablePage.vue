@@ -30,6 +30,7 @@ import {
   NPopconfirm,
   NDrawer,
   NDrawerContent,
+  NTooltip,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
@@ -322,6 +323,46 @@ const tableError = ref("");
 const page = ref(1);
 const pageSize = ref(25);
 const PAGE_SIZES = [10, 25, 50, 100];
+
+/** Filter companies/contacts by GetSales contact list (Contacts.list_uuid). */
+const listFilterUuid = ref<string | null>(null);
+const contactLists = ref<Array<{ uuid: string; name: string }>>([]);
+const contactListsLoading = ref(false);
+
+const contactListSelectOptions = computed<SelectOption[]>(() =>
+  contactLists.value.map((l) => ({
+    label: l.name?.trim() ? l.name : l.uuid,
+    value: l.uuid,
+  }))
+);
+
+/** Resolve list_uuid → synced list name for contact column. */
+const listNameByUuid = computed(() => {
+  const m = new Map<string, string>();
+  for (const l of contactLists.value) {
+    m.set(l.uuid, l.name?.trim() ? l.name : l.uuid);
+  }
+  return m;
+});
+
+async function loadContactLists() {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId) {
+    contactLists.value = [];
+    return;
+  }
+  contactListsLoading.value = true;
+  try {
+    const r = await fetch(`/api/contact-lists?projectId=${encodeURIComponent(projectId)}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Failed to load contact lists");
+    contactLists.value = Array.isArray(j.data) ? j.data : [];
+  } catch {
+    contactLists.value = [];
+  } finally {
+    contactListsLoading.value = false;
+  }
+}
 
 /** Tasks held in worker memory waiting to form a batch (sum across all workers). */
 const workerBatchBufferCount = computed(() =>
@@ -773,15 +814,261 @@ function columnTitle(key: string): string {
     company_id: "Company ID",
     project_company_id: "Project company link",
     contact_count: "Contacts",
-    linkedin_url: "LinkedIn",
+    website: "Website",
+    industry: "Industry",
+    employees_range: "Size",
+    linkedin: "LinkedIn",
+    linkedin_url: "LinkedIn URL",
     work_email: "Work email",
     personal_email: "Personal email",
     connections_number: "Connections",
     uuid: "Contact ID",
+    company_uuid: "Company",
     contacts_preview: "Contacts preview",
     hypotheses: "Hypotheses",
+    list_uuid: "List",
+    linkedin_status: "LI status",
+    headline: "Headline",
+    title: "Title",
   };
   return map[key] ?? key.replace(/_/g, " ");
+}
+
+function shortId(s: string, head = 8): string {
+  if (!s || s.length <= head + 2) return s;
+  return `${s.slice(0, head)}…`;
+}
+
+function hrefForUrl(raw: string): string {
+  const t = raw.trim();
+  if (!t) return "";
+  return /^https?:\/\//i.test(t) ? t : `https://${t}`;
+}
+
+function statusTagType(
+  s: string | null | undefined
+): "default" | "success" | "warning" | "error" | "info" {
+  const x = (s ?? "").toLowerCase();
+  if (!x) return "default";
+  if (/(active|open|connected|success|done|ok)/i.test(x)) return "success";
+  if (/(warn|pending|pause)/i.test(x)) return "warning";
+  if (/(error|fail|stop|block)/i.test(x)) return "error";
+  if (/(queue|run)/i.test(x)) return "info";
+  return "default";
+}
+
+function parseTagsArray(val: unknown): string[] {
+  if (!Array.isArray(val)) return [];
+  return val
+    .map((x) => (typeof x === "string" || typeof x === "number" ? String(x) : ""))
+    .filter(Boolean);
+}
+
+function renderLink(href: string, label: string) {
+  const hrf = hrefForUrl(href);
+  if (!hrf) return h("span", { class: "cell-muted" }, "—");
+  return h(
+    "a",
+    {
+      href: hrf,
+      target: "_blank",
+      rel: "noopener noreferrer",
+      class: "enrichment-cell-link",
+    },
+    label.length > 48 ? `${label.slice(0, 46)}…` : label
+  );
+}
+
+function renderEntityCell(key: string, row: EnrichmentTableRow) {
+  const e = row.entity;
+  const v = e[key];
+
+  if (key === "tags") {
+    const tags = parseTagsArray(v);
+    if (!tags.length) return h("span", { class: "cell-muted" }, "—");
+    return h(
+      NSpace,
+      { size: 4, wrap: true },
+      {
+        default: () =>
+          tags.slice(0, 14).map((t) =>
+            h(NTag, { size: "small", round: true, bordered: false }, { default: () => t })
+          ),
+      }
+    );
+  }
+
+  if (key === "hypotheses") {
+    const hyps = Array.isArray(v) ? v : [];
+    const names = hyps
+      .map((x) =>
+        x && typeof x === "object" && "name" in x ? String((x as { name: unknown }).name) : ""
+      )
+      .filter(Boolean);
+    if (!names.length) return h("span", { class: "cell-muted" }, "—");
+    return h(
+      NSpace,
+      { size: 4, wrap: true },
+      {
+        default: () =>
+          names.slice(0, 8).map((name) =>
+            h(
+              NTag,
+              { size: "small", type: "info", round: true, bordered: false },
+              { default: () => name }
+            )
+          ),
+      }
+    );
+  }
+
+  if (key === "status" || key === "linkedin_status") {
+    const s = v == null ? "" : String(v);
+    if (!s) return h("span", { class: "cell-muted" }, "—");
+    return h(
+      NTag,
+      { size: "small", type: statusTagType(s), round: true, bordered: false },
+      { default: () => s }
+    );
+  }
+
+  if (key === "contact_count") {
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n)) return h("span", { class: "cell-muted" }, "—");
+    return h(
+      NTag,
+      { size: "small", round: true, bordered: false, type: n > 0 ? "success" : "default" },
+      { default: () => String(n) }
+    );
+  }
+
+  if (key === "connections_number") {
+    const n = typeof v === "number" ? v : Number(v);
+    if (!Number.isFinite(n)) return h("span", { class: "cell-muted" }, "—");
+    return h("span", { class: "enrichment-num" }, n.toLocaleString());
+  }
+
+  if (key === "list_uuid") {
+    const uuid = typeof v === "string" ? v : "";
+    if (!uuid) return h("span", { class: "cell-muted" }, "—");
+    const label = listNameByUuid.value.get(uuid) ?? shortId(uuid, 10);
+    return h(
+      NTooltip,
+      { trigger: "hover" },
+      {
+        trigger: () =>
+          h(
+            NTag,
+            { size: "small", type: "info", round: true, bordered: false },
+            { default: () => label }
+          ),
+        default: () => uuid,
+      }
+    );
+  }
+
+  if (key === "company_uuid") {
+    const uuid = typeof v === "string" ? v : "";
+    if (!uuid) return h("span", { class: "cell-muted" }, "—");
+    return h(
+      NTooltip,
+      { trigger: "hover" },
+      {
+        trigger: () =>
+          h("code", { class: "enrichment-id-chip" }, shortId(uuid, 10)),
+        default: () => uuid,
+      }
+    );
+  }
+
+  if (key === "website" || key === "linkedin_url") {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (!s) return h("span", { class: "cell-muted" }, "—");
+    return renderLink(s, key === "website" ? s.replace(/^https?:\/\//i, "").replace(/\/$/, "") : "Open");
+  }
+
+  if (key === "linkedin" && activeTab.value === "company") {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (!s) return h("span", { class: "cell-muted" }, "—");
+    return renderLink(s, "Profile");
+  }
+
+  if (key === "linkedin" && activeTab.value === "contact") {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (!s) return h("span", { class: "cell-muted" }, "—");
+    if (/^https?:\/\//i.test(s) || /linkedin\.com/i.test(s)) {
+      return renderLink(s, "Profile");
+    }
+    return h("span", { class: "cell-text-mono", title: s }, s.length > 24 ? `${s.slice(0, 22)}…` : s);
+  }
+
+  if (key === "created_at") {
+    const s = typeof v === "string" ? v : "";
+    if (!s) return h("span", { class: "cell-muted" }, "—");
+    try {
+      return h("span", { class: "cell-date" }, new Date(s).toLocaleString());
+    } catch {
+      return h("span", {}, formatCellValue(key, v));
+    }
+  }
+
+  if (key === "headline") {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (!s) return h("span", { class: "cell-muted" }, "—");
+    return h(
+      NTooltip,
+      { trigger: "hover", style: { maxWidth: "420px" } },
+      {
+        trigger: () =>
+          h("span", { class: "cell-ellipsis-inline" }, s.length > 80 ? `${s.slice(0, 78)}…` : s),
+        default: () => s,
+      }
+    );
+  }
+
+  if (key === "location" && v && typeof v === "object") {
+    return h(
+      "span",
+      { class: "cell-text-small" },
+      formatCellValue(key, v)
+    );
+  }
+
+  return h("span", { class: "cell-text" }, formatCellValue(key, v));
+}
+
+/** Columns with custom VNodes — disable naive-ui ellipsis to avoid broken layout/tooltips. */
+const BASE_COLUMN_RICH_KEYS = new Set([
+  "tags",
+  "hypotheses",
+  "status",
+  "linkedin_status",
+  "contact_count",
+  "list_uuid",
+  "company_uuid",
+  "website",
+  "linkedin_url",
+  "linkedin",
+  "headline",
+  "connections_number",
+  "created_at",
+]);
+
+function baseColumnWidth(key: string): number {
+  const wide: Record<string, number> = {
+    name: 200,
+    company_name: 190,
+    headline: 240,
+    domain: 150,
+    website: 120,
+    position: 130,
+    work_email: 170,
+    personal_email: 160,
+    title: 120,
+    location: 140,
+    created_at: 150,
+  };
+  return wide[key] ?? 128;
 }
 
 function rowKey(row: EnrichmentTableRow): string {
@@ -1382,6 +1669,9 @@ async function fetchTable(showSpinner = true) {
       limit: String(pageSize.value),
       offset: String(off),
     });
+    if (listFilterUuid.value?.trim()) {
+      q.set("listUuid", listFilterUuid.value.trim());
+    }
     const r = await fetch(`/api/enrichment-table?${q}`);
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Failed to load enrichment table");
@@ -1620,9 +1910,9 @@ const baseColumns = computed<DataTableColumns<EnrichmentTableRow>>(() => {
     cols.push({
       title: columnTitle(key),
       key: `base:${key}`,
-      width: key === "name" || key === "company_name" ? 200 : 140,
-      ellipsis: { tooltip: true },
-      render: (row) => formatCellValue(key, row.entity[key]),
+      width: baseColumnWidth(key),
+      ellipsis: BASE_COLUMN_RICH_KEYS.has(key) ? false : { tooltip: true },
+      render: (row) => renderEntityCell(key, row),
     });
   }
   return cols;
@@ -1739,13 +2029,23 @@ watch(
   () => projectStore.selectedProjectId,
   (id) => {
     checkedRowKeys.value = [];
+    listFilterUuid.value = null;
     if (id) {
       void fetchAgents();
+      void loadContactLists();
       page.value = 1;
       void fetchTable();
     }
   }
 );
+
+watch(listFilterUuid, () => {
+  if (page.value !== 1) {
+    page.value = 1;
+  } else {
+    void fetchTable();
+  }
+});
 
 watch([page, pageSize], () => {
   checkedRowKeys.value = [];
@@ -1764,6 +2064,7 @@ watch(
 
 onMounted(() => {
   void fetchAgents();
+  void loadContactLists();
   void fetchTable();
   resumePoll();
 });
@@ -1780,12 +2081,16 @@ const enrichmentTableParams = computed(() => ({
   entityType: activeTab.value,
   limit: pageSize.value,
   offset: (page.value - 1) * pageSize.value,
+  listUuid: listFilterUuid.value?.trim() || null,
 }));
 
 function applyEnrichmentFromSocket(p: EnrichmentDataPayload) {
   const projectId = projectStore.selectedProjectId;
   if (!projectId || p.projectId !== projectId) return;
   if (p.entityType !== activeTab.value) return;
+  const expectedListUuid = listFilterUuid.value?.trim() || null;
+  const payloadListUuid = p.listUuid ?? null;
+  if (payloadListUuid !== expectedListUuid) return;
   if (p.limit !== pageSize.value || p.offset !== (page.value - 1) * pageSize.value) return;
   total.value = Number(p.total ?? 0);
   agentNames.value = Array.isArray(p.agentNames) ? p.agentNames : [];
@@ -1858,8 +2163,22 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
   <div class="enrichment-page">
     <NCard title="Enrichment table" class="main-card">
       <template #header-extra>
-        <NSpace size="small" align="center">
+        <NSpace size="small" align="center" wrap>
           <NButton size="small" quaternary @click="fetchTable()">Refresh</NButton>
+          <span
+            v-if="tableLoading && rows.length === 0 && !tableError"
+            class="muted enrichment-total-count"
+            aria-live="polite"
+            >…</span
+          >
+          <span
+            v-else
+            class="muted enrichment-total-count"
+            aria-live="polite"
+            :title="`Total rows for this tab and filters (${activeTab === 'company' ? 'companies' : 'contacts'})`"
+          >
+            <strong>{{ total.toLocaleString() }}</strong> total rows
+          </span>
           <NPagination
             v-model:page="page"
             v-model:page-size="pageSize"
@@ -1879,6 +2198,26 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
           <p class="tab-hint">Project contacts with per-agent queue and result state.</p>
         </NTabPane>
       </NTabs>
+
+      <div class="enrichment-filters">
+        <span class="enrichment-filters__label">Filters</span>
+        <NSelect
+          v-model:value="listFilterUuid"
+          :options="contactListSelectOptions"
+          :loading="contactListsLoading"
+          clearable
+          filterable
+          placeholder="All contact lists"
+          size="small"
+          class="enrichment-filters__select"
+        />
+        <span v-if="activeTab === 'company'" class="muted enrichment-filters__hint">
+          Companies linked to the project that have at least one contact on this list.
+        </span>
+        <span v-else class="muted enrichment-filters__hint">
+          Contacts in this project whose <code>list_uuid</code> matches the selected list.
+        </span>
+      </div>
 
       <div class="toolbar toolbar-main">
         <NSpace wrap align="center" :size="10">
@@ -2366,6 +2705,75 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
   font-size: 0.875rem;
   opacity: 0.75;
 }
+.enrichment-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--n-border-radius);
+  background: var(--n-color-modal);
+  border: 1px solid var(--n-border-color);
+}
+.enrichment-filters__label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  opacity: 0.9;
+}
+.enrichment-filters__select {
+  min-width: 240px;
+  max-width: min(100%, 420px);
+}
+.enrichment-filters__hint {
+  font-size: 0.8rem;
+  flex: 1 1 200px;
+}
+.enrichment-filters__hint code {
+  font-size: 0.75em;
+}
+.enrichment-page .cell-muted {
+  opacity: 0.55;
+  font-size: 0.92em;
+}
+.enrichment-page .enrichment-cell-link {
+  color: var(--n-primary-color);
+  text-decoration: none;
+}
+.enrichment-page .enrichment-cell-link:hover {
+  text-decoration: underline;
+}
+.enrichment-page .enrichment-id-chip {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--n-th-icon-color) 12%, transparent);
+}
+.enrichment-page .cell-ellipsis-inline {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.enrichment-page .cell-date {
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.enrichment-page .cell-text-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.8rem;
+}
+.enrichment-page .cell-text-small {
+  font-size: 0.8rem;
+  opacity: 0.92;
+}
+.enrichment-page .enrichment-num {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
 .toolbar {
   margin: 0.5rem 0 1rem;
 }
@@ -2380,6 +2788,10 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
   align-items: center;
   gap: 0.75rem;
   flex-wrap: wrap;
+}
+.enrichment-total-count strong {
+  font-weight: 600;
+  color: var(--n-text-color);
 }
 .registry-toolbar {
   display: flex;

@@ -675,7 +675,7 @@ function renderWorkerLabel(option: DropdownOption) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  max-width: min(100%, 280px);
+  max-width: min(100%, 320px);
 
   :deep(.n-button__content) {
     flex-wrap: wrap;

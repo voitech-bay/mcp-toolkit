@@ -59,7 +59,6 @@ export const CONTACTS_COLUMNS = [
   "last_enrich_at",
   "created_at",
   "updated_at",
-  "company_id",
   "title",
   "linkedin_url",
   "email",
@@ -68,7 +67,6 @@ export const CONTACTS_COLUMNS = [
 
 /** Columns on Contacts that are backfilled/app-maintained; sync omits them unless the API explicitly sends them. */
 export const CONTACTS_BACKFILLED_COLUMNS = new Set([
-  "company_id",
   "title",
   "linkedin_url",
   "email",
@@ -135,6 +133,100 @@ export const SENDERS_COLUMNS = [
   "updated_at",
   "project_id",
 ] as const;
+
+/** Columns that exist on public.ContactLists. Sync includes only these. */
+export const CONTACT_LISTS_COLUMNS = [
+  "uuid",
+  "team_id",
+  "user_id",
+  "name",
+  "created_at",
+  "updated_at",
+  "project_id",
+] as const;
+
+/** Columns that exist on public.Flows. Sync includes only these. */
+export const FLOWS_COLUMNS = [
+  "uuid",
+  "team_id",
+  "user_id",
+  "name",
+  "description",
+  "flow_workspace_uuid",
+  "flow_version_uuid",
+  "status",
+  "priority",
+  "created_at",
+  "updated_at",
+  "project_id",
+] as const;
+
+/** Columns that exist on public.FlowLeads. Sync includes only these. */
+export const FLOW_LEADS_COLUMNS = [
+  "uuid",
+  "team_id",
+  "flow_uuid",
+  "lead_uuid",
+  "company_uuid",
+  "contact_source_id",
+  "sender_profile_uuid",
+  "status",
+  "error_msg",
+  "created_at",
+  "updated_at",
+  "project_id",
+] as const;
+
+/** Columns that exist on public.companies. Sync uses uuid as id. */
+export const COMPANIES_COLUMNS = [
+  "id",
+  "team_id",
+  "name",
+  "domain",
+  "website",
+  "linkedin",
+  "ln_id",
+  "facebook",
+  "twitter",
+  "phone",
+  "logo_url",
+  "industry",
+  "employees_range",
+  "followers",
+  "employees_on_linkedin",
+  "year_established",
+  "tagline",
+  "about",
+  "specialities",
+  "hashtags",
+  "hq_raw_address",
+  "hq_location",
+  "deal_size",
+  "pipeline_stage_uuid",
+  "status",
+  "linkedin_status",
+  "created_at",
+  "updated_at",
+] as const;
+
+/**
+ * Map a raw GetSales company item (already unwrapped from { company: {...} }) to
+ * a companies row: use the GetSales uuid as id, whitelist columns.
+ */
+export function mapCompanyForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+  const allowed = new Set<string>(COMPANIES_COLUMNS);
+  const base: Record<string, unknown> = { ...row };
+  // Map GetSales uuid -> id (the primary key now equals GetSales uuid)
+  if (base.id == null && base.uuid != null) {
+    base.id = base.uuid;
+  }
+  delete base.uuid;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(base)) {
+    if (allowed.has(key)) out[key] = base[key];
+  }
+  return out;
+}
 
 /**
  * Pick only allowed keys from row. Keys not in allowedSet are dropped.

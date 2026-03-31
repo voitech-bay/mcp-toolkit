@@ -3,6 +3,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted, h } from "vue";
 import {
   NCard, NButton, NInput, NAlert, NSpin, NTag,
   NCollapse, NCollapseItem, NDataTable, NText, NTooltip,
+  NDatePicker,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
@@ -36,10 +37,79 @@ const elapsedSeconds = ref(0);
 const syncComplete = ref(false);
 const logEntries = ref<SyncLogEntry[]>([]);
 const logPanelEl = ref<HTMLElement | null>(null);
-const progress = ref({ contacts: 0, linkedin_messages: 0, senders: 0 });
+const progress = ref({ companies: 0, contacts: 0, linkedin_messages: 0, senders: 0, contact_lists: 0 });
 
 const historyLoading = ref(false);
 const history = ref<SyncRun[]>([]);
+
+const analyticsCollectedDays = ref<string[]>([]);
+const analyticsDaysLoading = ref(false);
+const analyticsSyncLoading = ref(false);
+const analyticsDateRange = ref<[number, number] | null>(null);
+
+/** YYYY-MM-DD in local calendar (matches GetSales day boundaries UX). */
+function toLocalYmd(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function enumerateLocalYmdInclusive(startMs: number, endMs: number): string[] {
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  const cur = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const endDay = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  const out: string[] = [];
+  while (cur.getTime() <= endDay.getTime()) {
+    out.push(toLocalYmd(cur.getTime()));
+    cur.setDate(cur.getDate() + 1);
+  }
+  return out;
+}
+
+const sortedCollectedDays = computed(() =>
+  [...analyticsCollectedDays.value].sort((a, b) => a.localeCompare(b))
+);
+
+const collectedDaySet = computed(() => new Set(analyticsCollectedDays.value));
+
+/** When a range is selected: how many days are new vs already stored. */
+const analyticsRangeStats = computed(() => {
+  const r = analyticsDateRange.value;
+  if (!r) return null;
+  const [a, b] = r;
+  const days = enumerateLocalYmdInclusive(a, b);
+  let already = 0;
+  for (const d of days) {
+    if (collectedDaySet.value.has(d)) already++;
+  }
+  return {
+    total: days.length,
+    alreadyCollected: already,
+    toFetch: days.length - already,
+  };
+});
+
+const analyticsShortcuts: Record<string, () => [number, number]> = {
+  "Last 7 days": () => {
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(start.getDate() - 6);
+    const s = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+    const e = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+    return [s, e];
+  },
+  "Last 30 days": () => {
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(start.getDate() - 29);
+    const s = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+    const e = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+    return [s, e];
+  },
+};
 
 let ws: WebSocket | null = null;
 let elapsedTimer: ReturnType<typeof setInterval> | null = null;
@@ -93,6 +163,20 @@ function latestCreatedAt(rows: Record<string, unknown>[]): string {
     .sort()
     .reverse();
   return sorted[0] ? new Date(sorted[0]).toLocaleString() : "—";
+}
+
+/** Latest activity from created_at / updated_at (for flows & contact lists). */
+function latestTimestamp(rows: Record<string, unknown>[]): string {
+  if (!rows.length) return "—";
+  const times: number[] = [];
+  for (const r of rows) {
+    const c = r.created_at;
+    const u = r.updated_at;
+    if (typeof c === "string") times.push(new Date(c).getTime());
+    if (typeof u === "string") times.push(new Date(u).getTime());
+  }
+  if (!times.length) return "—";
+  return new Date(Math.max(...times)).toLocaleString();
 }
 
 // --- API ---
@@ -151,6 +235,55 @@ async function loadHistory() {
   }
 }
 
+async function loadAnalyticsCollectedDays() {
+  if (!selectedProjectId.value) return;
+  analyticsDaysLoading.value = true;
+  try {
+    const r = await fetch(`/api/analytics-collected-days?projectId=${encodeURIComponent(selectedProjectId.value)}`);
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error ?? "Failed to load collected analytics days");
+    analyticsCollectedDays.value = data.dates ?? [];
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to load analytics days");
+  } finally {
+    analyticsDaysLoading.value = false;
+  }
+}
+
+async function runAnalyticsSync() {
+  if (!selectedProjectId.value || !analyticsDateRange.value) return;
+  const [start, end] = analyticsDateRange.value;
+  const dateFrom = toLocalYmd(start);
+  const dateTo = toLocalYmd(end);
+  analyticsSyncLoading.value = true;
+  try {
+    const r = await fetch("/api/analytics-sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: selectedProjectId.value,
+        dateFrom,
+        dateTo,
+      }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error ?? "Analytics sync failed");
+    const synced = (data.daysSynced as string[] | undefined)?.length ?? 0;
+    const skipped = (data.daysSkippedAlreadyCollected as string[] | undefined)?.length ?? 0;
+    const errs = (data.errors as string[] | undefined) ?? [];
+    if (errs.length > 0) {
+      message.warning(`Analytics sync finished with ${errs.length} issue(s); ${synced} day(s) synced, ${skipped} skipped (already had data).`);
+    } else {
+      message.success(`Analytics: ${synced} day(s) synced, ${skipped} skipped (already collected).`);
+    }
+    await loadAnalyticsCollectedDays();
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Analytics sync failed");
+  } finally {
+    analyticsSyncLoading.value = false;
+  }
+}
+
 function connectWs(runId: string) {
   if (ws) ws.close();
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -162,7 +295,9 @@ function connectWs(runId: string) {
       logEntries.value.push(event.entry);
       if (event.entry.kind === "upsert" && event.entry.table_name && event.entry.row_count) {
         const t = event.entry.table_name.toLowerCase();
-        if (t.includes("contact")) progress.value.contacts += event.entry.row_count;
+        if (t.includes("compan")) progress.value.companies += event.entry.row_count;
+        else if (t.includes("contactlist")) progress.value.contact_lists += event.entry.row_count;
+        else if (t.includes("contact")) progress.value.contacts += event.entry.row_count;
         else if (t.includes("linkedin") || t.includes("message")) progress.value.linkedin_messages += event.entry.row_count;
         else if (t.includes("sender")) progress.value.senders += event.entry.row_count;
       }
@@ -190,7 +325,7 @@ async function startSync() {
   syncing.value = true;
   syncComplete.value = false;
   logEntries.value = [];
-  progress.value = { contacts: 0, linkedin_messages: 0, senders: 0 };
+  progress.value = { companies: 0, contacts: 0, linkedin_messages: 0, senders: 0, contact_lists: 0 };
   elapsedSeconds.value = 0;
   try {
     const r = await fetch("/api/supabase-sync", {
@@ -229,16 +364,18 @@ watch(selectedProjectId, async (id) => {
   history.value = [];
   logEntries.value = [];
   syncComplete.value = false;
+  analyticsCollectedDays.value = [];
+  analyticsDateRange.value = null;
   if (!id) return;
   credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
   credApiKey.value = "";
-  await Promise.all([loadPreflight(), loadHistory()]);
+  await Promise.all([loadPreflight(), loadHistory(), loadAnalyticsCollectedDays()]);
 });
 
 onMounted(async () => {
   if (selectedProjectId.value) {
     credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
-    await Promise.all([loadPreflight(), loadHistory()]);
+    await Promise.all([loadPreflight(), loadHistory(), loadAnalyticsCollectedDays()]);
   }
 });
 onUnmounted(() => {
@@ -316,6 +453,12 @@ const preflightRows = computed(() => {
   const latest = preflight.value?.latest;
   return [
     {
+      label: "Companies",
+      count: counts?.companies ?? "—",
+      latest: latestCreatedAt(latest?.companies ?? []),
+      sample: (latest?.companies ?? []).slice(0, 3),
+    },
+    {
       label: "Contacts",
       count: counts?.contacts ?? "—",
       latest: latestCreatedAt(latest?.contacts ?? []),
@@ -332,6 +475,24 @@ const preflightRows = computed(() => {
       count: counts?.senders ?? "—",
       latest: latestCreatedAt(latest?.senders ?? []),
       sample: (latest?.senders ?? []).slice(0, 3),
+    },
+    {
+      label: "Contact lists",
+      count: counts?.contact_lists ?? "—",
+      latest: latestTimestamp(latest?.contact_lists ?? []),
+      sample: (latest?.contact_lists ?? []).slice(0, 3),
+    },
+    {
+      label: "Flows",
+      count: counts?.flows ?? "—",
+      latest: latestTimestamp(latest?.flows ?? []),
+      sample: (latest?.flows ?? []).slice(0, 3),
+    },
+    {
+      label: "Flow leads",
+      count: counts?.flow_leads ?? "—",
+      latest: latestCreatedAt(latest?.flow_leads ?? []),
+      sample: (latest?.flow_leads ?? []).slice(0, 3),
     },
   ];
 });
@@ -495,15 +656,85 @@ const preflightRows = computed(() => {
       </div>
     </NCard>
 
+    <!-- Analytics snapshots (GetSales metrics API) -->
+    <NCard v-if="selectedProject" class="section">
+      <template #header>
+        <div class="card-header-row">
+          <span class="section-title">Analytics snapshots</span>
+          <NButton size="small" quaternary :loading="analyticsDaysLoading" @click="loadAnalyticsCollectedDays">
+            <RefreshCwIcon :size="13" />
+            &nbsp;Refresh days
+          </NButton>
+        </div>
+      </template>
+      <p class="muted hint" style="margin: 0 0 0.75rem">
+        Separate from <strong>Start Sync</strong> (contacts, messages, senders, contact lists, flows, flow leads). This only fills
+        <code>AnalyticsSnapshots</code> via
+        <code>POST /leads/api/leads/metrics</code>. Days already stored are skipped.
+      </p>
+      <NSpin :show="analyticsDaysLoading">
+        <div class="analytics-row">
+          <span class="form-label">Date range</span>
+          <NDatePicker
+            v-model:value="analyticsDateRange"
+            type="daterange"
+            clearable
+            :shortcuts="analyticsShortcuts"
+            :disabled="analyticsSyncLoading"
+          />
+          <NButton
+            type="primary"
+            :loading="analyticsSyncLoading"
+            :disabled="!analyticsDateRange"
+            @click="runAnalyticsSync"
+          >
+            Sync analytics
+          </NButton>
+        </div>
+        <p v-if="analyticsRangeStats && analyticsDateRange" class="muted hint analytics-range-hint">
+          In selected range: {{ analyticsRangeStats.total }} day(s) —
+          {{ analyticsRangeStats.alreadyCollected }} already collected,
+          {{ analyticsRangeStats.toFetch }} would be fetched (if not yet stored).
+        </p>
+        <div v-if="!selectedProject.api_key_set" class="muted hint" style="margin-top: 0.5rem">
+          No project API key — the server will use environment credentials if configured.
+        </div>
+        <div class="analytics-days" style="margin-top: 0.75rem">
+          <span class="muted" style="font-size: 0.85rem">Days already in database</span>
+          <span v-if="sortedCollectedDays.length" class="muted" style="font-size: 0.85rem">
+            ({{ sortedCollectedDays.length }})
+          </span>
+          <span class="muted" style="font-size: 0.85rem">:</span>
+          <div v-if="sortedCollectedDays.length" class="analytics-day-chips">
+            <NTag
+              v-for="d in sortedCollectedDays"
+              :key="d"
+              size="small"
+              round
+              type="success"
+              :bordered="false"
+            >
+              {{ d }}
+            </NTag>
+          </div>
+          <p v-else-if="!analyticsDaysLoading" class="muted hint" style="margin: 0.35rem 0 0">
+            None yet — pick a range and sync.
+          </p>
+        </div>
+      </NSpin>
+    </NCard>
+
     <!-- Real-Time Log Panel -->
     <NCard v-if="showLogPanel" class="section log-card">
       <template #header>
         <div class="card-header-row">
           <span class="section-title">Sync Log</span>
           <div v-if="logEntries.length > 0" class="progress-summary">
+            <NTag size="small" type="info">Companies: {{ progress.companies }}</NTag>
             <NTag size="small" type="info">Contacts: {{ progress.contacts }}</NTag>
             <NTag size="small" type="info">Messages: {{ progress.linkedin_messages }}</NTag>
             <NTag size="small" type="info">Senders: {{ progress.senders }}</NTag>
+            <NTag size="small" type="info">Contact lists: {{ progress.contact_lists }}</NTag>
           </div>
         </div>
       </template>
@@ -819,6 +1050,20 @@ const preflightRows = computed(() => {
   display: flex;
   gap: 0.4rem;
   flex-wrap: wrap;
+}
+
+.analytics-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.analytics-day-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  margin-top: 0.35rem;
 }
 
 /* History expanded log */
