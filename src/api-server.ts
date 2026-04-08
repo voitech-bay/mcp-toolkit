@@ -14,6 +14,7 @@ import {
   handleSupabaseState,
   handleSupabaseTableQuery,
   handleSupabaseSync,
+  handleSupabaseSyncCancel,
   handleAnalyticsCollectedDays,
   handleAnalyticsSync,
   handleConversation,
@@ -25,6 +26,7 @@ import {
   handleGetContactContextCounts,
   handleGetProjects,
   handleUpdateProjectCredentials,
+  handleSourceApiCheck,
   handleSyncPreflight,
   handleSyncStatus,
   handleSyncHistory,
@@ -253,6 +255,9 @@ const server = createServer(async (req, res) => {
       case "/api/supabase-sync":
         await handleSupabaseSync(req, res);
         return;
+      case "/api/supabase-sync-cancel":
+        await handleSupabaseSyncCancel(req, res);
+        return;
       case "/api/analytics-collected-days":
         if (req.method === "GET") {
           await handleAnalyticsCollectedDays(req, res);
@@ -329,6 +334,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/projects":
         await handleGetProjects(req, res);
+        return;
+      case "/api/source-api-check":
+        await handleSourceApiCheck(req, res);
         return;
       case "/api/sync-preflight":
         await handleSyncPreflight(req, res);
@@ -584,6 +592,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /health");
   console.log("  GET  /api/supabase-state");
   console.log("  POST /api/supabase-sync");
+  console.log("  POST /api/supabase-sync-cancel");
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");
   console.log("  POST /api/analytics-sync");
   console.log("  GET  /api/supabase-table-query");
@@ -596,6 +605,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /api/contact-context-counts?contact_ids=...");
   console.log("  GET  /api/projects");
   console.log("  PUT  /api/projects/:id/credentials");
+  console.log("  POST /api/source-api-check");
   console.log("  GET  /api/sync-preflight?projectId=<id>");
   console.log("  GET  /api/sync-status");
   console.log("  GET  /api/sync-history");

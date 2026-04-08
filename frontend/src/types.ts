@@ -24,6 +24,30 @@ export interface StateResponse {
   latestError?: string;
 }
 
+/** Main sync pipeline entity keys (matches server `SYNC_ENTITY_PIPELINE`). */
+export type SyncEntityKey =
+  | "companies"
+  | "contacts"
+  | "linkedin_messages"
+  | "senders"
+  | "contact_lists"
+  | "flows"
+  | "flow_leads";
+
+export const ALL_SYNC_ENTITY_KEYS: readonly SyncEntityKey[] = [
+  "companies",
+  "contacts",
+  "linkedin_messages",
+  "senders",
+  "contact_lists",
+  "flows",
+  "flow_leads",
+] as const;
+
+export function defaultSyncEntitySelection(): Record<SyncEntityKey, boolean> {
+  return Object.fromEntries(ALL_SYNC_ENTITY_KEYS.map((k) => [k, true])) as Record<SyncEntityKey, boolean>;
+}
+
 export interface SyncResult {
   companies: { fetched: number; upserted: number; error: string | null };
   contacts: { fetched: number; upserted: number; error: string | null };
@@ -56,7 +80,7 @@ export interface SyncLogEntry {
   created_at: string;
 }
 
-export type SyncRunStatus = "running" | "success" | "partial" | "error";
+export type SyncRunStatus = "running" | "success" | "partial" | "error" | "cancelled";
 
 export interface SyncRun {
   id: string;
@@ -85,6 +109,8 @@ export interface PreflightResult {
   latest: LatestRows | null;
   latestError?: string;
   activeSyncRun: { id: string; project_id: string | null } | null;
+  /** GET /flows/api/flows?limit=1 — verifies saved or env GetSales credentials. */
+  sourceApiCheck?: { ok: boolean; error?: string };
 }
 
 export type SyncWsMessage =

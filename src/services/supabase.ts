@@ -443,7 +443,31 @@ export async function ensureCompanies(
 export const SYNC_RUNS_TABLE = "sync_runs";
 export const SYNC_LOG_ENTRIES_TABLE = "sync_log_entries";
 
-export type SyncRunStatus = "running" | "success" | "partial" | "error";
+export type SyncRunStatus = "running" | "success" | "partial" | "error" | "cancelled";
+
+/**
+ * App uses cancelled/partial; many DB check constraints only allow running | success | error.
+ * Map before INSERT/UPDATE on sync_runs.
+ */
+export function syncRunStatusForDatabase(
+  status: SyncRunStatus,
+  error: string | null | undefined
+): { status: "running" | "success" | "error"; error: string | null } {
+  switch (status) {
+    case "cancelled":
+      return { status: "error", error: error ?? "Cancelled" };
+    case "partial":
+      return { status: "error", error: error ?? "Completed with partial failures" };
+    case "running":
+    case "success":
+    case "error":
+      return { status, error: error ?? null };
+    default: {
+      const _never: never = status;
+      return _never;
+    }
+  }
+}
 
 export interface SyncRunRow {
   id: string;
@@ -487,16 +511,43 @@ export async function updateSyncRun(
     error?: string | null;
   }
 ): Promise<{ error: string | null }> {
+  const db = syncRunStatusForDatabase(payload.status, payload.error);
   const { error } = await client
     .from(SYNC_RUNS_TABLE)
     .update({
       finished_at: payload.finished_at ?? new Date().toISOString(),
-      status: payload.status,
+      status: db.status,
       result_summary: payload.result_summary ?? null,
-      error: payload.error ?? null,
+      error: db.error,
     })
     .eq("id", runId);
   return { error: error?.message ?? null };
+}
+
+/**
+ * If the row is still `running`, set terminal status + error (e.g. user stop after redeploy when no in-process sync exists).
+ * Returns whether a row was updated.
+ */
+export async function markSyncRunFinishedIfStillRunning(
+  client: SupabaseClient,
+  runId: string,
+  options: { error: string }
+): Promise<{ updated: boolean; error: string | null }> {
+  const db = syncRunStatusForDatabase("cancelled", options.error);
+  const { data, error } = await client
+    .from(SYNC_RUNS_TABLE)
+    .update({
+      finished_at: new Date().toISOString(),
+      status: db.status,
+      result_summary: null,
+      error: db.error,
+    })
+    .eq("id", runId)
+    .eq("status", "running")
+    .select("id");
+  if (error) return { updated: false, error: error.message };
+  const rows = data as { id: string }[] | null;
+  return { updated: (rows?.length ?? 0) > 0, error: null };
 }
 
 /**
@@ -527,6 +578,8 @@ export async function insertSyncLogEntry(
 }
 
 export function getSupabase(): SupabaseClient | null {
+  console.log("Creating Supabase client", url, key);
+
   if (!url || !key) return null;
   return createClient(url, key);
 }

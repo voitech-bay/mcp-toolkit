@@ -3,15 +3,19 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted, h } from "vue";
 import {
   NCard, NButton, NInput, NAlert, NSpin, NTag,
   NCollapse, NCollapseItem, NDataTable, NText, NTooltip,
-  NDatePicker,
+  NDatePicker, NCheckbox,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import {
   CheckCircle2Icon, AlertTriangleIcon, RefreshCwIcon,
-  PlayIcon, KeyIcon, EyeIcon, EyeOffIcon, HistoryIcon,
+  PlayIcon, SquareStopIcon, KeyIcon, EyeIcon, EyeOffIcon, HistoryIcon,
 } from "lucide-vue-next";
-import type { SyncRun, PreflightResult, SyncWsMessage, SyncLogEntry } from "../types";
+import type {
+  SyncRun, PreflightResult, SyncWsMessage, SyncLogEntry, SyncEntityKey,
+} from "../types";
+import { ALL_SYNC_ENTITY_KEYS, defaultSyncEntitySelection } from "../types";
+import { SYNC_ENTITY_LABELS } from "../sync-entities";
 import { useProjectStore } from "../stores/project";
 
 // --- State ---
@@ -26,6 +30,7 @@ const credBaseUrl = ref(projectStore.selectedProject?.source_api_base_url ?? "")
 const credApiKey = ref("");
 const showApiKey = ref(false);
 const savingCreds = ref(false);
+const testingSourceApi = ref(false);
 
 const preflight = ref<PreflightResult | null>(null);
 const preflightLoading = ref(false);
@@ -37,7 +42,22 @@ const elapsedSeconds = ref(0);
 const syncComplete = ref(false);
 const logEntries = ref<SyncLogEntry[]>([]);
 const logPanelEl = ref<HTMLElement | null>(null);
-const progress = ref({ companies: 0, contacts: 0, linkedin_messages: 0, senders: 0, contact_lists: 0 });
+const progress = ref({
+  companies: 0,
+  contacts: 0,
+  linkedin_messages: 0,
+  senders: 0,
+  contact_lists: 0,
+  flows: 0,
+  flow_leads: 0,
+});
+
+/** Checked entity keys for the next sync (server adds FK dependencies automatically). */
+const syncEntitiesSelected = ref<Record<SyncEntityKey, boolean>>(defaultSyncEntitySelection());
+
+const selectedSyncEntityKeys = computed(() =>
+  ALL_SYNC_ENTITY_KEYS.filter((k) => syncEntitiesSelected.value[k])
+);
 
 const historyLoading = ref(false);
 const history = ref<SyncRun[]>([]);
@@ -46,6 +66,9 @@ const analyticsCollectedDays = ref<string[]>([]);
 const analyticsDaysLoading = ref(false);
 const analyticsSyncLoading = ref(false);
 const analyticsDateRange = ref<[number, number] | null>(null);
+
+/** Optional inclusive local calendar range for GetSales partitioned list sync (contacts, companies). */
+const syncPipelineDateRange = ref<[number, number] | null>(null);
 
 /** YYYY-MM-DD in local calendar (matches GetSales day boundaries UX). */
 function toLocalYmd(ms: number): string {
@@ -92,6 +115,24 @@ const analyticsRangeStats = computed(() => {
   };
 });
 
+const syncPipelineShortcuts: Record<string, () => [number, number]> = {
+  "Last 30 days": () => {
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(start.getDate() - 29);
+    const s = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+    const e = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+    return [s, e];
+  },
+  "Last year": () => {
+    const end = new Date();
+    const start = new Date(end.getFullYear() - 1, end.getMonth(), end.getDate());
+    const s = new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime();
+    const e = new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime();
+    return [s, e];
+  },
+};
+
 const analyticsShortcuts: Record<string, () => [number, number]> = {
   "Last 7 days": () => {
     const end = new Date();
@@ -125,12 +166,30 @@ const thisSyncRunning = computed(() => {
   return run != null && run.project_id === selectedProjectId.value;
 });
 
+/** Run id for cancel API: local session, or preflight when sync runs without this tab having started it (refresh / other tab). */
+const cancelSyncRunId = computed(() => {
+  if (activeRunId.value) return activeRunId.value;
+  if (thisSyncRunning.value && activeSyncRun.value?.id) return activeSyncRun.value.id;
+  return null;
+});
+
+const showStopSync = computed(() => cancelSyncRunId.value != null);
+
 const canSync = computed(() => {
   if (!selectedProject.value) return false;
   if (!selectedProject.value.api_key_set) return false;
   if (syncing.value) return false;
   if (activeSyncRun.value != null) return false;
+  if (selectedSyncEntityKeys.value.length === 0) return false;
   return true;
+});
+
+/** Test uses form values when present, otherwise saved project / env credentials. */
+const canTestSourceApi = computed(() => {
+  if (!selectedProject.value) return false;
+  const hasBase = !!(credBaseUrl.value.trim() || selectedProject.value.source_api_base_url);
+  const hasKey = !!(credApiKey.value.trim() || selectedProject.value.api_key_set);
+  return hasBase && hasKey;
 });
 
 const elapsedLabel = computed(() => {
@@ -193,6 +252,37 @@ async function loadPreflight() {
     preflightError.value = e instanceof Error ? e.message : "Preflight check failed";
   } finally {
     preflightLoading.value = false;
+  }
+}
+
+async function testSourceApiConnection() {
+  if (!selectedProjectId.value) return;
+  testingSourceApi.value = true;
+  try {
+    const body: { projectId: string; baseUrl?: string; apiKey?: string } = {
+      projectId: selectedProjectId.value,
+    };
+    const bu = credBaseUrl.value.trim();
+    if (bu) body.baseUrl = bu;
+    const ak = credApiKey.value.trim();
+    if (ak) body.apiKey = ak;
+    const r = await fetch("/api/source-api-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error ?? "Connection check failed");
+    if (data.ok) {
+      message.success("GetSales API key is valid");
+    } else {
+      message.error(data.error ?? "API key check failed");
+    }
+    await loadPreflight();
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Connection check failed");
+  } finally {
+    testingSourceApi.value = false;
   }
 }
 
@@ -297,6 +387,8 @@ function connectWs(runId: string) {
         const t = event.entry.table_name.toLowerCase();
         if (t.includes("compan")) progress.value.companies += event.entry.row_count;
         else if (t.includes("contactlist")) progress.value.contact_lists += event.entry.row_count;
+        else if (t.includes("flowlead")) progress.value.flow_leads += event.entry.row_count;
+        else if (t.includes("flow")) progress.value.flows += event.entry.row_count;
         else if (t.includes("contact")) progress.value.contacts += event.entry.row_count;
         else if (t.includes("linkedin") || t.includes("message")) progress.value.linkedin_messages += event.entry.row_count;
         else if (t.includes("sender")) progress.value.senders += event.entry.row_count;
@@ -307,7 +399,12 @@ function connectWs(runId: string) {
       syncing.value = false;
       activeRunId.value = null;
       stopElapsed();
-      message.success("Sync completed!");
+      const res = event.result as { cancelled?: boolean };
+      if (res.cancelled) {
+        message.warning("Sync stopped.");
+      } else {
+        message.success("Sync completed!");
+      }
       loadPreflight();
       loadHistory();
     }
@@ -320,18 +417,71 @@ function connectWs(runId: string) {
   };
 }
 
+async function stopSync() {
+  const runId = cancelSyncRunId.value;
+  if (!runId) return;
+  try {
+    const r = await fetch("/api/supabase-sync-cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ runId }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error ?? "Failed to request stop");
+    if (data.staleLockCleared) {
+      message.success("Stale sync cleared — it was not running on the server anymore.");
+      syncing.value = false;
+      activeRunId.value = null;
+      stopElapsed();
+    } else if (data.mode === "noop") {
+      message.info("That run was already finished.");
+      syncing.value = false;
+      activeRunId.value = null;
+      stopElapsed();
+    } else {
+      message.info("Stop requested — sync will finish after the current API page.");
+    }
+    await loadPreflight();
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Stop failed");
+  }
+}
+
 async function startSync() {
   if (!selectedProjectId.value) return;
   syncing.value = true;
   syncComplete.value = false;
   logEntries.value = [];
-  progress.value = { companies: 0, contacts: 0, linkedin_messages: 0, senders: 0, contact_lists: 0 };
+  progress.value = {
+    companies: 0,
+    contacts: 0,
+    linkedin_messages: 0,
+    senders: 0,
+    contact_lists: 0,
+    flows: 0,
+    flow_leads: 0,
+  };
   elapsedSeconds.value = 0;
   try {
+    const payload: {
+      projectId: string;
+      entities: SyncEntityKey[];
+      syncDateRange?: { from: string; to: string };
+    } = {
+      projectId: selectedProjectId.value,
+      entities: selectedSyncEntityKeys.value,
+    };
+    const dr = syncPipelineDateRange.value;
+    if (dr) {
+      payload.syncDateRange = {
+        from: toLocalYmd(dr[0]),
+        to: toLocalYmd(dr[1]),
+      };
+    }
     const r = await fetch("/api/supabase-sync", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ projectId: selectedProjectId.value }),
+      body: JSON.stringify(payload),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error ?? "Failed to start sync");
@@ -358,12 +508,24 @@ async function scrollLog() {
   }
 }
 
+/** Pretty-print sync log `data` (GetSales request/response, Supabase errors). */
+function formatLogData(data: Record<string, unknown> | null | undefined): string {
+  if (data == null) return "";
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
+}
+
 // --- Watch ---
 watch(selectedProjectId, async (id) => {
   preflight.value = null;
   history.value = [];
   logEntries.value = [];
   syncComplete.value = false;
+  syncEntitiesSelected.value = defaultSyncEntitySelection();
+  syncPipelineDateRange.value = null;
   analyticsCollectedDays.value = [];
   analyticsDateRange.value = null;
   if (!id) return;
@@ -391,12 +553,15 @@ const historyColumns = computed<DataTableColumns<SyncRun>>(() => [
     renderExpand(row) {
       return h("div", { class: "log-expand" }, [
         ...row.log_entries.map((e) =>
-          h("div", { class: `log-entry log-${e.level}` }, [
+          h("div", { class: ["log-entry", `log-${e.level}`, e.data ? "log-entry-with-data" : ""].join(" ") }, [
             h("span", { class: "log-time" }, new Date(e.created_at).toLocaleTimeString()),
             h("span", { class: `log-badge log-badge-${e.level}` }, e.level.toUpperCase()),
             e.table_name ? h("span", { class: "log-table" }, e.table_name) : null,
             h("span", { class: "log-msg" }, e.message),
             e.row_count != null ? h("span", { class: "log-rows" }, `(${e.row_count} rows)`) : null,
+            e.data && e.level === "error"
+              ? h("pre", { class: "log-data-json" }, formatLogData(e.data))
+              : null,
           ].filter(Boolean))
         ),
       ]);
@@ -423,6 +588,7 @@ const historyColumns = computed<DataTableColumns<SyncRun>>(() => [
         success: "success",
         error: "error",
         partial: "warning",
+        cancelled: "warning",
         running: "info",
       };
       return h(NTag, { type: typeMap[row.status] ?? "default", size: "small", round: true }, { default: () => row.status });
@@ -536,14 +702,24 @@ const preflightRows = computed(() => {
               </template>
             </NInput>
           </div>
-          <NButton
-            type="primary"
-            :loading="savingCreds"
-            :disabled="!credApiKey.trim() && !credBaseUrl.trim()"
-            @click="saveCredentials"
-          >
-            Save Credentials
-          </NButton>
+          <div class="credentials-actions">
+            <NButton
+              type="primary"
+              :loading="savingCreds"
+              :disabled="!credApiKey.trim() && !credBaseUrl.trim()"
+              @click="saveCredentials"
+            >
+              Save Credentials
+            </NButton>
+            <NButton
+              secondary
+              :loading="testingSourceApi"
+              :disabled="!canTestSourceApi"
+              @click="testSourceApiConnection"
+            >
+              Test connection
+            </NButton>
+          </div>
         </div>
       </NCollapseItem>
     </NCollapse>
@@ -566,6 +742,23 @@ const preflightRows = computed(() => {
       </NAlert>
 
       <NAlert v-if="preflightError" type="error" class="mb">{{ preflightError }}</NAlert>
+
+      <NAlert
+        v-if="preflight?.sourceApiCheck && !preflight.sourceApiCheck.ok"
+        type="error"
+        class="mb"
+        :show-icon="true"
+      >
+        GetSales API check failed: {{ preflight.sourceApiCheck.error ?? "Unknown error" }}
+      </NAlert>
+      <NAlert
+        v-else-if="preflight?.sourceApiCheck?.ok"
+        type="success"
+        class="mb"
+        :show-icon="true"
+      >
+        GetSales API is reachable (GET /flows/api/flows?limit=1).
+      </NAlert>
 
       <NSpin :show="preflightLoading">
         <div v-if="preflight" class="preflight-table">
@@ -616,39 +809,88 @@ const preflightRows = computed(() => {
       </template>
 
       <div class="sync-control">
-        <div class="sync-status">
-          <template v-if="syncing">
-            <NSpin :size="16" />
-            <NText>Syncing project <strong>{{ selectedProject.name }}</strong> — {{ elapsedLabel }}</NText>
-          </template>
-          <template v-else-if="anotherSyncRunning">
-            <AlertTriangleIcon :size="16" class="warn-icon" />
-            <NText>Another sync is running (run ID: {{ activeSyncRun?.id?.slice(0, 8) }}…)</NText>
-          </template>
-          <template v-else-if="thisSyncRunning">
-            <NSpin :size="16" />
-            <NText>Sync is running for this project</NText>
-          </template>
-          <template v-else-if="syncComplete">
-            <CheckCircle2Icon :size="16" class="success-icon" />
-            <NText>Sync complete</NText>
-          </template>
-          <template v-else>
-            <span class="idle-dot" />
-            <NText depth="3">Idle</NText>
-          </template>
+        <div class="sync-control-row">
+          <div class="sync-status">
+            <template v-if="syncing">
+              <NSpin :size="16" />
+              <NText>Syncing project <strong>{{ selectedProject.name }}</strong> — {{ elapsedLabel }}</NText>
+            </template>
+            <template v-else-if="anotherSyncRunning">
+              <AlertTriangleIcon :size="16" class="warn-icon" />
+              <NText>Another sync is running (run ID: {{ activeSyncRun?.id?.slice(0, 8) }}…)</NText>
+            </template>
+            <template v-else-if="thisSyncRunning">
+              <NSpin :size="16" />
+              <NText>Sync is running for this project</NText>
+            </template>
+            <template v-else-if="syncComplete">
+              <CheckCircle2Icon :size="16" class="success-icon" />
+              <NText>Sync complete</NText>
+            </template>
+            <template v-else>
+              <span class="idle-dot" />
+              <NText depth="3">Idle</NText>
+            </template>
+          </div>
+
+          <div class="sync-actions">
+            <NButton
+              type="primary"
+              :disabled="!canSync"
+              :loading="syncing"
+              size="large"
+              @click="startSync"
+            >
+              <template #icon><PlayIcon :size="15" /></template>
+              Start Sync
+            </NButton>
+            <NButton
+              v-if="showStopSync"
+              secondary
+              type="error"
+              size="large"
+              @click="stopSync"
+            >
+              <template #icon><SquareStopIcon :size="15" /></template>
+              Stop sync
+            </NButton>
+          </div>
         </div>
 
-        <NButton
-          type="primary"
-          :disabled="!canSync"
-          :loading="syncing"
-          size="large"
-          @click="startSync"
-        >
-          <template #icon><PlayIcon :size="15" /></template>
-          Start Sync
-        </NButton>
+        <div class="sync-entities">
+          <div class="sync-entities-header">
+            <span class="form-label">Tables to sync</span>
+          </div>
+          <div class="entity-checkboxes">
+            <NCheckbox
+              v-for="key in ALL_SYNC_ENTITY_KEYS"
+              :key="key"
+              v-model:checked="syncEntitiesSelected[key]"
+            >
+              {{ SYNC_ENTITY_LABELS[key] }}
+            </NCheckbox>
+          </div>
+          <p class="muted hint entity-sync-hint">
+            Only checked tables are requested. The server may also sync prerequisite tables (for example:
+            Contacts includes Companies; LinkedIn messages include Contacts and Senders; Flow leads include Flows).
+          </p>
+          <div class="sync-pipeline-date-row">
+            <span class="form-label">List sync date range</span>
+            <NDatePicker
+              v-model:value="syncPipelineDateRange"
+              type="daterange"
+              clearable
+              :shortcuts="syncPipelineShortcuts"
+              :disabled="syncing"
+            />
+          </div>
+          <p class="muted hint entity-sync-hint">
+            Optional. Narrows <strong>contacts</strong> and <strong>companies</strong> to <code>created_at</code> /
+            <code>updated_at</code> buckets so GetSales can paginate past 10k rows. Leave empty for automatic
+            month-by-month backfill from today. <strong>Flow leads</strong> always sync with a full list + incremental
+            cursor (no server date filter on that endpoint).
+          </p>
+        </div>
       </div>
 
       <div v-if="!selectedProject.api_key_set && !syncing" class="muted hint" style="margin-top:.5rem">
@@ -735,6 +977,8 @@ const preflightRows = computed(() => {
             <NTag size="small" type="info">Messages: {{ progress.linkedin_messages }}</NTag>
             <NTag size="small" type="info">Senders: {{ progress.senders }}</NTag>
             <NTag size="small" type="info">Contact lists: {{ progress.contact_lists }}</NTag>
+            <NTag size="small" type="info">Flows: {{ progress.flows }}</NTag>
+            <NTag size="small" type="info">Flow leads: {{ progress.flow_leads }}</NTag>
           </div>
         </div>
       </template>
@@ -746,7 +990,12 @@ const preflightRows = computed(() => {
         <div
           v-for="(entry, i) in logEntries"
           :key="i"
-          :class="['log-entry', `log-${entry.level}`, entry.kind === 'upsert' ? 'log-upsert' : '']"
+          :class="[
+            'log-entry',
+            `log-${entry.level}`,
+            entry.kind === 'upsert' ? 'log-upsert' : '',
+            entry.data ? 'log-entry-with-data' : '',
+          ]"
         >
           <span class="log-time">{{ new Date(entry.created_at).toLocaleTimeString() }}</span>
           <span :class="['log-badge', `log-badge-${entry.level}`, entry.kind === 'upsert' ? 'log-badge-upsert' : '']">
@@ -755,6 +1004,10 @@ const preflightRows = computed(() => {
           <span v-if="entry.table_name" class="log-table">{{ entry.table_name }}</span>
           <span class="log-msg">{{ entry.message }}</span>
           <span v-if="entry.row_count != null" class="log-rows">({{ entry.row_count }} rows)</span>
+          <pre
+            v-if="entry.level === 'error' && entry.data && Object.keys(entry.data).length > 0"
+            class="log-data-json"
+          >{{ formatLogData(entry.data) }}</pre>
         </div>
       </div>
     </NCard>
@@ -856,6 +1109,13 @@ const preflightRows = computed(() => {
   padding: 0.25rem 0;
 }
 
+.credentials-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
 .form-row {
   display: flex;
   align-items: center;
@@ -927,9 +1187,48 @@ const preflightRows = computed(() => {
 /* Sync control */
 .sync-control {
   display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1rem;
+}
+
+.sync-entities {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.sync-entities-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.entity-checkboxes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  align-items: center;
+}
+
+.entity-sync-hint {
+  margin: 0;
+  max-width: 52rem;
+  line-height: 1.45;
+}
+
+.sync-control-row {
+  display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.sync-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
   flex-wrap: wrap;
 }
 
@@ -1045,6 +1344,26 @@ const preflightRows = computed(() => {
   flex-shrink: 0;
 }
 
+.log-entry.log-entry-with-data {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.log-data-json {
+  flex: 1 1 100%;
+  margin: 0.35rem 0 0 0;
+  padding: 0.5rem 0.6rem;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 360px;
+  overflow: auto;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  color: rgba(255, 255, 255, 0.9);
+}
+
 /* Progress summary */
 .progress-summary {
   display: flex;
@@ -1057,6 +1376,14 @@ const preflightRows = computed(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
+}
+
+.sync-pipeline-date-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
 }
 
 .analytics-day-chips {
@@ -1100,4 +1427,17 @@ const preflightRows = computed(() => {
 :deep(.log-expand .log-table) { opacity: .6; font-size: .7rem; flex-shrink: 0; }
 :deep(.log-expand .log-msg) { flex: 1; word-break: break-word; }
 :deep(.log-expand .log-rows) { opacity: .6; flex-shrink: 0; }
+:deep(.log-expand .log-data-json) {
+  flex: 1 1 100%;
+  margin: 0.35rem 0 0 0;
+  padding: 0.45rem 0.55rem;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 0.7rem;
+  color: rgba(255, 255, 255, 0.88);
+}
 </style>

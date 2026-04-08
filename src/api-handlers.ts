@@ -22,6 +22,7 @@ import {
   getActiveSyncRun,
   getSyncHistory,
   createSyncRun,
+  markSyncRunFinishedIfStillRunning,
   getAllCompanies,
   addCompaniesToProject,
   getProjectCompanies,
@@ -72,7 +73,18 @@ import {
   generateContextText,
   type BuildContextNodes,
 } from "./services/reply-context-prompt.js";
-import { syncSupabaseFromSource, syncAnalyticsSnapshots } from "./services/sync-supabase.js";
+import {
+  syncSupabaseFromSource,
+  syncAnalyticsSnapshots,
+  isSyncEntityKey,
+  type SyncEntityKey,
+} from "./services/sync-supabase.js";
+import { verifyGetSalesCredentials } from "./services/source-api.js";
+import {
+  requestSyncCancellation,
+  SyncCancelledError,
+  isLocalSyncRunActive,
+} from "./services/sync-cancellation.js";
 import {
   getActiveWorkers,
   isWorkerHeartbeatAuthOk,
@@ -170,8 +182,55 @@ export async function handleSupabaseSync(
     return;
   }
 
-  const body = (await getParsedBody(req)) as { projectId?: string } | undefined;
+  const body = (await getParsedBody(req)) as {
+    projectId?: string;
+    entities?: string[];
+    syncDateRange?: { from?: string; to?: string };
+  } | undefined;
   const projectId = body?.projectId;
+
+  let syncDateRange: { from: string; to: string } | undefined;
+  if (body?.syncDateRange !== undefined) {
+    const dr = body.syncDateRange;
+    if (
+      dr == null ||
+      typeof dr.from !== "string" ||
+      typeof dr.to !== "string" ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(dr.from) ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(dr.to)
+    ) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "syncDateRange must be { from, to } with YYYY-MM-DD strings" }));
+      return;
+    }
+    if (dr.from > dr.to) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "syncDateRange.from must be <= syncDateRange.to" }));
+      return;
+    }
+    syncDateRange = { from: dr.from, to: dr.to };
+  }
+
+  let entities: SyncEntityKey[] | undefined;
+  if (body?.entities !== undefined) {
+    if (!Array.isArray(body.entities)) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "entities must be an array of entity keys" }));
+      return;
+    }
+    if (body.entities.length === 0) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "entities must include at least one key" }));
+      return;
+    }
+    const invalid = body.entities.find((e) => typeof e !== "string" || !isSyncEntityKey(e));
+    if (invalid !== undefined) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: `Invalid entity key: ${String(invalid)}` }));
+      return;
+    }
+    entities = body.entities as SyncEntityKey[];
+  }
 
   const { data: activeRun } = await getActiveSyncRun(client);
   if (activeRun) {
@@ -196,9 +255,63 @@ export async function handleSupabaseSync(
   res.writeHead(200);
   res.end(JSON.stringify({ runId }));
 
-  syncSupabaseFromSource(projectId, runId).catch((err) => {
+  syncSupabaseFromSource(projectId, runId, {
+    ...(entities !== undefined ? { entities } : {}),
+    ...(syncDateRange !== undefined ? { syncDateRange } : {}),
+  }).catch((err) => {
+    if (err instanceof SyncCancelledError) {
+      console.log(`[sync] run ${runId} cancelled`);
+      return;
+    }
     console.error("[sync] background sync error:", err);
   });
+}
+
+/** POST /api/supabase-sync-cancel — body: { runId }. Cooperatively stops in-process sync; if none (e.g. redeploy), clears stale DB lock. */
+export async function handleSupabaseSyncCancel(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const body = (await getParsedBody(req)) as { runId?: string } | undefined;
+  const runId = body?.runId;
+  if (!runId || typeof runId !== "string") {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "runId is required" }));
+    return;
+  }
+  requestSyncCancellation(runId);
+
+  if (isLocalSyncRunActive(runId)) {
+    res.writeHead(200);
+    res.end(JSON.stringify({ ok: true, runId, mode: "cooperative" }));
+    return;
+  }
+
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured — cannot clear stale sync lock" }));
+    return;
+  }
+
+  const { updated, error: dbError } = await markSyncRunFinishedIfStillRunning(client, runId, {
+    error:
+      "Stopped: no sync process on this server (restart, redeploy, or different instance). Database lock cleared.",
+  });
+  if (dbError) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: dbError }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true, runId, mode: updated ? "clearedStaleLock" : "noop", staleLockCleared: updated }));
 }
 
 /** GET /api/analytics-collected-days?projectId= — distinct snapshot dates already stored. */
@@ -645,6 +758,64 @@ export async function handleUpdateProjectCredentials(
   res.end(JSON.stringify({ ok: true }));
 }
 
+export async function handleSourceApiCheck(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  let body: unknown;
+  try {
+    body = await getParsedBody(req);
+  } catch {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const b = body as { projectId?: string; baseUrl?: string; apiKey?: string };
+  const projectId = b.projectId;
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required" }));
+    return;
+  }
+  const { data: project, error: pErr } = await getProjectById(client, projectId);
+  if (pErr || !project) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Project not found" }));
+    return;
+  }
+  const baseUrl =
+    (b.baseUrl?.trim() || project.source_api_base_url || process.env.SOURCE_API_BASE_URL)?.replace(
+      /\/$/,
+      ""
+    ) ?? "";
+  const apiKey = (b.apiKey?.trim() || project.source_api_key || process.env.SOURCE_API_KEY) ?? "";
+  if (!baseUrl || !apiKey) {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "Base URL and API key are required (save credentials or enter values to test)",
+      })
+    );
+    return;
+  }
+  const result = await verifyGetSalesCredentials({ baseUrl, apiKey });
+  res.writeHead(200);
+  res.end(JSON.stringify(result));
+}
+
 export async function handleSyncPreflight(
   req: IncomingMessage,
   res: ServerResponse
@@ -669,11 +840,31 @@ export async function handleSyncPreflight(
     res.end(JSON.stringify({ error: "Missing query param: projectId" }));
     return;
   }
-  const [countsResult, latestResult, activeRunResult] = await Promise.all([
+  const [countsResult, latestResult, activeRunResult, projectResult] = await Promise.all([
     getProjectEntityCounts(client, projectId),
     getProjectLatestRows(client, projectId, 3),
     getActiveSyncRun(client),
+    getProjectById(client, projectId),
   ]);
+  if (projectResult.error || !projectResult.data) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Project not found" }));
+    return;
+  }
+  const project = projectResult.data;
+  const baseUrl =
+    (project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL)?.replace(/\/$/, "") ?? "";
+  const apiKey = project.source_api_key ?? process.env.SOURCE_API_KEY ?? "";
+  let sourceApiCheck: { ok: boolean; error?: string };
+  if (baseUrl && apiKey) {
+    const v = await verifyGetSalesCredentials({ baseUrl, apiKey });
+    sourceApiCheck = v.ok ? { ok: true } : { ok: false, error: v.error };
+  } else {
+    sourceApiCheck = {
+      ok: false,
+      error: "Missing GetSales base URL or API key (configure project or environment variables)",
+    };
+  }
   res.writeHead(200);
   res.end(JSON.stringify({
     projectId,
@@ -684,6 +875,7 @@ export async function handleSyncPreflight(
     activeSyncRun: activeRunResult.data
       ? { id: activeRunResult.data.id, project_id: activeRunResult.data.project_id }
       : null,
+    sourceApiCheck,
   }));
 }
 
