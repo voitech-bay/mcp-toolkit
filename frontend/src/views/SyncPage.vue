@@ -12,7 +12,7 @@ import {
   PlayIcon, SquareStopIcon, KeyIcon, EyeIcon, EyeOffIcon, HistoryIcon,
 } from "lucide-vue-next";
 import type {
-  SyncRun, PreflightResult, SyncWsMessage, SyncLogEntry, SyncEntityKey,
+  SyncRun, PreflightResult, SyncWsMessage, SyncLogEntry, SyncEntityKey, TableCounts,
 } from "../types";
 import { ALL_SYNC_ENTITY_KEYS, defaultSyncEntitySelection } from "../types";
 import { SYNC_ENTITY_LABELS } from "../sync-entities";
@@ -48,6 +48,8 @@ const progress = ref({
   linkedin_messages: 0,
   senders: 0,
   contact_lists: 0,
+  getsales_tags: 0,
+  pipeline_stages: 0,
   flows: 0,
   flow_leads: 0,
 });
@@ -97,6 +99,104 @@ const sortedCollectedDays = computed(() =>
 );
 
 const collectedDaySet = computed(() => new Set(analyticsCollectedDays.value));
+
+/** Popover host id so the analytics daterange panel teleports into a known subtree for highlighting. */
+const ANALYTICS_DPICKER_HOST_ID = "mcp-analytics-dpicker-popover-host";
+
+const analyticsDatePickerOpen = ref(false);
+const analyticsCalMutationObserver = ref<MutationObserver | null>(null);
+let analyticsCalHighlightRaf = 0;
+
+function disconnectAnalyticsCalObserver() {
+  analyticsCalMutationObserver.value?.disconnect();
+  analyticsCalMutationObserver.value = null;
+}
+
+/** Parse "April 2026" / localized month + year from the date panel header. */
+function parseMonthYearFromPanelHeader(headerText: string): { year: number; monthIndex: number } | null {
+  const yearRe = new RegExp("\\b(20\\d{2})\\b");
+  const yMatch = headerText.match(yearRe);
+  if (!yMatch) return null;
+  const year = parseInt(yMatch[1], 10);
+  const withoutYear = headerText.replace(yearRe, " ").trim();
+  const normalized = withoutYear.replace(new RegExp("\\s+", "g"), " ").toLowerCase();
+  for (let i = 0; i < 12; i++) {
+    const d = new Date(2000, i, 15);
+    const longM = d.toLocaleString(undefined, { month: "long" }).toLowerCase();
+    const shortM = d.toLocaleString(undefined, { month: "short" }).toLowerCase();
+    if (normalized.includes(longM) || normalized.includes(shortM)) {
+      return { year, monthIndex: i };
+    }
+  }
+  return null;
+}
+
+function dayNumberFromDatePanelCell(cell: Element): number | null {
+  for (const n of cell.childNodes) {
+    if (n.nodeType === Node.TEXT_NODE) {
+      const t = n.textContent?.trim() ?? "";
+      const d = parseInt(t, 10);
+      if (!Number.isNaN(d) && d >= 1 && d <= 31) return d;
+    }
+  }
+  const raw = cell.textContent?.trim() ?? "";
+  const m = raw.match(new RegExp("\\d{1,2}"));
+  if (!m) return null;
+  const d = parseInt(m[0], 10);
+  return !Number.isNaN(d) && d >= 1 && d <= 31 ? d : null;
+}
+
+function applyAnalyticsSyncedCalendarHighlights() {
+  const host = document.getElementById(ANALYTICS_DPICKER_HOST_ID);
+  if (!host) return;
+  const panel = host.querySelector(".n-date-panel--daterange");
+  if (!panel) return;
+  const synced = collectedDaySet.value;
+  const calendars = panel.querySelectorAll(".n-date-panel-calendar");
+  calendars.forEach((cal) => {
+    const headerText = cal.querySelector(".n-date-panel-month__text")?.textContent?.trim() ?? "";
+    const ym = parseMonthYearFromPanelHeader(headerText);
+    if (!ym) return;
+    const { year, monthIndex } = ym;
+    const mm = String(monthIndex + 1).padStart(2, "0");
+    cal.querySelectorAll(".n-date-panel-date[data-n-date]").forEach((el) => {
+      el.classList.remove("analytics-cal-day-synced");
+      if (el.classList.contains("n-date-panel-date--excluded")) return;
+      const dayNum = dayNumberFromDatePanelCell(el);
+      if (dayNum == null) return;
+      const dd = String(dayNum).padStart(2, "0");
+      const ymd = `${year}-${mm}-${dd}`;
+      if (synced.has(ymd)) el.classList.add("analytics-cal-day-synced");
+    });
+  });
+}
+
+function scheduleAnalyticsSyncedCalendarHighlights() {
+  cancelAnimationFrame(analyticsCalHighlightRaf);
+  analyticsCalHighlightRaf = requestAnimationFrame(() => {
+    analyticsCalHighlightRaf = 0;
+    applyAnalyticsSyncedCalendarHighlights();
+  });
+}
+
+function onAnalyticsDatePickerUpdateShow(show: boolean) {
+  analyticsDatePickerOpen.value = show;
+  disconnectAnalyticsCalObserver();
+  if (!show) return;
+  nextTick(() => {
+    scheduleAnalyticsSyncedCalendarHighlights();
+    const host = document.getElementById(ANALYTICS_DPICKER_HOST_ID);
+    const panel = host?.querySelector(".n-date-panel--daterange");
+    if (!panel) return;
+    const mo = new MutationObserver(() => scheduleAnalyticsSyncedCalendarHighlights());
+    mo.observe(panel, { subtree: true, childList: true, characterData: true, attributes: true });
+    analyticsCalMutationObserver.value = mo;
+  });
+}
+
+watch(analyticsCollectedDays, () => {
+  if (analyticsDatePickerOpen.value) scheduleAnalyticsSyncedCalendarHighlights();
+});
 
 /** When a range is selected: how many days are new vs already stored. */
 const analyticsRangeStats = computed(() => {
@@ -387,6 +487,8 @@ function connectWs(runId: string) {
         const t = event.entry.table_name.toLowerCase();
         if (t.includes("compan")) progress.value.companies += event.entry.row_count;
         else if (t.includes("contactlist")) progress.value.contact_lists += event.entry.row_count;
+        else if (t.includes("getsalestag")) progress.value.getsales_tags += event.entry.row_count;
+        else if (t.includes("pipelinestage")) progress.value.pipeline_stages += event.entry.row_count;
         else if (t.includes("flowlead")) progress.value.flow_leads += event.entry.row_count;
         else if (t.includes("flow")) progress.value.flows += event.entry.row_count;
         else if (t.includes("contact")) progress.value.contacts += event.entry.row_count;
@@ -458,6 +560,8 @@ async function startSync() {
     linkedin_messages: 0,
     senders: 0,
     contact_lists: 0,
+    getsales_tags: 0,
+    pipeline_stages: 0,
     flows: 0,
     flow_leads: 0,
   };
@@ -543,7 +647,19 @@ onMounted(async () => {
 onUnmounted(() => {
   if (ws) ws.close();
   stopElapsed();
+  disconnectAnalyticsCalObserver();
+  cancelAnimationFrame(analyticsCalHighlightRaf);
 });
+
+function formatCompaniesPreflightCounts(counts: TableCounts | null | undefined): string {
+  if (!counts) return "—";
+  const all = counts.companies ?? 0;
+  const inn = counts.companies_in_project;
+  if (typeof inn === "number") {
+    return `${inn.toLocaleString()} in project · ${all.toLocaleString()} all`;
+  }
+  return all.toLocaleString();
+}
 
 // --- History table columns ---
 const historyColumns = computed<DataTableColumns<SyncRun>>(() => [
@@ -620,7 +736,7 @@ const preflightRows = computed(() => {
   return [
     {
       label: "Companies",
-      count: counts?.companies ?? "—",
+      count: formatCompaniesPreflightCounts(counts),
       latest: latestCreatedAt(latest?.companies ?? []),
       sample: (latest?.companies ?? []).slice(0, 3),
     },
@@ -647,6 +763,18 @@ const preflightRows = computed(() => {
       count: counts?.contact_lists ?? "—",
       latest: latestTimestamp(latest?.contact_lists ?? []),
       sample: (latest?.contact_lists ?? []).slice(0, 3),
+    },
+    {
+      label: "GetSales tags",
+      count: counts?.getsales_tags ?? "—",
+      latest: latestTimestamp(latest?.getsales_tags ?? []),
+      sample: (latest?.getsales_tags ?? []).slice(0, 3),
+    },
+    {
+      label: "Pipeline stages",
+      count: counts?.pipeline_stages ?? "—",
+      latest: latestTimestamp(latest?.pipeline_stages ?? []),
+      sample: (latest?.pipeline_stages ?? []).slice(0, 3),
     },
     {
       label: "Flows",
@@ -915,14 +1043,23 @@ const preflightRows = computed(() => {
         <code>POST /leads/api/leads/metrics</code>. Days already stored are skipped.
       </p>
       <NSpin :show="analyticsDaysLoading">
-        <div class="analytics-row">
+        <div class="analytics-row analytics-row-dpicker">
           <span class="form-label">Date range</span>
+          <!-- Teleport target for the daterange panel (scoped DOM for synced-day highlighting). -->
+          <div
+            :id="ANALYTICS_DPICKER_HOST_ID"
+            class="analytics-dpicker-host"
+            aria-hidden="true"
+          />
           <NDatePicker
             v-model:value="analyticsDateRange"
             type="daterange"
             clearable
             :shortcuts="analyticsShortcuts"
             :disabled="analyticsSyncLoading"
+            :to="'#' + ANALYTICS_DPICKER_HOST_ID"
+            class="analytics-snapshots-daterange"
+            @update:show="onAnalyticsDatePickerUpdateShow"
           />
           <NButton
             type="primary"
@@ -941,6 +1078,9 @@ const preflightRows = computed(() => {
         <div v-if="!selectedProject.api_key_set" class="muted hint" style="margin-top: 0.5rem">
           No project API key — the server will use environment credentials if configured.
         </div>
+        <p class="muted hint analytics-cal-legend" style="margin: 0.35rem 0 0">
+          In the date picker, days that already have analytics data are highlighted in green.
+        </p>
         <div class="analytics-days" style="margin-top: 0.75rem">
           <span class="muted" style="font-size: 0.85rem">Days already in database</span>
           <span v-if="sortedCollectedDays.length" class="muted" style="font-size: 0.85rem">
@@ -977,6 +1117,8 @@ const preflightRows = computed(() => {
             <NTag size="small" type="info">Messages: {{ progress.linkedin_messages }}</NTag>
             <NTag size="small" type="info">Senders: {{ progress.senders }}</NTag>
             <NTag size="small" type="info">Contact lists: {{ progress.contact_lists }}</NTag>
+            <NTag size="small" type="info">GetSales tags: {{ progress.getsales_tags }}</NTag>
+            <NTag size="small" type="info">Pipeline stages: {{ progress.pipeline_stages }}</NTag>
             <NTag size="small" type="info">Flows: {{ progress.flows }}</NTag>
             <NTag size="small" type="info">Flow leads: {{ progress.flow_leads }}</NTag>
           </div>
@@ -1376,6 +1518,30 @@ const preflightRows = computed(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
+}
+
+.analytics-row-dpicker {
+  position: relative;
+}
+
+.analytics-dpicker-host {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+  left: 0;
+  bottom: 0;
+}
+
+/* Synced analytics days inside the open daterange panel (class set at runtime). */
+:deep(.analytics-dpicker-host .n-date-panel-date.analytics-cal-day-synced) {
+  background: rgba(24, 160, 88, 0.32);
+  border-radius: 4px;
+}
+
+:deep(.analytics-dpicker-host .n-date-panel-date.analytics-cal-day-synced.n-date-panel-date--current) {
+  box-shadow: inset 0 0 0 1px rgba(24, 160, 88, 0.65);
 }
 
 .sync-pipeline-date-row {

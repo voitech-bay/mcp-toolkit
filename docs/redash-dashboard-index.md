@@ -68,6 +68,25 @@
 
 If **`flow_uuid`** does not appear as a dashboard-level filter, add it in the Redash UI (Edit dashboard → Global filters) so it maps to all widgets. One legacy table widget could not be updated via API (500); re-save or re-map **flow_uuid** on that widget if needed.
 
+### VT / Flow detail — full history, no DateRange (tables + line & bar charts)
+
+**Dashboard:** `id` **6**, slug **`vt-flow-detail-tables-`** (trailing hyphen from Redash auto-slug).
+
+**Global filters:** **`project_id`** only (query dropdown from **Projects** query **10**). **No `DateRange`.** Enable **dashboard filters** and map **Project** to every widget. Add a **multi-filter** on result column **`flow_name::multiFilter`** for each table (same convention as automation funnel).
+
+| Query ID | Name | Tables | Viz |
+|----------|------|--------|-----|
+| 46 | VT / Flow detail — lifecycle (full history) | AnalyticsSnapshots + Flows | TABLE (viz 77) |
+| 47 | VT / Flow detail — daily connection sends | AnalyticsSnapshots + Flows | **CHART line** (viz 78): X=`day`, Series=`flow_name::multiFilter`, Y=`linkedin_connection_request_sent_daily` |
+| 48 | VT / Flow detail — per-flow metrics (LEADS_METRICS) | AnalyticsSnapshots + FlowLeads + Flows | TABLE (viz 79) |
+| 49 | VT / Flow detail — contacts in flow | FlowLeads + Flows + Contacts + PipelineStages | TABLE (viz 80) |
+| 50 | VT / Flow detail — LinkedIn messages (flow scoped) | LinkedinMessages + FlowLeads + Flows + **Contacts** (`lead_uuid` → `Contacts.uuid`) | TABLE (viz 81) |
+| 51 | VT / Flow detail — flow KPI summary | FlowLeads + LinkedinMessages + AnalyticsSnapshots + Flows | TABLE (viz 82): connected / inbox (DB) vs analytics inbox + accepted |
+| 52 | VT / Flow detail — pipeline stage totals per flow | FlowLeads + Flows + Contacts + PipelineStages | TABLE (viz **83**) + **CHART** stacked (viz **84**, flow on X, stages as stack) + **CHART** grouped (viz **85**, stage on X, flows compared) — block **4b** |
+| 53 | VT / Flow detail — pipeline stage rates per flow | FlowLeads + Flows + Contacts + PipelineStages | TABLE (viz **86**, widget **71**): exact `PipelineStages.name` → buckets (Approaching, Engaging, Replied + Replied - Negative, Replied - Positive, Opportunity + Active Opportunity, Not Interested + Do Not Contact); `n_engaging` / `engaging_rate_pct`; `n_other` / `n_no_stage` for QA — block **4c** |
+
+**SQL source:** `docs/redash-flow-detail-dashboard.sql` (blocks 1, **1b**, 2–4, **4b**, **4c**, 5; footer lists live query/dashboard ids). Map new queries in global filters like other widgets; drag widgets to preferred order (e.g. KPI **67**, pipeline rollup **68**, rates **71**).
+
 #### Hypotheses
 
 | Query ID | Name | Tables | Section |
@@ -89,6 +108,7 @@ If **`flow_uuid`** does not appear as a dashboard-level filter, add it in the Re
 - `docs/redash-analytics-snapshots-queries.sql` — blocks 1–6 (KPI, campaign, weekly, sender, active flows, WoW); blocks 1 & 2 updated with `linkedin_connection_rate_pct`
 - `docs/redash-flowleads-funnel-icp-queries.sql` — blocks 1–5 (status funnel, job title, job×campaign, project status funnel, reply proxy)
 - `docs/redash-automation-flow-funnel-queries.sql` — automation funnel from **AnalyticsSnapshots** (connections sent / accepted / inbox), per-flow wide table, samples (FlowLeads / messages), validation; legacy FlowLead-count funnel in SQL appendix
+- `docs/redash-flow-detail-dashboard.sql` — lifecycle, **KPI strip**, daily sends (line chart), **LEADS_METRICS**, contacts, **pipeline stage totals per flow**, messages + contacts; **no DateRange**
 - `docs/redash-messages-noresponse-responsetime-queries.sql` — no-response rate, response-time histogram, percentiles
 - `docs/redash-hypotheses-week-wow-queries.sql` — hypotheses / WoW
 

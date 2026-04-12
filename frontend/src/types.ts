@@ -1,9 +1,14 @@
 export interface TableCounts {
+  /** Total rows in shared `companies` table (all projects). */
   companies: number;
+  /** Companies linked to the project via `project_companies` (preflight); 0 on global state. */
+  companies_in_project: number;
   contacts: number;
   linkedin_messages: number;
   senders: number;
   contact_lists: number;
+  getsales_tags: number;
+  pipeline_stages: number;
   flows: number;
   flow_leads: number;
 }
@@ -14,6 +19,8 @@ export interface LatestRows {
   linkedin_messages: Record<string, unknown>[];
   senders: Record<string, unknown>[];
   contact_lists: Record<string, unknown>[];
+  getsales_tags: Record<string, unknown>[];
+  pipeline_stages: Record<string, unknown>[];
   flows: Record<string, unknown>[];
   flow_leads: Record<string, unknown>[];
 }
@@ -31,6 +38,8 @@ export type SyncEntityKey =
   | "linkedin_messages"
   | "senders"
   | "contact_lists"
+  | "getsales_tags"
+  | "pipeline_stages"
   | "flows"
   | "flow_leads";
 
@@ -40,6 +49,8 @@ export const ALL_SYNC_ENTITY_KEYS: readonly SyncEntityKey[] = [
   "linkedin_messages",
   "senders",
   "contact_lists",
+  "getsales_tags",
+  "pipeline_stages",
   "flows",
   "flow_leads",
 ] as const;
@@ -54,6 +65,8 @@ export interface SyncResult {
   linkedin_messages: { fetched: number; upserted: number; error: string | null };
   senders: { fetched: number; upserted: number; error: string | null };
   contact_lists: { fetched: number; upserted: number; error: string | null };
+  getsales_tags: { fetched: number; upserted: number; error: string | null };
+  pipeline_stages: { fetched: number; upserted: number; error: string | null };
   flows: { fetched: number; upserted: number; error: string | null };
   flow_leads: { fetched: number; upserted: number; error: string | null };
   error: string | null;

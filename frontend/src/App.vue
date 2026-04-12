@@ -33,11 +33,13 @@ import {
   NetworkIcon,
   UsersIcon,
   BookmarkIcon,
+  TagsIcon,
   MessageCircleIcon,
   Table2Icon,
   ChevronDownIcon,
   ClipboardListIcon,
   CpuIcon,
+  Link2Icon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 import { useWorkers, type WorkerEntry } from "./composables/useWorkers";
@@ -53,8 +55,8 @@ const router = useRouter();
 const isHome = computed(() => route.path === "/");
 
 /** Grouped routes — highlight parent when any child is active. */
-const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations"] as const;
-const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses"] as const;
+const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
+const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses", "/hypothesis-tag-contacts"] as const;
 const PIPELINE_PATHS = ["/sync", "/enrichment", "/enrichment/jobs"] as const;
 
 function pathInGroup(path: string, group: readonly string[]): boolean {
@@ -86,6 +88,11 @@ const dataMenuOptions: DropdownOption[] = [
     key: "/conversations",
     icon: () => h(MessageCircleIcon, { size: 14 }),
   },
+  {
+    label: "GetSales tags",
+    key: "/getsales-tags",
+    icon: () => h(TagsIcon, { size: 14 }),
+  },
 ];
 
 const contextMenuOptions: DropdownOption[] = [
@@ -103,6 +110,11 @@ const contextMenuOptions: DropdownOption[] = [
     label: "Hypotheses",
     key: "/hypotheses",
     icon: () => h(LightbulbIcon, { size: 14 }),
+  },
+  {
+    label: "Hypothesis → contacts",
+    key: "/hypothesis-tag-contacts",
+    icon: () => h(Link2Icon, { size: 14 }),
   },
 ];
 

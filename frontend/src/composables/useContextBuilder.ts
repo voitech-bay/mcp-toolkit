@@ -106,6 +106,8 @@ export interface HypothesisListItem {
   description: string | null;
   target_persona: string | null;
   target_count: number;
+  /** GetSales tag uuid when name matches synced GET /leads/api/tags. */
+  getsales_tag_uuid?: string | null;
 }
 
 export interface ProjectCompanyListItem {

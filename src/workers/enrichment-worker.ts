@@ -10,6 +10,7 @@ import { pathToFileURL } from "node:url";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { uniqueNamesGenerator, starWars } from "unique-names-generator";
 import {
+  COMPANIES_TABLE,
   CONTACTS_TABLE,
   ENRICHMENT_AGENT_BATCHES_TABLE,
   ENRICHMENT_AGENT_RESULTS_TABLE,
@@ -26,6 +27,7 @@ import {
   type LlmAdapter,
 } from "../services/llm-adapter.js";
 import {
+  COMPANY_SELECT_FOR_CONTACT_LLM,
   resolvePromptForBatch,
   type EnrichmentEntityType,
 } from "../services/prompt-resolver.js";
@@ -1051,6 +1053,41 @@ async function processTaskBatch(
       }
     }
 
+    const companyById = new Map<string, Record<string, unknown>>();
+    const contactCompanyUuids = [
+      ...new Set(
+        [...contactByUuid.values()]
+          .map((r) => r.company_uuid)
+          .filter((u): u is string => typeof u === "string" && u.length > 0)
+      ),
+    ];
+    if (contactCompanyUuids.length > 0) {
+      const { data: coData, error: coErr } = await client
+        .from(COMPANIES_TABLE)
+        .select(COMPANY_SELECT_FOR_CONTACT_LLM)
+        .in("id", contactCompanyUuids);
+      if (coErr) {
+        const err = coErr.message;
+        for (const p of prepared) {
+          const fin = new Date().toISOString();
+          await client
+            .from(ENRICHMENT_AGENT_RUNS_TABLE)
+            .update({ status: "error", finished_at: fin, error: err })
+            .eq("id", p.runId);
+          await client
+            .from(ENRICHMENT_QUEUE_TASKS_TABLE)
+            .update({ status: "error", last_error: err, updated_at: fin })
+            .eq("id", p.task.id);
+        }
+        log("error", "batch fetch companies for contacts failed", { error: err, worker: workerName });
+        return;
+      }
+      for (const row of (coData ?? []) as Record<string, unknown>[]) {
+        const id = row.id as string | undefined;
+        if (id) companyById.set(id, row);
+      }
+    }
+
     const { data: agentRow } = await getEnrichmentAgentByName(client, primaryAgent);
     const entityType = parseEntityTypeForPrompt(agentRow?.entity_type);
     const refTask = prepared[0]!.task;
@@ -1091,8 +1128,13 @@ async function processTaskBatch(
     } else {
       entities = prepared.map((p) => {
         const t = p.task;
-        const data =
+        const raw =
           contactByUuid.get(t.contact_id as string) ?? { id: t.contact_id };
+        const cu = raw.company_uuid;
+        const company =
+          typeof cu === "string" && companyById.has(cu) ? companyById.get(cu) : undefined;
+        const data: Record<string, unknown> = { ...raw };
+        if (company) data.company = company;
         return { id: p.entityId, data };
       });
     }

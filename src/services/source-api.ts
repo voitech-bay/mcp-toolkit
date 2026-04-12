@@ -26,6 +26,10 @@ const LEADS_METRICS_PATH = "/leads/api/leads/metrics";
 const COMPANIES_LIST_PATH = "/leads/api/companies/list";
 /** GET /leads/api/lists — contact list segments (see GetSales API docs). */
 const LISTS_PATH = "/leads/api/lists";
+/** GET /leads/api/tags — team tag definitions (see GetSales API docs). */
+const TAGS_PATH = "/leads/api/tags";
+/** GET /leads/api/pipeline-stages — requires filter[object]=lead|company (see GetSales API docs). */
+const PIPELINE_STAGES_PATH = "/leads/api/pipeline-stages";
 
 /**
  * Required on POST /leads/api/leads/metrics — which aggregate counters to return.
@@ -657,8 +661,14 @@ export async function fetchContactsIncremental(
 
   for (const monthBucket of months) {
     if (shouldSkipCreatedAtBucket(monthBucket, sinceCreatedAt)) {
-      if (onLog) await onLog(`contacts: skip bucket (before cursor)`, { bucket: monthBucket });
-      continue;
+      // Buckets are newest-first; if this whole month is before the cursor, every older month is too.
+      if (onLog) {
+        await onLog(`contacts: stop — reached months before incremental cursor`, {
+          cursor: cursorDateOnly(sinceCreatedAt),
+          firstSkippedBucket: monthBucket,
+        });
+      }
+      break;
     }
     if (onLog) await onLog(`contacts: processing bucket`, { bucket: monthBucket });
     const sub = await fetchContactsBucketRecursive(
@@ -1354,8 +1364,14 @@ export async function fetchCompaniesIncremental(
 
   for (const monthBucket of months) {
     if (shouldSkipUpdatedAtBucket(monthBucket, sinceUpdatedAt)) {
-      if (onLog) await onLog(`companies: skip bucket (before cursor)`, { bucket: monthBucket });
-      continue;
+      // Buckets are newest-first; if this whole month is before the cursor, every older month is too.
+      if (onLog) {
+        await onLog(`companies: stop — reached months before incremental cursor`, {
+          cursor: cursorDateOnly(sinceUpdatedAt),
+          firstSkippedBucket: monthBucket,
+        });
+      }
+      break;
     }
     if (onLog) await onLog(`companies: processing bucket`, { bucket: monthBucket });
     const sub = await fetchCompaniesBucketRecursive(sinceUpdatedAt, config, onLog, options, monthBucket, 0);
@@ -1495,6 +1511,241 @@ export async function fetchContactListsIncremental(
       fetchedCount: onPage ? fetchedCount : 0,
     };
   }
+}
+
+export interface FetchTagsResult {
+  data: Record<string, unknown>[];
+  error: string | null;
+  fetchedCount: number;
+  errorDetail?: SourceApiErrorDetail;
+}
+
+/**
+ * Fetch GetSales tags (newest by updated_at first). Stops when a row has updated_at <= sinceUpdatedAt.
+ * GET /leads/api/tags — same auth as contact lists (Bearer + optional Team-ID).
+ */
+export async function fetchTagsIncremental(
+  sinceUpdatedAt: string | null,
+  credentials?: ApiCredentials,
+  onLog?: FetchLogger,
+  options?: FetchIncrementalOptions
+): Promise<FetchTagsResult> {
+  const config = resolveCredentials(credentials);
+  if (!config) {
+    return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required", fetchedCount: 0 };
+  }
+  const onPage = options?.onPage;
+  const onBeforePage = options?.onBeforePage;
+  const all: Record<string, unknown>[] = [];
+  let offset = 0;
+  let fetchedCount = 0;
+  let lastTotal: number | undefined;
+  let lastHasMore: boolean | undefined;
+  try {
+    while (true) {
+      const limit = pageLimitForOffset(offset);
+      if (limit === 0) {
+        if ((lastTotal != null && offset < lastTotal) || lastHasMore === true) {
+          return {
+            data: onPage ? [] : all,
+            error: sourceApiEsPaginationTruncatedError("getsales_tags", offset, lastTotal),
+            fetchedCount,
+            errorDetail: undefined,
+          };
+        }
+        break;
+      }
+      if (onBeforePage) await onBeforePage();
+      const url =
+        `${config.baseUrl}${TAGS_PATH}?limit=${limit}&offset=${offset}` +
+        `&order_field=updated_at&order_type=desc`;
+      const res = await fetchJson<{
+        data?: Record<string, unknown>[];
+        has_more?: boolean;
+        total?: number;
+      }>(url, config.apiKey, { method: "GET" });
+      if (res.total != null) lastTotal = res.total;
+      lastHasMore = res.has_more;
+      const page = res.data ?? [];
+      const preview = page.slice(0, 10).map((r) => (typeof r.name === "string" ? r.name : (r.uuid ?? "?")));
+      const totalSoFar = offset + page.length;
+      const logMsg = `getsales_tags: page at offset=${offset}, got ${page.length} rows (total so far: ${totalSoFar})`;
+      if (onLog) await onLog(logMsg, { offset, pageSize: page.length, limit, totalSoFar, head10: preview });
+      let shouldStop = false;
+      const pageRows: Record<string, unknown>[] = [];
+      for (const row of page) {
+        const at = rowUpdatedAt(row);
+        if (sinceUpdatedAt != null && isAtOrOlder(at, sinceUpdatedAt)) {
+          shouldStop = true;
+          break;
+        }
+        if (sinceUpdatedAt == null || (at != null && at > sinceUpdatedAt)) {
+          pageRows.push(row);
+        }
+      }
+      if (pageRows.length > 0) {
+        if (onPage) {
+          await onPage(pageRows);
+          fetchedCount += pageRows.length;
+        } else {
+          all.push(...pageRows);
+        }
+      }
+      if (
+        page.length === 0 ||
+        shouldStop ||
+        res.has_more === false ||
+        (res.total != null && offset + page.length >= res.total)
+      ) {
+        break;
+      }
+      offset += limit;
+      await sleep(DELAY_MS);
+    }
+    if (onLog) await onLog(`getsales_tags: fetch complete`, { totalRows: onPage ? fetchedCount : all.length });
+    return {
+      data: onPage ? [] : all,
+      error: null,
+      fetchedCount: onPage ? fetchedCount : all.length,
+    };
+  } catch (e) {
+    if (e instanceof SyncCancelledError) throw e;
+    const fe = fetchErrorFromUnknown(e);
+    return {
+      data: [],
+      error: fe.error,
+      errorDetail: fe.errorDetail,
+      fetchedCount: onPage ? fetchedCount : 0,
+    };
+  }
+}
+
+export interface FetchPipelineStagesResult {
+  data: Record<string, unknown>[];
+  error: string | null;
+  fetchedCount: number;
+  errorDetail?: SourceApiErrorDetail;
+}
+
+/**
+ * Fetch pipeline stages for contacts and companies (newest by updated_at first per filter[object]).
+ * GET /leads/api/pipeline-stages — filter[object] is required (lead | company).
+ */
+export async function fetchPipelineStagesIncremental(
+  sinceUpdatedAt: string | null,
+  credentials?: ApiCredentials,
+  onLog?: FetchLogger,
+  options?: FetchIncrementalOptions
+): Promise<FetchPipelineStagesResult> {
+  const config = resolveCredentials(credentials);
+  if (!config) {
+    return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required", fetchedCount: 0 };
+  }
+  const onPage = options?.onPage;
+  const onBeforePage = options?.onBeforePage;
+  const all: Record<string, unknown>[] = [];
+  let totalFetched = 0;
+  let firstError: string | null = null;
+  let firstErrorDetail: SourceApiErrorDetail | undefined;
+
+  const objectFilters = ["lead", "company"] as const;
+
+  for (const objectFilter of objectFilters) {
+    let offset = 0;
+    let fetchedCount = 0;
+    let lastTotal: number | undefined;
+    let lastHasMore: boolean | undefined;
+    try {
+      while (true) {
+        const limit = pageLimitForOffset(offset);
+        if (limit === 0) {
+          if ((lastTotal != null && offset < lastTotal) || lastHasMore === true) {
+            const err = sourceApiEsPaginationTruncatedError(
+              `pipeline_stages(${objectFilter})`,
+              offset,
+              lastTotal
+            );
+            firstError = firstError ?? err;
+            break;
+          }
+          break;
+        }
+        if (onBeforePage) await onBeforePage();
+        const q = new URLSearchParams();
+        q.set("limit", String(limit));
+        q.set("offset", String(offset));
+        q.set("order_field", "updated_at");
+        q.set("order_type", "desc");
+        q.set("filter[object]", objectFilter);
+        const url = `${config.baseUrl}${PIPELINE_STAGES_PATH}?${q.toString()}`;
+        const res = await fetchJson<{
+          data?: Record<string, unknown>[];
+          has_more?: boolean;
+          total?: number;
+        }>(url, config.apiKey, { method: "GET" });
+        if (res.total != null) lastTotal = res.total;
+        lastHasMore = res.has_more;
+        const page = res.data ?? [];
+        const preview = page.slice(0, 10).map((r) =>
+          typeof r.name === "string" ? r.name : (r.uuid ?? "?")
+        );
+        const totalSoFar = offset + page.length;
+        const logMsg = `pipeline_stages[${objectFilter}]: page at offset=${offset}, got ${page.length} rows (total so far: ${totalSoFar})`;
+        if (onLog) await onLog(logMsg, { offset, pageSize: page.length, limit, totalSoFar, head10: preview });
+        let shouldStop = false;
+        const pageRows: Record<string, unknown>[] = [];
+        for (const row of page) {
+          const at = rowUpdatedAt(row);
+          if (sinceUpdatedAt != null && isAtOrOlder(at, sinceUpdatedAt)) {
+            shouldStop = true;
+            break;
+          }
+          if (sinceUpdatedAt == null || (at != null && at > sinceUpdatedAt)) {
+            pageRows.push(row);
+          }
+        }
+        for (const row of pageRows) {
+          if (row.object == null) row.object = objectFilter;
+        }
+        if (pageRows.length > 0) {
+          if (onPage) {
+            await onPage(pageRows);
+            fetchedCount += pageRows.length;
+          } else {
+            all.push(...pageRows);
+          }
+        }
+        if (
+          page.length === 0 ||
+          shouldStop ||
+          res.has_more === false ||
+          (res.total != null && offset + page.length >= res.total)
+        ) {
+          break;
+        }
+        offset += limit;
+        await sleep(DELAY_MS);
+      }
+      if (onLog) {
+        await onLog(`pipeline_stages[${objectFilter}]: fetch complete`, {
+          totalRows: onPage ? fetchedCount : all.length,
+        });
+      }
+      totalFetched += onPage ? fetchedCount : 0;
+    } catch (e) {
+      if (e instanceof SyncCancelledError) throw e;
+      const fe = fetchErrorFromUnknown(e);
+      firstError = firstError ?? fe.error;
+      firstErrorDetail = firstErrorDetail ?? fe.errorDetail;
+    }
+  }
+
+  return {
+    data: onPage ? [] : all,
+    error: firstError,
+    fetchedCount: onPage ? totalFetched : all.length,
+    ...(firstErrorDetail ? { errorDetail: firstErrorDetail } : {}),
+  };
 }
 
 /** Group dimension for POST /leads/api/leads/metrics */

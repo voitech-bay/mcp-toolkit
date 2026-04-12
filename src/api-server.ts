@@ -16,6 +16,7 @@ import {
   handleSupabaseSync,
   handleSupabaseSyncCancel,
   handleAnalyticsCollectedDays,
+  handleProjectDashboard,
   handleAnalyticsSync,
   handleConversation,
   handleGetCompanyContext,
@@ -53,6 +54,10 @@ import {
   handlePostEnrichmentAgent,
   handlePutEnrichmentAgent,
   handleGetContactLists,
+  handleGetGetSalesTags,
+  handlePostMarkGetSalesTagsAsHypotheses,
+  handlePostUnmarkGetSalesTagsAsHypotheses,
+  handleGetHypothesisTagContacts,
   handleGetEnrichmentTable,
   handlePostEnrichmentEnqueue,
   handleGetEnrichmentQueue,
@@ -155,10 +160,15 @@ const server = createServer(async (req, res) => {
   const hypothesisTargetsMatch = pathname.match(
     /^\/api\/hypotheses\/([^/]+)\/targets$/
   );
-  // Match /api/hypotheses/:id  (no trailing segment)
-  const hypothesisIdMatch = !hypothesisTargetsMatch && pathname.match(
-    /^\/api\/hypotheses\/([^/]+)$/
+  // Match /api/hypotheses/:id/tag-contacts
+  const hypothesisTagContactsMatch = pathname.match(
+    /^\/api\/hypotheses\/([^/]+)\/tag-contacts$/
   );
+  // Match /api/hypotheses/:id  (no trailing segment)
+  const hypothesisIdMatch =
+    !hypothesisTargetsMatch &&
+    !hypothesisTagContactsMatch &&
+    pathname.match(/^\/api\/hypotheses\/([^/]+)$/);
   // Match /api/companies/:id/hypotheses
   const companyHypothesesMatch = pathname.match(
     /^\/api\/companies\/([^/]+)\/hypotheses$/
@@ -201,6 +211,17 @@ const server = createServer(async (req, res) => {
         await handleAddHypothesisTargets(req, res, hypothesisId);
       } else if (req.method === "DELETE") {
         await handleRemoveHypothesisTargets(req, res, hypothesisId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (hypothesisTagContactsMatch) {
+      const hypothesisId = decodeURIComponent(hypothesisTagContactsMatch[1]);
+      if (req.method === "GET") {
+        await handleGetHypothesisTagContacts(req, res, hypothesisId);
       } else {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -257,6 +278,14 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/supabase-sync-cancel":
         await handleSupabaseSyncCancel(req, res);
+        return;
+      case "/api/project-dashboard":
+        if (req.method === "GET") {
+          await handleProjectDashboard(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
         return;
       case "/api/analytics-collected-days":
         if (req.method === "GET") {
@@ -413,6 +442,15 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/contact-lists":
         await handleGetContactLists(req, res);
+        return;
+      case "/api/getsales-tags":
+        await handleGetGetSalesTags(req, res);
+        return;
+      case "/api/getsales-tags/mark-hypothesis":
+        await handlePostMarkGetSalesTagsAsHypotheses(req, res);
+        return;
+      case "/api/getsales-tags/unmark-hypothesis":
+        await handlePostUnmarkGetSalesTagsAsHypotheses(req, res);
         return;
       case "/api/enrichment-table":
         await handleGetEnrichmentTable(req, res);
@@ -593,6 +631,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /api/supabase-state");
   console.log("  POST /api/supabase-sync");
   console.log("  POST /api/supabase-sync-cancel");
+  console.log("  GET  /api/project-dashboard?projectId=<id>");
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");
   console.log("  POST /api/analytics-sync");
   console.log("  GET  /api/supabase-table-query");

@@ -564,7 +564,10 @@ const availablePlaceholders = computed<PromptPlaceholderItem[]>(() => {
       items.push({ label: "All companies in batch (CSV table)", insert: "companies" });
     }
     if (et === "contact" || et === "both") {
-      items.push({ label: "All contacts in batch (CSV table)", insert: "contacts" });
+      items.push({
+        label: "All contacts in batch (compact + company)",
+        insert: "contacts",
+      });
     }
     return items;
   }
@@ -2001,7 +2004,7 @@ const agentColumns = computed<DataTableColumns<EnrichmentTableRow>>(() => {
     },
     key: `agent:${name}`,
     resizable: true,
-    minWidth: 150,
+    minWidth: 320,
     align: "center" as const,
     render: (row: EnrichmentTableRow) => renderAgentCell(name, row.agentStates[name], row),
   }));
@@ -2621,11 +2624,12 @@ const { connected: enrichmentRealtimeConnected } = useEnrichmentRealtime(
               />
               <p v-else class="prompt-drawer-preview__hint">
                 Batch size {{ promptDrawerBatchSize }}: preview uses the first
-                {{ promptBatchPreviewRowCount }} row(s) on this page. CSV for
-                <code>{{ PROMPT_TOKEN_COMPANIES }}</code> /
-                <code>{{ PROMPT_TOKEN_CONTACTS }}</code> follows the same rules as the worker
-                (agent entity type + tab). Cell values are from this table, not
-                <code>companies_placeholder_config</code> — use Worker-aligned (server) for assembled rows.
+                {{ promptBatchPreviewRowCount }} row(s) on this page.
+                <code>{{ PROMPT_TOKEN_COMPANIES }}</code> is CSV;
+                <code>{{ PROMPT_TOKEN_CONTACTS }}</code> is compact blocks with nested
+                <code>company</code> when loaded. Same rules as the worker (agent entity type + tab).
+                Contact preview uses this table’s rows; company assembly depth follows
+                <code>companies_placeholder_config</code> on the worker.
               </p>
               <div class="prompt-drawer-preview-blocks" :title="promptDrawerPreviewPlainTitle || undefined">
                 <template v-for="(block, bi) in promptPreviewBlocks" :key="bi">

@@ -31,6 +31,9 @@ import {
   createHypothesis,
   updateHypothesis,
   deleteHypothesis,
+  markGetSalesTagsAsHypotheses,
+  unmarkGetSalesTagsAsHypotheses,
+  getHypothesisTagContacts,
   addCompaniesToHypothesis,
   removeCompaniesFromHypothesis,
   getContextSnapshots,
@@ -49,6 +52,7 @@ import {
   updateEnrichmentAgent,
   getEnrichmentTableData,
   listContactListsForProject,
+  listGetSalesTagsForProject,
   enqueueEnrichmentTasks,
   listEnrichmentQueueTasksForProject,
   listEnrichmentAgentRunsForProject,
@@ -61,6 +65,7 @@ import {
   getEnrichmentAgentResultsMapForEntity,
   getEnrichmentAgentByName,
   getCollectedAnalyticsDays,
+  getProjectDashboardSnapshot,
   type EnrichmentEntityType,
 } from "./services/supabase.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
@@ -312,6 +317,40 @@ export async function handleSupabaseSyncCancel(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ ok: true, runId, mode: updated ? "clearedStaleLock" : "noop", staleLockCleared: updated }));
+}
+
+/** GET /api/project-dashboard?projectId= — overview stats for the home page. */
+export async function handleProjectDashboard(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const projectId = getQueryParams(req).get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing projectId query parameter" }));
+    return;
+  }
+  const { snapshot, error } = await getProjectDashboardSnapshot(client, projectId);
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify(snapshot));
 }
 
 /** GET /api/analytics-collected-days?projectId= — distinct snapshot dates already stored. */
@@ -1717,6 +1756,145 @@ export async function handleGetContactLists(req: IncomingMessage, res: ServerRes
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data }));
+}
+
+/** GET /api/getsales-tags?projectId= — GetSalesTags rows (synced from GetSales). */
+export async function handleGetGetSalesTags(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const result = await listGetSalesTagsForProject(client, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error, data: [] }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** POST /api/getsales-tags/mark-hypothesis — body: { projectId, tagUuids: string[] } */
+export async function handlePostMarkGetSalesTagsAsHypotheses(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as {
+    projectId?: string;
+    tagUuids?: string[];
+  } | undefined;
+  const projectId = body?.projectId?.trim();
+  const tagUuids = Array.isArray(body?.tagUuids) ? body!.tagUuids : [];
+  if (!projectId || tagUuids.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include projectId and non-empty tagUuids" }));
+    return;
+  }
+  const result = await markGetSalesTagsAsHypotheses(client, projectId, tagUuids);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ created: result.created, skipped: result.skipped }));
+}
+
+/** POST /api/getsales-tags/unmark-hypothesis — body: { projectId, tagUuids: string[] } */
+export async function handlePostUnmarkGetSalesTagsAsHypotheses(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as {
+    projectId?: string;
+    tagUuids?: string[];
+  } | undefined;
+  const projectId = body?.projectId?.trim();
+  const tagUuids = Array.isArray(body?.tagUuids) ? body!.tagUuids : [];
+  if (!projectId || tagUuids.length === 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include projectId and non-empty tagUuids" }));
+    return;
+  }
+  const result = await unmarkGetSalesTagsAsHypotheses(client, projectId, tagUuids);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+/** GET /api/hypotheses/:id/tag-contacts — contacts whose company/contact tags match the linked GetSales tag name. */
+export async function handleGetHypothesisTagContacts(
+  req: IncomingMessage,
+  res: ServerResponse,
+  hypothesisId: string
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await getHypothesisTagContacts(client, hypothesisId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], tagName: null, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, tagName: result.tagName }));
 }
 
 /** GET /api/enrichment-table?entityType=company|contact&projectId=...&limit=&offset=&listUuid= */

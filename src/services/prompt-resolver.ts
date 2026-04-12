@@ -17,6 +17,50 @@ export const COMPANY_BASE_KEYS: readonly string[] = [
   "hypotheses",
 ];
 
+/**
+ * Companies row fields fetched when hydrating contacts (worker + enrichment table).
+ * Matches `COMPANY_LLM_KEYS` below.
+ */
+export const COMPANY_SELECT_FOR_CONTACT_LLM =
+  "id,name,domain,website,industry,employees_range,linkedin,tags,status,tagline";
+
+/**
+ * Contact fields included in `{{contacts}}` compact blocks (omits heavy JSON blobs).
+ * Order preserved. `company_uuid` omitted when a nested `company` object is present.
+ */
+export const CONTACT_LLM_KEYS: readonly string[] = [
+  "name",
+  "first_name",
+  "last_name",
+  "title",
+  "position",
+  "company_name",
+  "work_email",
+  "personal_email",
+  "linkedin_url",
+  "linkedin",
+  "headline",
+  "location",
+  "tags",
+  "status",
+  "linkedin_status",
+  "list_uuid",
+  "connections_number",
+];
+
+/** Company subsection in `{{contacts}}` (subset of `companies` row). */
+export const COMPANY_LLM_KEYS: readonly string[] = [
+  "name",
+  "domain",
+  "website",
+  "industry",
+  "employees_range",
+  "linkedin",
+  "tags",
+  "status",
+  "tagline",
+];
+
 /** Base columns for contact CSV / field tokens (matches EnrichmentTablePage.vue). */
 export const CONTACT_BASE_KEYS: readonly string[] = [
   "name",
@@ -125,6 +169,67 @@ export function buildBatchEntityCsv(
     );
   }
   return lines.join("\n");
+}
+
+function isEmptyForLlmBlock(key: string, val: unknown): boolean {
+  if (val == null) return true;
+  const s = formatCellValue(key, val);
+  return s === "—" || s.trim() === "";
+}
+
+function llmSingleLine(val: string): string {
+  return val
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Token-oriented text for `{{contacts}}`: one record per entity, YAML-ish, skips empty fields.
+ * Expects optional `data.company` (record) from `company_uuid` hydration.
+ */
+export function buildBatchContactsLlmBlocks(
+  entities: Array<{ data: Record<string, unknown> }>
+): string {
+  const blocks: string[] = [];
+  for (let i = 0; i < entities.length; i++) {
+    const data = entities[i]!.data;
+    const lines: string[] = [`[@${i + 1}]`, "contact:"];
+    for (const k of CONTACT_LLM_KEYS) {
+      const v = data[k];
+      if (isEmptyForLlmBlock(k, v)) continue;
+      lines.push(`  ${k}: ${llmSingleLine(formatCellValue(k, v))}`);
+    }
+    const co = data.company;
+    if (co && typeof co === "object" && !Array.isArray(co)) {
+      const cr = co as Record<string, unknown>;
+      let anyCo = false;
+      for (const k of COMPANY_LLM_KEYS) {
+        if (!isEmptyForLlmBlock(k, cr[k])) {
+          anyCo = true;
+          break;
+        }
+      }
+      if (anyCo) {
+        lines.push("company:");
+        for (const k of COMPANY_LLM_KEYS) {
+          const v = cr[k];
+          if (isEmptyForLlmBlock(k, v)) continue;
+          lines.push(`  ${k}: ${llmSingleLine(formatCellValue(k, v))}`);
+        }
+      }
+    } else {
+      const cid = data.company_uuid;
+      if (!isEmptyForLlmBlock("company_uuid", cid)) {
+        lines.push("company:");
+        lines.push(`  company_uuid: ${llmSingleLine(formatCellValue("company_uuid", cid))}`);
+      }
+    }
+    blocks.push(lines.join("\n"));
+  }
+  return blocks.join("\n\n");
 }
 
 function resolvePlaceholderToken(
@@ -236,7 +341,7 @@ export function resolvePromptSegmentsBatch(
     if (inner === "companies" && canExpandCompaniesToken(options.entityType, options.rowKind)) {
       resolvedText = buildBatchEntityCsv(entities, "company");
     } else if (inner === "contacts" && canExpandContactsToken(options.entityType, options.rowKind)) {
-      resolvedText = buildBatchEntityCsv(entities, "contact");
+      resolvedText = buildBatchContactsLlmBlocks(entities);
     } else if (first) {
       resolvedText = resolvePlaceholderToken(inner, first.data, agentResults);
     }
@@ -255,8 +360,8 @@ export function resolvePromptSegmentsBatch(
 }
 
 /**
- * Expands `{{companies}}` / `{{contacts}}` (batch prompts), entity fields, and `{{agent:Name.key}}`
- * the same way as the enrichment table prompt preview.
+ * Expands `{{companies}}` (batch CSV), `{{contacts}}` (compact blocks + optional nested `company`),
+ * entity fields, and `{{agent:Name.key}}` the same way as the enrichment table prompt preview.
  *
  * When `batch_size > 1`, non-table tokens use the **first** entity (matches batch preview).
  */

@@ -32,6 +32,8 @@ interface HypothesisRow {
   target_persona: string | null;
   created_at: string;
   target_count: number;
+  getsales_tag_uuid: string | null;
+  getsales_tag_name: string | null;
 }
 
 interface TargetRow {
@@ -43,6 +45,15 @@ interface TargetRow {
   domain: string | null;
   linkedin: string | null;
   status: string | null;
+}
+
+interface TagContactRow {
+  contact_uuid: string;
+  name: string | null;
+  company_name: string | null;
+  work_email: string | null;
+  linkedin: string | null;
+  company_uuid: string | null;
 }
 
 // --- Hypotheses list state ---
@@ -79,10 +90,19 @@ const targetsByHypothesis = ref<Record<string, TargetRow[]>>({});
 const targetsLoading = ref<Record<string, boolean>>({});
 const targetsError = ref<Record<string, string>>({});
 
+const tagContactsByHypothesis = ref<Record<string, TagContactRow[]>>({});
+const tagContactsLoading = ref<Record<string, boolean>>({});
+const tagContactsError = ref<Record<string, string>>({});
+const tagContactsTagName = ref<Record<string, string | null>>({});
+
 watch(() => projectStore.selectedProjectId, () => {
   hypotheses.value = [];
   expandedKeys.value = [];
   targetsByHypothesis.value = {};
+  tagContactsByHypothesis.value = {};
+  tagContactsLoading.value = {};
+  tagContactsError.value = {};
+  tagContactsTagName.value = {};
   fetchHypotheses();
 }, { immediate: true });
 
@@ -105,10 +125,37 @@ async function loadTargets(hypothesisId: string) {
   }
 }
 
+async function loadTagContacts(hypothesisId: string, hasTag: boolean) {
+  if (!hasTag) return;
+  if (tagContactsByHypothesis.value[hypothesisId] !== undefined) return;
+  tagContactsLoading.value = { ...tagContactsLoading.value, [hypothesisId]: true };
+  tagContactsError.value = { ...tagContactsError.value, [hypothesisId]: "" };
+  try {
+    const r = await fetch(`/api/hypotheses/${encodeURIComponent(hypothesisId)}/tag-contacts`);
+    const json = await r.json();
+    if (!r.ok) {
+      tagContactsError.value = { ...tagContactsError.value, [hypothesisId]: json.error ?? "Failed" };
+      return;
+    }
+    tagContactsByHypothesis.value = { ...tagContactsByHypothesis.value, [hypothesisId]: json.data ?? [] };
+    tagContactsTagName.value = { ...tagContactsTagName.value, [hypothesisId]: json.tagName ?? null };
+  } catch (e) {
+    tagContactsError.value = {
+      ...tagContactsError.value,
+      [hypothesisId]: e instanceof Error ? e.message : "Failed",
+    };
+  } finally {
+    tagContactsLoading.value = { ...tagContactsLoading.value, [hypothesisId]: false };
+  }
+}
+
 function onExpandedRowsChange(keys: DataTableRowKey[]) {
   expandedKeys.value = keys;
   for (const key of keys) {
-    loadTargets(String(key));
+    const id = String(key);
+    loadTargets(id);
+    const row = hypotheses.value.find((h) => h.id === id);
+    void loadTagContacts(id, Boolean(row?.getsales_tag_uuid));
   }
 }
 
@@ -130,6 +177,16 @@ const columns = computed<DataTableColumns<HypothesisRow>>(() => [
     title: "Target persona",
     ellipsis: { tooltip: true },
     render: (row) => row.target_persona ?? "—",
+  },
+  {
+    key: "getsales_tag_name",
+    title: "Tag",
+    width: 160,
+    ellipsis: { tooltip: true },
+    render: (row) =>
+      row.getsales_tag_name
+        ? h(NTag, { size: "small", type: "info", bordered: false }, { default: () => row.getsales_tag_name })
+        : "—",
   },
   {
     key: "target_count",
@@ -277,8 +334,10 @@ async function submitForm() {
     formModalOpen.value = false;
     // Invalidate cached targets for edited row
     if (editingId.value) {
-      const { [editingId.value]: _, ...rest } = targetsByHypothesis.value;
-      targetsByHypothesis.value = rest;
+      const { [editingId.value]: _t, ...restT } = targetsByHypothesis.value;
+      targetsByHypothesis.value = restT;
+      const { [editingId.value]: _c, ...restC } = tagContactsByHypothesis.value;
+      tagContactsByHypothesis.value = restC;
     }
     fetchHypotheses();
   } catch (e) {
@@ -308,8 +367,10 @@ async function submitDelete() {
     message.success("Hypothesis deleted.");
     deleteModalOpen.value = false;
     const id = deletingRow.value.id;
-    const { [id]: _, ...rest } = targetsByHypothesis.value;
-    targetsByHypothesis.value = rest;
+    const { [id]: _t, ...restT } = targetsByHypothesis.value;
+    targetsByHypothesis.value = restT;
+    const { [id]: _c, ...restC } = tagContactsByHypothesis.value;
+    tagContactsByHypothesis.value = restC;
     expandedKeys.value = expandedKeys.value.filter((k: DataTableRowKey) => String(k) !== id);
     fetchHypotheses();
   } catch (e) {
@@ -347,28 +408,103 @@ const targetColumns: DataTableColumns<TargetRow> = [
   },
 ];
 
+const tagContactColumns: DataTableColumns<TagContactRow> = [
+  {
+    key: "name",
+    title: "Contact",
+    ellipsis: { tooltip: true },
+    render: (row) => row.name ?? "—",
+  },
+  {
+    key: "company_name",
+    title: "Company",
+    ellipsis: { tooltip: true },
+    render: (row) => row.company_name ?? "—",
+  },
+  {
+    key: "work_email",
+    title: "Email",
+    ellipsis: { tooltip: true },
+    width: 200,
+    render: (row) => row.work_email ?? "—",
+  },
+  {
+    key: "linkedin",
+    title: "LinkedIn",
+    ellipsis: { tooltip: true },
+    width: 140,
+    render: (row) => row.linkedin ?? "—",
+  },
+];
+
 function renderExpand(row: HypothesisRow) {
   const targets = targetsByHypothesis.value[row.id];
   const isLoading = targetsLoading.value[row.id];
   const err = targetsError.value[row.id];
+  const hasTag = Boolean(row.getsales_tag_uuid);
+  const tagContacts = tagContactsByHypothesis.value[row.id];
+  const tagLoading = tagContactsLoading.value[row.id];
+  const tagErr = tagContactsError.value[row.id];
+  const tagLabel =
+    tagContactsTagName.value[row.id] ?? row.getsales_tag_name ?? "—";
 
-  if (isLoading) {
-    return h("div", { class: "expand-loading" }, [h(NSpin, { size: "small" })]);
+  function companyTable() {
+    if (isLoading) {
+      return h("div", { class: "expand-loading" }, [h(NSpin, { size: "small" })]);
+    }
+    if (err) {
+      return h(NAlert, { type: "error", style: "margin: 8px 0" }, { default: () => err });
+    }
+    if (!targets || targets.length === 0) {
+      return h(NEmpty, { description: "No companies in this hypothesis yet", size: "small" });
+    }
+    return h(NDataTable, {
+      columns: targetColumns,
+      data: targets,
+      size: "small",
+      bordered: false,
+      striped: true,
+      style: "margin: 4px 0",
+    });
   }
-  if (err) {
-    return h(NAlert, { type: "error", style: "margin: 8px 0" }, { default: () => err });
+
+  function tagContactsBlock() {
+    if (!hasTag) return null;
+    if (tagLoading) {
+      return h("div", { class: "expand-loading" }, [h(NSpin, { size: "small" })]);
+    }
+    if (tagErr) {
+      return h(NAlert, { type: "error", style: "margin: 8px 0" }, { default: () => tagErr });
+    }
+    if (!tagContacts || tagContacts.length === 0) {
+      return h(NEmpty, {
+        description:
+          "No contacts found: company or contact tags must include this tag name (case-insensitive).",
+        size: "small",
+      });
+    }
+    return h(NDataTable, {
+      columns: tagContactColumns,
+      data: tagContacts,
+      size: "small",
+      bordered: false,
+      striped: true,
+      style: "margin: 4px 0",
+    });
   }
-  if (!targets || targets.length === 0) {
-    return h(NEmpty, { description: "No companies in this hypothesis yet", size: "small" });
-  }
-  return h(NDataTable, {
-    columns: targetColumns,
-    data: targets,
-    size: "small",
-    bordered: false,
-    striped: true,
-    style: "margin: 4px 0",
-  });
+
+  return h("div", { class: "expand-wrap" }, [
+    hasTag
+      ? h("div", { class: "expand-section" }, [
+          h("div", { class: "expand-section__title" }, `Contacts (tag “${tagLabel}”)`),
+          tagContactsBlock(),
+        ])
+      : null,
+    h("div", { class: "expand-section" }, [
+      h("div", { class: "expand-section__title" }, "Company targets"),
+      companyTable(),
+    ]),
+  ]);
 }
 </script>
 
@@ -399,7 +535,7 @@ function renderExpand(row: HypothesisRow) {
         :bordered="false"
         size="small"
         :max-height="600"
-        :scroll-x="800"
+        :scroll-x="980"
         :row-key="(row: HypothesisRow) => row.id"
         :expanded-row-keys="expandedKeys"
         :render-expand="renderExpand"
@@ -504,5 +640,22 @@ function renderExpand(row: HypothesisRow) {
   display: flex;
   justify-content: center;
   padding: 1rem;
+}
+
+.expand-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 4px 0 8px;
+  max-width: 960px;
+}
+
+.expand-section__title {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+  margin-bottom: 6px;
 }
 </style>

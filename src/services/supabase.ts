@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { COMPANY_SELECT_FOR_CONTACT_LLM } from "./prompt-resolver.js";
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_KEY;
@@ -10,6 +11,10 @@ export const FLOWS_TABLE = "Flows";
 export const FLOW_LEADS_TABLE = "FlowLeads";
 /** GetSales GET /leads/api/lists — contact list segments (list_uuid on Contacts). */
 export const CONTACT_LISTS_TABLE = "ContactLists";
+/** GetSales GET /leads/api/tags — tag definitions (hypotheses may reference via getsales_tag_uuid). */
+export const GET_SALES_TAGS_TABLE = "GetSalesTags";
+/** GetSales GET /leads/api/pipeline-stages — contact/company funnel stages (filter[object]). */
+export const PIPELINE_STAGES_TABLE = "PipelineStages";
 export const ANALYTICS_SNAPSHOTS_TABLE = "AnalyticsSnapshots";
 /** Core companies table. Contacts link via company_uuid (equals companies.id). */
 export const COMPANIES_TABLE = "companies";
@@ -113,14 +118,18 @@ export async function updateProjectCredentials(
 }
 
 /**
- * Get entity counts (Contacts, LinkedinMessages, Senders) filtered by project_id.
+ * Get entity counts for a project: most tables use `project_id`; companies also expose
+ * total rows in `companies` plus rows linked via `project_companies`.
  */
 const ZERO_COUNTS: TableCounts = {
   companies: 0,
+  companies_in_project: 0,
   contacts: 0,
   linkedin_messages: 0,
   senders: 0,
   contact_lists: 0,
+  getsales_tags: 0,
+  pipeline_stages: 0,
   flows: 0,
   flow_leads: 0,
 };
@@ -132,14 +141,21 @@ export async function getProjectEntityCounts(
   try {
     const [
       companiesRes,
+      projectCompaniesRes,
       contactsRes,
       messagesRes,
       sendersRes,
       contactListsRes,
+      getSalesTagsRes,
+      pipelineStagesRes,
       flowsRes,
       flowLeadsRes,
     ] = await Promise.all([
       client.from(COMPANIES_TABLE).select("*", { count: "exact", head: true }),
+      client
+        .from(PROJECT_COMPANIES_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
       client
         .from(CONTACTS_TABLE)
         .select("*", { count: "exact", head: true })
@@ -156,6 +172,14 @@ export async function getProjectEntityCounts(
         .from(CONTACT_LISTS_TABLE)
         .select("*", { count: "exact", head: true })
         .eq("project_id", projectId),
+      client
+        .from(GET_SALES_TAGS_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
+      client
+        .from(PIPELINE_STAGES_TABLE)
+        .select("*", { count: "exact", head: true })
+        .eq("project_id", projectId),
       client.from(FLOWS_TABLE).select("*", { count: "exact", head: true }).eq("project_id", projectId),
       client
         .from(FLOW_LEADS_TABLE)
@@ -163,19 +187,26 @@ export async function getProjectEntityCounts(
         .eq("project_id", projectId),
     ]);
     if (companiesRes.error) return { counts: ZERO_COUNTS, error: companiesRes.error.message };
+    if (projectCompaniesRes.error)
+      return { counts: ZERO_COUNTS, error: projectCompaniesRes.error.message };
     if (contactsRes.error) return { counts: ZERO_COUNTS, error: contactsRes.error.message };
     if (messagesRes.error) return { counts: ZERO_COUNTS, error: messagesRes.error.message };
     if (sendersRes.error) return { counts: ZERO_COUNTS, error: sendersRes.error.message };
     if (contactListsRes.error) return { counts: ZERO_COUNTS, error: contactListsRes.error.message };
+    if (getSalesTagsRes.error) return { counts: ZERO_COUNTS, error: getSalesTagsRes.error.message };
+    if (pipelineStagesRes.error) return { counts: ZERO_COUNTS, error: pipelineStagesRes.error.message };
     if (flowsRes.error) return { counts: ZERO_COUNTS, error: flowsRes.error.message };
     if (flowLeadsRes.error) return { counts: ZERO_COUNTS, error: flowLeadsRes.error.message };
     return {
       counts: {
         companies: companiesRes.count ?? 0,
+        companies_in_project: projectCompaniesRes.count ?? 0,
         contacts: contactsRes.count ?? 0,
         linkedin_messages: messagesRes.count ?? 0,
         senders: sendersRes.count ?? 0,
         contact_lists: contactListsRes.count ?? 0,
+        getsales_tags: getSalesTagsRes.count ?? 0,
+        pipeline_stages: pipelineStagesRes.count ?? 0,
         flows: flowsRes.count ?? 0,
         flow_leads: flowLeadsRes.count ?? 0,
       },
@@ -185,6 +216,43 @@ export async function getProjectEntityCounts(
     const message = e instanceof Error ? e.message : String(e);
     return { counts: { ...ZERO_COUNTS }, error: message };
   }
+}
+
+/**
+ * Match hypotheses to synced GetSales tags by trimmed case-insensitive name; sets getsales_tag_uuid.
+ */
+export async function reconcileHypothesisGetSalesTags(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ updated: number; error: string | null }> {
+  const { data: tags, error: tagsErr } = await client
+    .from(GET_SALES_TAGS_TABLE)
+    .select("uuid, name")
+    .eq("project_id", projectId);
+  if (tagsErr) return { updated: 0, error: tagsErr.message };
+  const { data: hyps, error: hypsErr } = await client
+    .from(HYPOTHESES_TABLE)
+    .select("id, name")
+    .eq("project_id", projectId);
+  if (hypsErr) return { updated: 0, error: hypsErr.message };
+  const byNorm = new Map<string, string>();
+  for (const t of tags ?? []) {
+    const u = t.uuid as string;
+    const n = typeof t.name === "string" ? t.name.trim().toLowerCase() : "";
+    if (n) byNorm.set(n, u);
+  }
+  let updated = 0;
+  for (const h of hyps ?? []) {
+    const n = typeof h.name === "string" ? h.name.trim().toLowerCase() : "";
+    const tagUuid = n ? byNorm.get(n) : undefined;
+    if (!tagUuid) continue;
+    const { error } = await client
+      .from(HYPOTHESES_TABLE)
+      .update({ getsales_tag_uuid: tagUuid })
+      .eq("id", h.id as string);
+    if (!error) updated += 1;
+  }
+  return { updated, error: null };
 }
 
 /**
@@ -202,6 +270,8 @@ export async function getProjectLatestRows(
     linkedin_messages: [],
     senders: [],
     contact_lists: [],
+    getsales_tags: [],
+    pipeline_stages: [],
     flows: [],
     flow_leads: [],
   });
@@ -212,12 +282,15 @@ export async function getProjectLatestRows(
       messagesRes,
       sendersRes,
       contactListsRes,
+      getSalesTagsRes,
+      pipelineStagesRes,
       flowsRes,
       flowLeadsRes,
     ] = await Promise.all([
       client
-        .from(COMPANIES_TABLE)
-        .select("id, name, domain, created_at")
+        .from(PROJECT_COMPANIES_TABLE)
+        .select("companies!inner(id, name, domain, created_at)")
+        .eq("project_id", projectId)
         .order("created_at", { ascending: false })
         .limit(n),
       client
@@ -245,6 +318,20 @@ export async function getProjectLatestRows(
         .order("updated_at", { ascending: false })
         .limit(n),
       client
+        .from(GET_SALES_TAGS_TABLE)
+        .select("uuid, name, team_id, created_at, updated_at, project_id")
+        .eq("project_id", projectId)
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
+        .from(PIPELINE_STAGES_TABLE)
+        .select(
+          "uuid, name, entity_object, stage_type, category, stage_order, team_id, created_at, updated_at, project_id"
+        )
+        .eq("project_id", projectId)
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
         .from(FLOWS_TABLE)
         .select("uuid, name, status, created_at, updated_at, project_id")
         .eq("project_id", projectId)
@@ -257,12 +344,20 @@ export async function getProjectLatestRows(
         .order("created_at", { ascending: false })
         .limit(n),
     ]);
+    const companyRows = (companiesRes.data ?? []) as Record<string, unknown>[];
     const latest: LatestRows = {
-      companies: companiesRes.data ?? [],
+      companies: companyRows.map((r) => {
+        const c = r.companies;
+        if (c == null) return {};
+        if (Array.isArray(c)) return { ...(c[0] as Record<string, unknown>) };
+        return { ...(c as Record<string, unknown>) };
+      }),
       contacts: contactsRes.data ?? [],
       linkedin_messages: messagesRes.data ?? [],
       senders: sendersRes.data ?? [],
       contact_lists: contactListsRes.data ?? [],
+      getsales_tags: getSalesTagsRes.data ?? [],
+      pipeline_stages: pipelineStagesRes.data ?? [],
       flows: flowsRes.data ?? [],
       flow_leads: flowLeadsRes.data ?? [],
     };
@@ -271,6 +366,8 @@ export async function getProjectLatestRows(
     if (messagesRes.error) return { latest, error: messagesRes.error.message };
     if (sendersRes.error) return { latest, error: sendersRes.error.message };
     if (contactListsRes.error) return { latest, error: contactListsRes.error.message };
+    if (getSalesTagsRes.error) return { latest, error: getSalesTagsRes.error.message };
+    if (pipelineStagesRes.error) return { latest, error: pipelineStagesRes.error.message };
     if (flowsRes.error) return { latest, error: flowsRes.error.message };
     if (flowLeadsRes.error) return { latest, error: flowLeadsRes.error.message };
     return { latest, error: null };
@@ -1259,12 +1356,19 @@ export async function getContacts(
 // --- Table counts (for /api/supabase-state) ---
 
 export interface TableCounts {
+  /** Total rows in the shared `companies` table (all projects). */
   companies: number;
+  /** Rows in `project_companies` for the current project; 0 in global aggregate (`getTableCounts`). */
+  companies_in_project: number;
   contacts: number;
   linkedin_messages: number;
   senders: number;
   /** GET /leads/api/lists */
   contact_lists: number;
+  /** GET /leads/api/tags */
+  getsales_tags: number;
+  /** GET /leads/api/pipeline-stages */
+  pipeline_stages: number;
   /** GET /flows/api/flows */
   flows: number;
   /** POST /flows/api/flows-leads/list */
@@ -1372,6 +1476,104 @@ export async function getCollectedAnalyticsDays(
     }
   }
   return { dates: [...set].sort(), error: null };
+}
+
+/** Home / overview: sync time, analytics coverage, entity and conversation totals. */
+export interface ProjectDashboardSnapshot {
+  lastSyncFinishedAt: string | null;
+  lastAnalyticsDate: string | null;
+  totalAnalyticsDays: number;
+  counts: TableCounts;
+  hypothesesTotal: number;
+  conversationsTotal: number | null;
+  /** Non-fatal issues (e.g. optional RPC missing before migration). */
+  warnings: string[];
+}
+
+export async function getProjectDashboardSnapshot(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ snapshot: ProjectDashboardSnapshot; error: string | null }> {
+  const [
+    countsResult,
+    analyticsResult,
+    syncRes,
+    hypRes,
+    convRes,
+  ] = await Promise.all([
+    getProjectEntityCounts(client, projectId),
+    getCollectedAnalyticsDays(client, projectId),
+    client
+      .from(SYNC_RUNS_TABLE)
+      .select("finished_at")
+      .eq("project_id", projectId)
+      .not("finished_at", "is", null)
+      .order("finished_at", { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    client
+      .from(HYPOTHESES_TABLE)
+      .select("*", { count: "exact", head: true })
+      .eq("project_id", projectId),
+    client.rpc("count_distinct_linkedin_conversations_for_project", {
+      p_project_id: projectId,
+    }),
+  ]);
+
+  if (countsResult.error) {
+    return {
+      snapshot: {
+        lastSyncFinishedAt: null,
+        lastAnalyticsDate: null,
+        totalAnalyticsDays: 0,
+        counts: { ...ZERO_COUNTS },
+        hypothesesTotal: 0,
+        conversationsTotal: null,
+        warnings: [],
+      },
+      error: countsResult.error,
+    };
+  }
+
+  const warnings: string[] = [];
+  if (analyticsResult.error) warnings.push(`Analytics days: ${analyticsResult.error}`);
+  if (syncRes.error) warnings.push(`Last sync: ${syncRes.error.message}`);
+  if (hypRes.error) warnings.push(`Hypotheses count: ${hypRes.error.message}`);
+
+  const analyticsDates = analyticsResult.error ? [] : analyticsResult.dates;
+  const lastAnalyticsDate =
+    analyticsDates.length > 0 ? analyticsDates[analyticsDates.length - 1]! : null;
+
+  let conversationsTotal: number | null = null;
+  if (convRes.error) {
+    warnings.push(`Conversations: ${convRes.error.message}`);
+  } else {
+    const raw = convRes.data as unknown;
+    if (typeof raw === "bigint") conversationsTotal = Number(raw);
+    else if (typeof raw === "number") conversationsTotal = raw;
+    else if (typeof raw === "string") conversationsTotal = parseInt(raw, 10) || 0;
+    else conversationsTotal = Number(raw ?? 0);
+  }
+
+  const lastSyncFinishedAt = syncRes.error
+    ? null
+    : (((syncRes.data as { finished_at?: string } | null)?.finished_at as string | undefined) ??
+        null);
+
+  const hypothesesTotal = hypRes.error ? 0 : hypRes.count ?? 0;
+
+  return {
+    snapshot: {
+      lastSyncFinishedAt,
+      lastAnalyticsDate,
+      totalAnalyticsDays: analyticsDates.length,
+      counts: countsResult.counts,
+      hypothesesTotal,
+      conversationsTotal,
+      warnings,
+    },
+    error: null,
+  };
 }
 
 const ANALYTICS_INSERT_CHUNK = 100;
@@ -1661,6 +1863,159 @@ export async function listContactListsForProject(
   };
 }
 
+/** GetSales tags synced for a project (GET /leads/api/tags). */
+export interface GetSalesTagListRow {
+  uuid: string;
+  name: string | null;
+  team_id: number | null;
+  user_id: number | null;
+  created_at: string | null;
+  updated_at: string | null;
+  /** Hypothesis id when this tag is linked via hypotheses.getsales_tag_uuid. */
+  hypothesis_id: string | null;
+}
+
+export async function listGetSalesTagsForProject(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ data: GetSalesTagListRow[]; error: string | null }> {
+  const { data, error } = await client
+    .from(GET_SALES_TAGS_TABLE)
+    .select("uuid, name, team_id, user_id, created_at, updated_at")
+    .eq("project_id", projectId)
+    .order("name", { ascending: true });
+  if (error) return { data: [], error: error.message };
+  const rows = (data ?? []) as Array<Record<string, unknown>>;
+
+  const { data: hyps, error: hypsErr } = await client
+    .from(HYPOTHESES_TABLE)
+    .select("id, getsales_tag_uuid")
+    .eq("project_id", projectId)
+    .not("getsales_tag_uuid", "is", null);
+  if (hypsErr) return { data: [], error: hypsErr.message };
+  const tagToHypothesisId = new Map<string, string>();
+  for (const h of hyps ?? []) {
+    const tu = h.getsales_tag_uuid as string | null;
+    if (tu) tagToHypothesisId.set(tu, h.id as string);
+  }
+
+  return {
+    data: rows
+      .filter((r) => typeof r.uuid === "string")
+      .map((r) => {
+        const uuid = r.uuid as string;
+        return {
+          uuid,
+          name: typeof r.name === "string" ? r.name : r.name == null ? null : String(r.name),
+          team_id: typeof r.team_id === "number" ? r.team_id : null,
+          user_id: typeof r.user_id === "number" ? r.user_id : null,
+          created_at: typeof r.created_at === "string" ? r.created_at : null,
+          updated_at: typeof r.updated_at === "string" ? r.updated_at : null,
+          hypothesis_id: tagToHypothesisId.get(uuid) ?? null,
+        };
+      }),
+    error: null,
+  };
+}
+
+/**
+ * Create hypotheses linked to GetSales tags (one hypothesis per tag uuid, skips if already linked).
+ */
+export async function markGetSalesTagsAsHypotheses(
+  client: SupabaseClient,
+  projectId: string,
+  tagUuids: string[]
+): Promise<{ created: number; skipped: number; error: string | null }> {
+  const ids = [...new Set(tagUuids)].filter(Boolean);
+  if (ids.length === 0) return { created: 0, skipped: 0, error: null };
+
+  const { data: tags, error: tagErr } = await client
+    .from(GET_SALES_TAGS_TABLE)
+    .select("uuid, name")
+    .eq("project_id", projectId)
+    .in("uuid", ids);
+  if (tagErr) return { created: 0, skipped: 0, error: tagErr.message };
+
+  const tagRows = tags ?? [];
+  const foundUuids = new Set(tagRows.map((t) => t.uuid as string));
+  let skipped = ids.filter((u) => !foundUuids.has(u)).length;
+
+  const { data: existingHyps, error: exErr } = await client
+    .from(HYPOTHESES_TABLE)
+    .select("getsales_tag_uuid")
+    .eq("project_id", projectId)
+    .in("getsales_tag_uuid", ids);
+  if (exErr) return { created: 0, skipped: 0, error: exErr.message };
+  const already = new Set(
+    (existingHyps ?? [])
+      .map((h) => h.getsales_tag_uuid as string | null)
+      .filter((u): u is string => typeof u === "string" && u.length > 0)
+  );
+
+  let created = 0;
+  for (const t of tagRows) {
+    const uuid = t.uuid as string;
+    if (already.has(uuid)) {
+      skipped += 1;
+      continue;
+    }
+    const rawName = t.name;
+    const name =
+      typeof rawName === "string" && rawName.trim()
+        ? rawName.trim()
+        : `Tag ${uuid.slice(0, 8)}`;
+    const { data: orphan, error: orphanErr } = await client
+      .from(HYPOTHESES_TABLE)
+      .select("id")
+      .eq("project_id", projectId)
+      .eq("name", name)
+      .is("getsales_tag_uuid", null)
+      .limit(1)
+      .maybeSingle();
+    if (orphanErr) return { created, skipped, error: orphanErr.message };
+    if (orphan?.id) {
+      const { error: upErr } = await client
+        .from(HYPOTHESES_TABLE)
+        .update({ getsales_tag_uuid: uuid })
+        .eq("id", orphan.id as string);
+      if (upErr) return { created, skipped, error: upErr.message };
+      created += 1;
+      already.add(uuid);
+      continue;
+    }
+    const res = await createHypothesis(client, {
+      projectId,
+      name,
+      description: null,
+      targetPersona: null,
+      getsalesTagUuid: uuid,
+    });
+    if (res.error) return { created, skipped, error: res.error };
+    created += 1;
+    already.add(uuid);
+  }
+
+  return { created, skipped, error: null };
+}
+
+/**
+ * Clear hypotheses.getsales_tag_uuid for the given tag uuids (does not delete hypotheses).
+ */
+export async function unmarkGetSalesTagsAsHypotheses(
+  client: SupabaseClient,
+  projectId: string,
+  tagUuids: string[]
+): Promise<{ error: string | null }> {
+  const ids = [...new Set(tagUuids)].filter(Boolean);
+  if (ids.length === 0) return { error: null };
+  const { error } = await client
+    .from(HYPOTHESES_TABLE)
+    .update({ getsales_tag_uuid: null })
+    .eq("project_id", projectId)
+    .in("getsales_tag_uuid", ids);
+  return { error: error?.message ?? null };
+}
+
 /**
  * List companies in a project (joining project_companies -> companies).
  * Also joins hypothesis_targets -> hypotheses to return which hypotheses each company appears in.
@@ -1910,6 +2265,10 @@ export interface HypothesisRow {
   target_persona: string | null;
   created_at: string;
   target_count: number;
+  /** Synced GetSales tag uuid when name matches GET /leads/api/tags. */
+  getsales_tag_uuid: string | null;
+  /** Resolved tag label from GetSalesTags (when getsales_tag_uuid is set). */
+  getsales_tag_name: string | null;
 }
 
 /**
@@ -1927,12 +2286,39 @@ export async function getHypothesesWithCounts(
 
   if (error) return { data: [], error: error.message };
 
-  const rows: HypothesisRow[] = ((data ?? []) as Array<Record<string, unknown>>).map((row) => {
+  const raw = (data ?? []) as Array<Record<string, unknown>>;
+  const tagUuids = [
+    ...new Set(
+      raw
+        .map((row) => row.getsales_tag_uuid as string | null)
+        .filter((u): u is string => typeof u === "string" && u.length > 0)
+    ),
+  ];
+  let tagNameByUuid = new Map<string, string>();
+  if (tagUuids.length > 0) {
+    const { data: tagRows, error: tagErr } = await client
+      .from(GET_SALES_TAGS_TABLE)
+      .select("uuid, name")
+      .eq("project_id", projectId)
+      .in("uuid", tagUuids);
+    if (tagErr) return { data: [], error: tagErr.message };
+    tagNameByUuid = new Map(
+      (tagRows ?? []).map((t) => {
+        const u = t.uuid as string;
+        const n = t.name;
+        const label = typeof n === "string" && n.trim() ? n.trim() : u.slice(0, 8);
+        return [u, label] as [string, string];
+      })
+    );
+  }
+
+  const rows: HypothesisRow[] = raw.map((row) => {
     const targets = row.hypothesis_targets as Array<Record<string, unknown>> | null;
     const target_count =
       Array.isArray(targets) && targets.length > 0
         ? (targets[0].count as number) ?? 0
         : 0;
+    const tagUuid = (row.getsales_tag_uuid as string) ?? null;
     return {
       id: row.id as string,
       project_id: row.project_id as string,
@@ -1941,6 +2327,8 @@ export async function getHypothesesWithCounts(
       target_persona: (row.target_persona as string) ?? null,
       created_at: row.created_at as string,
       target_count,
+      getsales_tag_uuid: tagUuid,
+      getsales_tag_name: tagUuid ? (tagNameByUuid.get(tagUuid) ?? null) : null,
     };
   });
 
@@ -1993,6 +2381,258 @@ export async function getHypothesisTargets(
   return { data: rows, error: null };
 }
 
+/** Contacts in the project whose company or contact tags match the hypothesis-linked GetSales tag name. */
+export interface HypothesisTagContactRow {
+  contact_uuid: string;
+  name: string | null;
+  company_name: string | null;
+  work_email: string | null;
+  linkedin: string | null;
+  company_uuid: string | null;
+  /** Count of LinkedinMessages with type inbox for this contact (lead_uuid). */
+  inbox_count: number;
+  /** Count of LinkedinMessages with type outbox for this contact. */
+  outbox_count: number;
+  /** Distinct Flows.name from FlowLeads for this lead, joined with "; ". */
+  flow_names: string;
+}
+
+const TAG_CONTACT_ENRICH_CHUNK = 500;
+
+async function enrichHypothesisTagContactRows(
+  client: SupabaseClient,
+  projectId: string,
+  rows: HypothesisTagContactRow[]
+): Promise<HypothesisTagContactRow[]> {
+  if (rows.length === 0) return rows;
+  const byId = new Map<
+    string,
+    { inbox_count: number; outbox_count: number; flow_names: string }
+  >();
+
+  for (let i = 0; i < rows.length; i += TAG_CONTACT_ENRICH_CHUNK) {
+    const chunk = rows.slice(i, i + TAG_CONTACT_ENRICH_CHUNK);
+    const uuids = chunk.map((r) => r.contact_uuid).filter((u) => typeof u === "string" && u.length > 0);
+    if (uuids.length === 0) continue;
+    const { data, error } = await client.rpc("hypothesis_tag_contact_enrichment", {
+      p_project_id: projectId,
+      p_contact_uuids: uuids,
+    });
+    if (error) {
+      continue;
+    }
+    for (const raw of (data ?? []) as Array<Record<string, unknown>>) {
+      const id = String(raw.contact_uuid ?? "");
+      if (!id) continue;
+      byId.set(id, {
+        inbox_count: Number(raw.inbox_count ?? 0),
+        outbox_count: Number(raw.outbox_count ?? 0),
+        flow_names: typeof raw.flow_names === "string" ? raw.flow_names : String(raw.flow_names ?? ""),
+      });
+    }
+  }
+
+  return rows.map((r) => {
+    const e = byId.get(r.contact_uuid);
+    return {
+      ...r,
+      inbox_count: e?.inbox_count ?? 0,
+      outbox_count: e?.outbox_count ?? 0,
+      flow_names: e?.flow_names ?? "",
+    };
+  });
+}
+
+function tagStringMatchesNeedle(tagValue: string, needle: string): boolean {
+  return tagValue.trim().toLowerCase() === needle.trim().toLowerCase();
+}
+
+/** GetSales stores tag UUID strings in Contacts.tags / companies.tags; names match legacy string tags. */
+function contactOrCompanyTagsMatchUuidOrName(
+  tagName: string,
+  tagUuid: string | null,
+  contactTags: unknown,
+  companyTagList: string[]
+): boolean {
+  const nameNeedle = tagName.trim();
+  const uuidNeedle = tagUuid?.trim().toLowerCase() ?? "";
+  for (const t of parseCompanyTagsColumn(contactTags)) {
+    const x = t.trim();
+    if (uuidNeedle && x.toLowerCase() === uuidNeedle) return true;
+    if (nameNeedle && tagStringMatchesNeedle(x, nameNeedle)) return true;
+  }
+  for (const t of companyTagList) {
+    const x = t.trim();
+    if (uuidNeedle && x.toLowerCase() === uuidNeedle) return true;
+    if (nameNeedle && tagStringMatchesNeedle(x, nameNeedle)) return true;
+  }
+  return false;
+}
+
+/**
+ * Same semantics as SQL RPC `list_contacts_for_project_tag_name`, implemented without RPC so it works
+ * when the migration was not applied or PostgREST schema cache does not list the function yet.
+ */
+async function listContactsMatchingTagForProjectFallback(
+  client: SupabaseClient,
+  projectId: string,
+  tagName: string,
+  tagUuid: string | null
+): Promise<{ data: HypothesisTagContactRow[]; error: string | null }> {
+  const needle = tagName.trim();
+  if (!needle && !tagUuid?.trim()) return { data: [], error: null };
+
+  const pageSize = 500;
+  let offset = 0;
+  const out: HypothesisTagContactRow[] = [];
+  /** company id → tags (cached across pages) */
+  const companyTagsById = new Map<string, string[]>();
+
+  async function loadCompanyTagsBatch(ids: string[]): Promise<{ error: string | null }> {
+    const missing = ids.filter((id) => !companyTagsById.has(id));
+    if (missing.length === 0) return { error: null };
+    const chunkSize = 100;
+    for (let i = 0; i < missing.length; i += chunkSize) {
+      const chunk = missing.slice(i, i + chunkSize);
+      const { data, error } = await client.from(COMPANIES_TABLE).select("id, tags").in("id", chunk);
+      if (error) return { error: error.message };
+      const seen = new Set<string>();
+      for (const row of data ?? []) {
+        const id = (row as { id?: string }).id;
+        if (typeof id !== "string") continue;
+        seen.add(id);
+        companyTagsById.set(id, parseCompanyTagsColumn((row as { tags?: unknown }).tags));
+      }
+      for (const id of chunk) {
+        if (!seen.has(id)) companyTagsById.set(id, []);
+      }
+    }
+    return { error: null };
+  }
+
+  while (true) {
+    const { data, error } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, name, company_name, work_email, linkedin, company_uuid, tags")
+      .eq("project_id", projectId)
+      .order("uuid", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) return { data: [], error: error.message };
+
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    if (rows.length === 0) break;
+
+    const companyIds = [...new Set(rows.map((r) => r.company_uuid).filter((x): x is string => typeof x === "string"))];
+    const batchErr = await loadCompanyTagsBatch(companyIds);
+    if (batchErr.error) return { data: [], error: batchErr.error };
+
+    for (const row of rows) {
+      const cid = (row.company_uuid as string | null) ?? null;
+      const ctags = cid ? (companyTagsById.get(cid) ?? []) : [];
+      if (!contactOrCompanyTagsMatchUuidOrName(needle, tagUuid, row.tags, ctags)) continue;
+      out.push({
+        contact_uuid: String(row.uuid ?? ""),
+        name: (row.name as string) ?? null,
+        company_name: (row.company_name as string) ?? null,
+        work_email: (row.work_email as string) ?? null,
+        linkedin: (row.linkedin as string) ?? null,
+        company_uuid: cid,
+        inbox_count: 0,
+        outbox_count: 0,
+        flow_names: "",
+      });
+    }
+
+    offset += pageSize;
+    if (rows.length < pageSize) break;
+  }
+
+  return { data: out, error: null };
+}
+
+function shouldUseTagContactsRpcFallback(rpcError: { message?: string; code?: string } | null): boolean {
+  if (!rpcError) return false;
+  const msg = rpcError.message ?? "";
+  const code = rpcError.code ?? "";
+  if (code === "PGRST202") return true;
+  if (/could not find the function/i.test(msg)) return true;
+  if (/schema cache/i.test(msg)) return true;
+  return false;
+}
+
+/**
+ * Resolve contacts that match the GetSales tag name for this hypothesis (RPC list_contacts_for_project_tag_name,
+ * with in-app fallback if the RPC is not deployed).
+ */
+export async function getHypothesisTagContacts(
+  client: SupabaseClient,
+  hypothesisId: string
+): Promise<{
+  data: HypothesisTagContactRow[];
+  tagName: string | null;
+  error: string | null;
+}> {
+  const { data: hyp, error: hErr } = await client
+    .from(HYPOTHESES_TABLE)
+    .select("id, project_id, getsales_tag_uuid")
+    .eq("id", hypothesisId)
+    .maybeSingle();
+  if (hErr) return { data: [], tagName: null, error: hErr.message };
+  if (!hyp) return { data: [], tagName: null, error: "Hypothesis not found" };
+  const tagUuid = hyp.getsales_tag_uuid as string | null;
+  const projectId = hyp.project_id as string;
+  if (!tagUuid) {
+    return { data: [], tagName: null, error: null };
+  }
+  const { data: tagRow, error: tErr } = await client
+    .from(GET_SALES_TAGS_TABLE)
+    .select("name")
+    .eq("uuid", tagUuid)
+    .eq("project_id", projectId)
+    .maybeSingle();
+  if (tErr) return { data: [], tagName: null, error: tErr.message };
+  const rawName = tagRow?.name;
+  const tagName =
+    typeof rawName === "string" && rawName.trim() ? rawName.trim() : null;
+
+  const { data: rows, error: rpcErr } = await client.rpc("list_contacts_for_project_tag_name", {
+    p_project_id: projectId,
+    p_tag_name: tagName ?? "",
+    p_tag_uuid: tagUuid,
+  });
+
+  if (!rpcErr) {
+    const list = (rows ?? []) as Array<Record<string, unknown>>;
+    const base: HypothesisTagContactRow[] = list.map((r) => ({
+      contact_uuid: String(r.contact_uuid ?? ""),
+      name: (r.name as string) ?? null,
+      company_name: (r.company_name as string) ?? null,
+      work_email: (r.work_email as string) ?? null,
+      linkedin: (r.linkedin as string) ?? null,
+      company_uuid: (r.company_uuid as string) ?? null,
+      inbox_count: 0,
+      outbox_count: 0,
+      flow_names: "",
+    }));
+    const data = await enrichHypothesisTagContactRows(client, projectId, base);
+    return { data, tagName, error: null };
+  }
+
+  if (shouldUseTagContactsRpcFallback(rpcErr)) {
+    const fb = await listContactsMatchingTagForProjectFallback(
+      client,
+      projectId,
+      tagName ?? "",
+      tagUuid
+    );
+    if (fb.error) return { data: [], tagName, error: fb.error };
+    const data = await enrichHypothesisTagContactRows(client, projectId, fb.data);
+    return { data, tagName, error: null };
+  }
+
+  return { data: [], tagName, error: rpcErr.message };
+}
+
 /**
  * Create a new hypothesis for a project.
  */
@@ -2003,18 +2643,20 @@ export async function createHypothesis(
     name: string;
     description?: string | null;
     targetPersona?: string | null;
+    /** Link to synced GetSales tag (hypotheses.getsales_tag_uuid). */
+    getsalesTagUuid?: string | null;
   }
 ): Promise<{ data: { id: string } | null; error: string | null }> {
-  const { data, error } = await client
-    .from(HYPOTHESES_TABLE)
-    .insert({
-      project_id: payload.projectId,
-      name: payload.name,
-      description: payload.description ?? null,
-      target_persona: payload.targetPersona ?? null,
-    })
-    .select("id")
-    .single();
+  const insert: Record<string, unknown> = {
+    project_id: payload.projectId,
+    name: payload.name,
+    description: payload.description ?? null,
+    target_persona: payload.targetPersona ?? null,
+  };
+  if (payload.getsalesTagUuid != null && payload.getsalesTagUuid !== "") {
+    insert.getsales_tag_uuid = payload.getsalesTagUuid;
+  }
+  const { data, error } = await client.from(HYPOTHESES_TABLE).insert(insert).select("id").single();
   if (error) return { data: null, error: error.message };
   return { data: { id: (data as Record<string, unknown>).id as string }, error: null };
 }
@@ -2025,12 +2667,18 @@ export async function createHypothesis(
 export async function updateHypothesis(
   client: SupabaseClient,
   id: string,
-  payload: { name?: string; description?: string | null; targetPersona?: string | null }
+  payload: {
+    name?: string;
+    description?: string | null;
+    targetPersona?: string | null;
+    getsalesTagUuid?: string | null;
+  }
 ): Promise<{ error: string | null }> {
   const update: Record<string, unknown> = {};
   if (payload.name !== undefined) update.name = payload.name;
   if (payload.description !== undefined) update.description = payload.description;
   if (payload.targetPersona !== undefined) update.target_persona = payload.targetPersona;
+  if (payload.getsalesTagUuid !== undefined) update.getsales_tag_uuid = payload.getsalesTagUuid;
   if (Object.keys(update).length === 0) return { error: null };
   const { error } = await client.from(HYPOTHESES_TABLE).update(update).eq("id", id);
   return { error: error?.message ?? null };
@@ -2091,6 +2739,8 @@ export async function getTableCounts(
       messagesRes,
       sendersRes,
       contactListsRes,
+      getSalesTagsRes,
+      pipelineStagesRes,
       flowsRes,
       flowLeadsRes,
     ] = await Promise.all([
@@ -2099,6 +2749,8 @@ export async function getTableCounts(
       client.from(LINKEDIN_MESSAGES_TABLE).select("*", { count: "exact", head: true }),
       client.from(SENDERS_TABLE).select("*", { count: "exact", head: true }),
       client.from(CONTACT_LISTS_TABLE).select("*", { count: "exact", head: true }),
+      client.from(GET_SALES_TAGS_TABLE).select("*", { count: "exact", head: true }),
+      client.from(PIPELINE_STAGES_TABLE).select("*", { count: "exact", head: true }),
       client.from(FLOWS_TABLE).select("*", { count: "exact", head: true }),
       client.from(FLOW_LEADS_TABLE).select("*", { count: "exact", head: true }),
     ]);
@@ -2107,15 +2759,20 @@ export async function getTableCounts(
     if (messagesRes.error) return { counts: ZERO_COUNTS, error: messagesRes.error.message };
     if (sendersRes.error) return { counts: ZERO_COUNTS, error: sendersRes.error.message };
     if (contactListsRes.error) return { counts: ZERO_COUNTS, error: contactListsRes.error.message };
+    if (getSalesTagsRes.error) return { counts: ZERO_COUNTS, error: getSalesTagsRes.error.message };
+    if (pipelineStagesRes.error) return { counts: ZERO_COUNTS, error: pipelineStagesRes.error.message };
     if (flowsRes.error) return { counts: ZERO_COUNTS, error: flowsRes.error.message };
     if (flowLeadsRes.error) return { counts: ZERO_COUNTS, error: flowLeadsRes.error.message };
     return {
       counts: {
         companies: companiesRes.count ?? 0,
+        companies_in_project: 0,
         contacts: contactsRes.count ?? 0,
         linkedin_messages: messagesRes.count ?? 0,
         senders: sendersRes.count ?? 0,
         contact_lists: contactListsRes.count ?? 0,
+        getsales_tags: getSalesTagsRes.count ?? 0,
+        pipeline_stages: pipelineStagesRes.count ?? 0,
         flows: flowsRes.count ?? 0,
         flow_leads: flowLeadsRes.count ?? 0,
       },
@@ -2133,6 +2790,8 @@ export interface LatestRows {
   linkedin_messages: unknown[];
   senders: unknown[];
   contact_lists: unknown[];
+  getsales_tags: unknown[];
+  pipeline_stages: unknown[];
   flows: unknown[];
   flow_leads: unknown[];
 }
@@ -2154,6 +2813,8 @@ export async function getLatestRows(
     linkedin_messages: [],
     senders: [],
     contact_lists: [],
+    getsales_tags: [],
+    pipeline_stages: [],
     flows: [],
     flow_leads: [],
   });
@@ -2164,6 +2825,8 @@ export async function getLatestRows(
       messagesRes,
       sendersRes,
       contactListsRes,
+      getSalesTagsRes,
+      pipelineStagesRes,
       flowsRes,
       flowLeadsRes,
     ] = await Promise.all([
@@ -2174,6 +2837,18 @@ export async function getLatestRows(
       client
         .from(CONTACT_LISTS_TABLE)
         .select("uuid, name, team_id, created_at, updated_at, project_id")
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
+        .from(GET_SALES_TAGS_TABLE)
+        .select("uuid, name, team_id, created_at, updated_at, project_id")
+        .order("updated_at", { ascending: false })
+        .limit(n),
+      client
+        .from(PIPELINE_STAGES_TABLE)
+        .select(
+          "uuid, name, entity_object, stage_type, category, stage_order, team_id, created_at, updated_at, project_id"
+        )
         .order("updated_at", { ascending: false })
         .limit(n),
       client
@@ -2193,6 +2868,8 @@ export async function getLatestRows(
       linkedin_messages: messagesRes.data ?? [],
       senders: sendersRes.data ?? [],
       contact_lists: contactListsRes.data ?? [],
+      getsales_tags: getSalesTagsRes.data ?? [],
+      pipeline_stages: pipelineStagesRes.data ?? [],
       flows: flowsRes.data ?? [],
       flow_leads: flowLeadsRes.data ?? [],
     };
@@ -2201,6 +2878,8 @@ export async function getLatestRows(
     if (messagesRes.error) return { latest, error: messagesRes.error.message };
     if (sendersRes.error) return { latest, error: sendersRes.error.message };
     if (contactListsRes.error) return { latest, error: contactListsRes.error.message };
+    if (getSalesTagsRes.error) return { latest, error: getSalesTagsRes.error.message };
+    if (pipelineStagesRes.error) return { latest, error: pipelineStagesRes.error.message };
     if (flowsRes.error) return { latest, error: flowsRes.error.message };
     if (flowLeadsRes.error) return { latest, error: flowLeadsRes.error.message };
     return { latest, error: null };
@@ -3598,7 +4277,39 @@ export async function getEnrichmentTableData(
     const c = await getContactsForProjectPage(client, projectId, lim, off, listFilter ?? null);
     baseError = c.error;
     total = c.total;
-    baseRows = c.data;
+    const rawContacts = c.data;
+    if (baseError) {
+      baseRows = [];
+    } else {
+      const companyIds = [
+        ...new Set(
+          rawContacts
+            .map((r) => r.company_uuid)
+            .filter((u): u is string => typeof u === "string" && u.length > 0)
+        ),
+      ];
+      if (companyIds.length === 0) {
+        baseRows = rawContacts;
+      } else {
+        const { data: coRows, error: coErr } = await client
+          .from(COMPANIES_TABLE)
+          .select(COMPANY_SELECT_FOR_CONTACT_LLM)
+          .in("id", companyIds);
+        const companyMap = new Map<string, Record<string, unknown>>();
+        if (!coErr) {
+          for (const row of (coRows ?? []) as Record<string, unknown>[]) {
+            const id = row.id as string | undefined;
+            if (id) companyMap.set(id, row);
+          }
+        }
+        baseRows = rawContacts.map((row) => {
+          const cu = row.company_uuid;
+          const company =
+            typeof cu === "string" ? companyMap.get(cu) : undefined;
+          return company ? { ...row, company } : row;
+        });
+      }
+    }
   }
 
   if (baseError) {

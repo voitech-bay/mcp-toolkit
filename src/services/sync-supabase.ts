@@ -3,7 +3,7 @@
  * the source API (newest first) until we reach that row, and upsert only the new rows.
  * GetSales pages are streamed (no giant in-memory arrays in source-api); mapped rows are buffered
  * and flushed to Supabase in batches (see SOURCE_SYNC_FETCH_BUFFER_ROWS, default 10000).
- * Order: companies → contacts → linkedin_messages, senders, contact_lists, flows, flow_leads.
+ * Order: companies → contacts → linkedin_messages, senders, contact_lists, getsales_tags, pipeline_stages, flows, flow_leads.
  * Optional `entities` limits which steps run; dependencies are expanded (e.g. contacts → companies; flow_leads → flows).
  * Requires SUPABASE_SERVICE_ROLE_KEY (not anon key) so upserts bypass Row Level Security.
  * Row mappers whitelist columns to match current DB schema and avoid overwriting backfilled fields.
@@ -22,8 +22,11 @@ import {
   FLOWS_TABLE,
   FLOW_LEADS_TABLE,
   CONTACT_LISTS_TABLE,
+  GET_SALES_TAGS_TABLE,
+  PIPELINE_STAGES_TABLE,
   COMPANIES_TABLE,
   createSyncRun,
+  reconcileHypothesisGetSalesTags,
   updateSyncRun,
   insertSyncLogEntry,
   type SyncRunStatus,
@@ -41,6 +44,8 @@ import {
   FLOWS_COLUMNS,
   FLOW_LEADS_COLUMNS,
   CONTACT_LISTS_COLUMNS,
+  GET_SALES_TAGS_COLUMNS,
+  PIPELINE_STAGES_COLUMNS,
   mapCompanyForSupabase,
   pickColumns,
 } from "./supabase-schema.js";
@@ -51,6 +56,8 @@ import {
   fetchFlowsIncremental,
   fetchFlowLeadsIncremental,
   fetchContactListsIncremental,
+  fetchTagsIncremental,
+  fetchPipelineStagesIncremental,
   fetchCompaniesIncremental,
   fetchLeadsMetricsForRange,
   dayBoundsUtc,
@@ -78,6 +85,8 @@ export type SyncEntityKey =
   | "linkedin_messages"
   | "senders"
   | "contact_lists"
+  | "getsales_tags"
+  | "pipeline_stages"
   | "flows"
   | "flow_leads";
 
@@ -87,6 +96,8 @@ export const SYNC_ENTITY_PIPELINE: readonly SyncEntityKey[] = [
   "linkedin_messages",
   "senders",
   "contact_lists",
+  "getsales_tags",
+  "pipeline_stages",
   "flows",
   "flow_leads",
 ] as const;
@@ -270,6 +281,8 @@ const SENDERS_ALLOWED = new Set<string>(SENDERS_COLUMNS);
 const FLOWS_ALLOWED = new Set<string>(FLOWS_COLUMNS);
 const FLOW_LEADS_ALLOWED = new Set<string>(FLOW_LEADS_COLUMNS);
 const CONTACT_LISTS_ALLOWED = new Set<string>(CONTACT_LISTS_COLUMNS);
+const GET_SALES_TAGS_ALLOWED = new Set<string>(GET_SALES_TAGS_COLUMNS);
+const PIPELINE_STAGES_ALLOWED = new Set<string>(PIPELINE_STAGES_COLUMNS);
 
 /** Whitelist to Contacts columns; omit backfilled columns unless present in API row. */
 function mapContactForSupabase(row: Record<string, unknown>): Record<string, unknown> {
@@ -320,6 +333,51 @@ function mapContactListForSupabase(row: Record<string, unknown>): Record<string,
   }
   delete base.id;
   return pickColumns(base, CONTACT_LISTS_ALLOWED);
+}
+
+function mapGetSalesTagForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+  const base = { ...row };
+  if (base.uuid == null && base.id != null) {
+    base.uuid = base.id;
+  }
+  delete base.id;
+  return pickColumns(base, GET_SALES_TAGS_ALLOWED);
+}
+
+function mapPipelineStageForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+  const uuid = row.uuid ?? row.id;
+  const entityObj =
+    typeof row.object === "string"
+      ? row.object
+      : typeof row.entity_object === "string"
+        ? row.entity_object
+        : null;
+  const orderRaw = row.order;
+  const stageOrder =
+    typeof orderRaw === "number"
+      ? orderRaw
+      : orderRaw != null && orderRaw !== ""
+        ? Number(orderRaw)
+        : null;
+  const typeRaw = row.type;
+  const base: Record<string, unknown> = {
+    uuid: uuid != null ? String(uuid) : null,
+    team_id: row.team_id,
+    entity_object: entityObj,
+    name: row.name,
+    stage_type: typeRaw != null ? String(typeRaw) : null,
+    category:
+      typeof row.category === "string"
+        ? row.category
+        : row.category != null
+          ? String(row.category)
+          : null,
+    stage_order: Number.isFinite(stageOrder as number) ? stageOrder : null,
+    user_id: row.user_id,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+  return pickColumns(base, PIPELINE_STAGES_ALLOWED);
 }
 
 function mapFlowLeadForSupabase(row: Record<string, unknown>): Record<string, unknown> {
@@ -659,6 +717,95 @@ async function flushContactListsMappedBatches(
   return { upserted, errors: batchErrors };
 }
 
+async function flushGetSalesTagsMappedBatches(
+  client: SupabaseClient,
+  mapped: Record<string, unknown>[],
+  logger: SyncLogger,
+  rlsHint: string
+): Promise<{ upserted: number; errors: string[] }> {
+  if (mapped.length === 0) return { upserted: 0, errors: [] };
+  const tagsChunkCount = Math.ceil(mapped.length / CHUNK_SIZE);
+  const batchErrors: string[] = [];
+  let upserted = 0;
+  for (let i = 0; i < mapped.length; i += CHUNK_SIZE) {
+    const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
+    const chunk = mapped.slice(i, i + CHUNK_SIZE);
+    const upsertResult = await upsertChunk(client, GET_SALES_TAGS_TABLE, chunk, "uuid");
+    upserted += upsertResult.inserted;
+    if (upsertResult.inserted > 0) {
+      await logger.logUpsert(GET_SALES_TAGS_TABLE, upsertResult.inserted);
+    }
+    if (upsertResult.error) {
+      const errMsg =
+        upsertResult.error + (upsertResult.error.includes("row-level security") ? rlsHint : "");
+      batchErrors.push(`chunk ${chunkIdx}/${tagsChunkCount}: ${errMsg}`);
+      await logger.logError("getsales_tags: upsert error", {
+        error: errMsg,
+        chunkIndex: chunkIdx,
+        totalChunks: tagsChunkCount,
+        chunkSize: chunk.length,
+        rowsInserted: upsertResult.inserted,
+        rowsFailed: upsertResult.failed.length,
+      });
+      for (const f of upsertResult.failed) {
+        await logger.logError("getsales_tags: failed row", {
+          error: f.error,
+          uuid: (f.row.uuid as string) ?? null,
+          name: (f.row.name as string) ?? null,
+          updated_at: (f.row.updated_at as string) ?? null,
+          project_id: (f.row.project_id as string) ?? null,
+        });
+      }
+    }
+  }
+  return { upserted, errors: batchErrors };
+}
+
+async function flushPipelineStagesMappedBatches(
+  client: SupabaseClient,
+  mapped: Record<string, unknown>[],
+  logger: SyncLogger,
+  rlsHint: string
+): Promise<{ upserted: number; errors: string[] }> {
+  if (mapped.length === 0) return { upserted: 0, errors: [] };
+  const psChunkCount = Math.ceil(mapped.length / CHUNK_SIZE);
+  const batchErrors: string[] = [];
+  let upserted = 0;
+  for (let i = 0; i < mapped.length; i += CHUNK_SIZE) {
+    const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
+    const chunk = mapped.slice(i, i + CHUNK_SIZE);
+    const upsertResult = await upsertChunk(client, PIPELINE_STAGES_TABLE, chunk, "uuid");
+    upserted += upsertResult.inserted;
+    if (upsertResult.inserted > 0) {
+      await logger.logUpsert(PIPELINE_STAGES_TABLE, upsertResult.inserted);
+    }
+    if (upsertResult.error) {
+      const errMsg =
+        upsertResult.error + (upsertResult.error.includes("row-level security") ? rlsHint : "");
+      batchErrors.push(`chunk ${chunkIdx}/${psChunkCount}: ${errMsg}`);
+      await logger.logError("pipeline_stages: upsert error", {
+        error: errMsg,
+        chunkIndex: chunkIdx,
+        totalChunks: psChunkCount,
+        chunkSize: chunk.length,
+        rowsInserted: upsertResult.inserted,
+        rowsFailed: upsertResult.failed.length,
+      });
+      for (const f of upsertResult.failed) {
+        await logger.logError("pipeline_stages: failed row", {
+          error: f.error,
+          uuid: (f.row.uuid as string) ?? null,
+          name: (f.row.name as string) ?? null,
+          entity_object: (f.row.entity_object as string) ?? null,
+          updated_at: (f.row.updated_at as string) ?? null,
+          project_id: (f.row.project_id as string) ?? null,
+        });
+      }
+    }
+  }
+  return { upserted, errors: batchErrors };
+}
+
 async function flushFlowsMappedBatches(
   client: SupabaseClient,
   mapped: Record<string, unknown>[],
@@ -754,6 +901,8 @@ export interface SyncResult {
   linkedin_messages: { fetched: number; upserted: number; error: string | null };
   senders: { fetched: number; upserted: number; error: string | null };
   contact_lists: { fetched: number; upserted: number; error: string | null };
+  getsales_tags: { fetched: number; upserted: number; error: string | null };
+  pipeline_stages: { fetched: number; upserted: number; error: string | null };
   flows: { fetched: number; upserted: number; error: string | null };
   flow_leads: { fetched: number; upserted: number; error: string | null };
   error: string | null;
@@ -795,6 +944,8 @@ export async function syncSupabaseFromSource(
     linkedin_messages: { fetched: 0, upserted: 0, error: null },
     senders: { fetched: 0, upserted: 0, error: null },
     contact_lists: { fetched: 0, upserted: 0, error: null },
+    getsales_tags: { fetched: 0, upserted: 0, error: null },
+    pipeline_stages: { fetched: 0, upserted: 0, error: null },
     flows: { fetched: 0, upserted: 0, error: null },
     flow_leads: { fetched: 0, upserted: 0, error: null },
     error: null,
@@ -870,6 +1021,8 @@ export async function syncSupabaseFromSource(
     messagesLatest,
     sendersLatest,
     contactListsLatestUpdated,
+    getSalesTagsLatestUpdated,
+    pipelineStagesLatestUpdated,
     flowsLatestUpdated,
     flowLeadsLatest,
   ] = await Promise.all([
@@ -882,6 +1035,12 @@ export async function syncSupabaseFromSource(
     effective.has("contact_lists")
       ? latestUpdatedAt(client, CONTACT_LISTS_TABLE, projectId)
       : Promise.resolve(null),
+    effective.has("getsales_tags")
+      ? latestUpdatedAt(client, GET_SALES_TAGS_TABLE, projectId)
+      : Promise.resolve(null),
+    effective.has("pipeline_stages")
+      ? latestUpdatedAt(client, PIPELINE_STAGES_TABLE, projectId)
+      : Promise.resolve(null),
     effective.has("flows") ? latestUpdatedAt(client, FLOWS_TABLE, projectId) : Promise.resolve(null),
     effective.has("flow_leads") ? latestCreatedAt(client, FLOW_LEADS_TABLE, projectId) : Promise.resolve(null),
   ]);
@@ -892,6 +1051,12 @@ export async function syncSupabaseFromSource(
     sendersSince: effective.has("senders") ? sendersLatest ?? "null" : "skipped",
     contactListsSinceUpdated: effective.has("contact_lists")
       ? contactListsLatestUpdated ?? "null"
+      : "skipped",
+    getSalesTagsSinceUpdated: effective.has("getsales_tags")
+      ? getSalesTagsLatestUpdated ?? "null"
+      : "skipped",
+    pipelineStagesSinceUpdated: effective.has("pipeline_stages")
+      ? pipelineStagesLatestUpdated ?? "null"
       : "skipped",
     flowsSinceUpdated: effective.has("flows") ? flowsLatestUpdated ?? "null" : "skipped",
     flowLeadsSince: effective.has("flow_leads") ? flowLeadsLatest ?? "null" : "skipped",
@@ -1146,6 +1311,104 @@ export async function syncSupabaseFromSource(
   }
   }
 
+  if (effective.has("getsales_tags")) {
+  await logger.log("getsales_tags: fetching from source", { fetchBufferRows: syncBufferRows });
+  const tagsBuf: Record<string, unknown>[] = [];
+  let tagsUpsertTotal = 0;
+  const tagsErrorsAcc: string[] = [];
+  const flushTagsBuf = async (batch: Record<string, unknown>[]) => {
+    const { upserted, errors } = await flushGetSalesTagsMappedBatches(client, batch, logger, rlsHint);
+    tagsUpsertTotal += upserted;
+    tagsErrorsAcc.push(...errors);
+  };
+  const pushTagsPage = async (rows: Record<string, unknown>[]) => {
+    const mapped = rows.map(mapGetSalesTagForSupabase);
+    if (projectId) injectProjectId(mapped, projectId);
+    tagsBuf.push(...mapped);
+    while (tagsBuf.length >= syncBufferRows) {
+      const batch = tagsBuf.splice(0, syncBufferRows);
+      await flushTagsBuf(batch);
+    }
+  };
+  const getSalesTagsRes = await fetchTagsIncremental(getSalesTagsLatestUpdated, credentials, fetchLog, {
+    onPage: pushTagsPage,
+    onBeforePage: syncShouldStop,
+  });
+  result.getsales_tags.fetched = getSalesTagsRes.fetchedCount;
+  if (tagsBuf.length > 0) await flushTagsBuf(tagsBuf);
+  result.getsales_tags.upserted = tagsUpsertTotal;
+  if (getSalesTagsRes.error) {
+    result.getsales_tags.error = getSalesTagsRes.error;
+    await logger.logError(
+      "getsales_tags: fetch error",
+      buildSourceApiFetchErrorLog(getSalesTagsRes.error, getSalesTagsRes.errorDetail, {
+        sinceUpdated: getSalesTagsLatestUpdated ?? "full",
+      })
+    );
+  } else {
+    await logger.log("getsales_tags: fetched", { count: result.getsales_tags.fetched });
+    if (tagsErrorsAcc.length > 0) {
+      result.getsales_tags.error = `${tagsErrorsAcc.length} chunk(s) failed: ${tagsErrorsAcc.join("; ")}`;
+    }
+    await logger.log("getsales_tags: upserted", { count: result.getsales_tags.upserted });
+    if (projectId) {
+      const reconcile = await reconcileHypothesisGetSalesTags(client, projectId);
+      await logger.log("hypotheses: reconcile GetSales tags", {
+        updated: reconcile.updated,
+        error: reconcile.error,
+      });
+    }
+  }
+  }
+
+  if (effective.has("pipeline_stages")) {
+  await logger.log("pipeline_stages: fetching from source", { fetchBufferRows: syncBufferRows });
+  const psBuf: Record<string, unknown>[] = [];
+  let psUpsertTotal = 0;
+  const psErrorsAcc: string[] = [];
+  const flushPsBuf = async (batch: Record<string, unknown>[]) => {
+    const { upserted, errors } = await flushPipelineStagesMappedBatches(client, batch, logger, rlsHint);
+    psUpsertTotal += upserted;
+    psErrorsAcc.push(...errors);
+  };
+  const pushPsPage = async (rows: Record<string, unknown>[]) => {
+    const mapped = rows.map(mapPipelineStageForSupabase);
+    if (projectId) injectProjectId(mapped, projectId);
+    psBuf.push(...mapped);
+    while (psBuf.length >= syncBufferRows) {
+      const batch = psBuf.splice(0, syncBufferRows);
+      await flushPsBuf(batch);
+    }
+  };
+  const pipelineStagesRes = await fetchPipelineStagesIncremental(
+    pipelineStagesLatestUpdated,
+    credentials,
+    fetchLog,
+    {
+      onPage: pushPsPage,
+      onBeforePage: syncShouldStop,
+    }
+  );
+  result.pipeline_stages.fetched = pipelineStagesRes.fetchedCount;
+  if (psBuf.length > 0) await flushPsBuf(psBuf);
+  result.pipeline_stages.upserted = psUpsertTotal;
+  if (pipelineStagesRes.error) {
+    result.pipeline_stages.error = pipelineStagesRes.error;
+    await logger.logError(
+      "pipeline_stages: fetch error",
+      buildSourceApiFetchErrorLog(pipelineStagesRes.error, pipelineStagesRes.errorDetail, {
+        sinceUpdated: pipelineStagesLatestUpdated ?? "full",
+      })
+    );
+  } else {
+    await logger.log("pipeline_stages: fetched", { count: result.pipeline_stages.fetched });
+    if (psErrorsAcc.length > 0) {
+      result.pipeline_stages.error = `${psErrorsAcc.length} chunk(s) failed: ${psErrorsAcc.join("; ")}`;
+    }
+    await logger.log("pipeline_stages: upserted", { count: result.pipeline_stages.upserted });
+  }
+  }
+
   if (effective.has("flows")) {
   await logger.log("flows: fetching from source", { fetchBufferRows: syncBufferRows });
   const flowsBuf: Record<string, unknown>[] = [];
@@ -1253,6 +1516,8 @@ export async function syncSupabaseFromSource(
     result.linkedin_messages.error != null ||
     result.senders.error != null ||
     result.contact_lists.error != null ||
+    result.getsales_tags.error != null ||
+    result.pipeline_stages.error != null ||
     result.flows.error != null ||
     result.flow_leads.error != null;
   const status: SyncRunStatus = result.cancelled
@@ -1292,6 +1557,16 @@ export async function syncSupabaseFromSource(
       fetched: result.contact_lists.fetched,
       upserted: result.contact_lists.upserted,
       error: result.contact_lists.error != null,
+    },
+    getsales_tags: {
+      fetched: result.getsales_tags.fetched,
+      upserted: result.getsales_tags.upserted,
+      error: result.getsales_tags.error != null,
+    },
+    pipeline_stages: {
+      fetched: result.pipeline_stages.fetched,
+      upserted: result.pipeline_stages.upserted,
+      error: result.pipeline_stages.error != null,
     },
     flows: {
       fetched: result.flows.fetched,

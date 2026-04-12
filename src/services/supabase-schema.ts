@@ -145,6 +145,32 @@ export const CONTACT_LISTS_COLUMNS = [
   "project_id",
 ] as const;
 
+/** Columns that exist on public.GetSalesTags. Sync includes only these. */
+export const GET_SALES_TAGS_COLUMNS = [
+  "uuid",
+  "team_id",
+  "user_id",
+  "name",
+  "created_at",
+  "updated_at",
+  "project_id",
+] as const;
+
+/** Columns on public.PipelineStages (GET /leads/api/pipeline-stages). API object/type/order → entity_object/stage_type/stage_order. */
+export const PIPELINE_STAGES_COLUMNS = [
+  "uuid",
+  "team_id",
+  "entity_object",
+  "name",
+  "stage_type",
+  "category",
+  "stage_order",
+  "user_id",
+  "created_at",
+  "updated_at",
+  "project_id",
+] as const;
+
 /** Columns that exist on public.Flows. Sync includes only these. */
 export const FLOWS_COLUMNS = [
   "uuid",
