@@ -25,7 +25,7 @@ export const COMPANY_SELECT_FOR_CONTACT_LLM =
   "id,name,domain,website,industry,employees_range,linkedin,tags,status,tagline";
 
 /**
- * Contact fields included in `{{contacts}}` compact blocks (omits heavy JSON blobs).
+ * Contact fields included in `{{contacts}}` compact blocks (skips empty values).
  * Order preserved. `company_uuid` omitted when a nested `company` object is present.
  */
 export const CONTACT_LLM_KEYS: readonly string[] = [
@@ -46,6 +46,10 @@ export const CONTACT_LLM_KEYS: readonly string[] = [
   "linkedin_status",
   "list_uuid",
   "connections_number",
+  "skills",
+  "locations",
+  "experience",
+  "educations",
 ];
 
 /** Company subsection in `{{contacts}}` (subset of `companies` row). */
@@ -69,6 +73,10 @@ export const CONTACT_BASE_KEYS: readonly string[] = [
   "title",
   "position",
   "company_name",
+  "skills",
+  "locations",
+  "experience",
+  "educations",
   "company_uuid",
   "work_email",
   "personal_email",
