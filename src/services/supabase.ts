@@ -1565,6 +1565,149 @@ export async function getCollectedAnalyticsDays(
   return { dates: [...set].sort(), error: null };
 }
 
+/** Sum GetSales metrics per flow over a date range; matches Redash “VT / Automation flow funnel” (AnalyticsSnapshots + Flows). */
+export interface AutomationFlowFunnelRow {
+  flowUuid: string;
+  flowName: string;
+  connectionSent: number;
+  connectionAccepted: number;
+  inbox: number;
+  positiveReplies: number;
+}
+
+/** Project-wide sums (all flows) for a range; rates are null when connectionSent sum is 0. */
+export interface FlowFunnelProjectTotals {
+  connectionSent: number;
+  connectionAccepted: number;
+  inbox: number;
+  positiveReplies: number;
+  acceptedRatePct: number | null;
+  inboxRatePct: number | null;
+}
+
+export function aggregateAutomationFlowFunnelTotals(
+  flows: AutomationFlowFunnelRow[]
+): FlowFunnelProjectTotals {
+  let sent = 0;
+  let accepted = 0;
+  let inbox = 0;
+  let positive = 0;
+  for (const f of flows) {
+    sent += f.connectionSent;
+    accepted += f.connectionAccepted;
+    inbox += f.inbox;
+    positive += f.positiveReplies;
+  }
+  return {
+    connectionSent: sent,
+    connectionAccepted: accepted,
+    inbox,
+    positiveReplies: positive,
+    acceptedRatePct: sent > 0 ? (100 * accepted) / sent : null,
+    inboxRatePct: sent > 0 ? (100 * inbox) / sent : null,
+  };
+}
+
+function analyticsMetricToInt(v: unknown): number {
+  if (v == null || v === "") return 0;
+  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
+  if (typeof v === "bigint") return Number(v);
+  if (typeof v === "string") {
+    const n = parseInt(v, 10);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+/**
+ * Aggregates sender_profiles snapshots with flow_uuid set (same filters as docs/redash-automation-flow-funnel-queries.sql).
+ */
+export async function getAutomationFlowFunnelByFlow(
+  client: SupabaseClient,
+  projectId: string,
+  dateFrom: string,
+  dateTo: string
+): Promise<{ flows: AutomationFlowFunnelRow[]; error: string | null; warnings: string[] }> {
+  const pageSize = 1000;
+  const agg = new Map<string, { s: number; a: number; ib: number; pr: number }>();
+
+  for (let from = 0; ; from += pageSize) {
+    const to = from + pageSize - 1;
+    const { data, error } = await client
+      .from(ANALYTICS_SNAPSHOTS_TABLE)
+      .select("flow_uuid, metrics")
+      .eq("project_id", projectId)
+      .eq("group_by", "sender_profiles")
+      .not("flow_uuid", "is", null)
+      .gte("snapshot_date", dateFrom)
+      .lte("snapshot_date", dateTo)
+      .range(from, to);
+    if (error) {
+      return { flows: [], error: error.message, warnings: [] };
+    }
+    const rows = data ?? [];
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      const r = row as { flow_uuid?: unknown; metrics?: unknown };
+      const fid = typeof r.flow_uuid === "string" ? r.flow_uuid : String(r.flow_uuid ?? "");
+      if (!fid) continue;
+      const m =
+        r.metrics && typeof r.metrics === "object" && r.metrics !== null
+          ? (r.metrics as Record<string, unknown>)
+          : {};
+      const cur = agg.get(fid) ?? { s: 0, a: 0, ib: 0, pr: 0 };
+      cur.s += analyticsMetricToInt(m.linkedin_connection_request_sent_count);
+      cur.a += analyticsMetricToInt(m.linkedin_connection_request_accepted_count);
+      cur.ib += analyticsMetricToInt(m.linkedin_inbox_count);
+      cur.pr += analyticsMetricToInt(m.linkedin_positive_count);
+      agg.set(fid, cur);
+    }
+    if (rows.length < pageSize) break;
+  }
+
+  const { data: flowRows, error: flowErr } = await client
+    .from(FLOWS_TABLE)
+    .select("uuid, name")
+    .eq("project_id", projectId);
+  if (flowErr) {
+    return { flows: [], error: flowErr.message, warnings: [] };
+  }
+
+  const flowUuids = new Set<string>();
+  const flows: AutomationFlowFunnelRow[] = [];
+  for (const fr of flowRows ?? []) {
+    const uuid = typeof fr.uuid === "string" ? fr.uuid : String(fr.uuid ?? "");
+    if (!uuid) continue;
+    flowUuids.add(uuid);
+    const rawName = (fr as { name?: unknown }).name;
+    const flowName =
+      typeof rawName === "string" && rawName.trim() ? rawName.trim() : "(Unknown flow)";
+    const b = agg.get(uuid) ?? { s: 0, a: 0, ib: 0, pr: 0 };
+    flows.push({
+      flowUuid: uuid,
+      flowName,
+      connectionSent: b.s,
+      connectionAccepted: b.a,
+      inbox: b.ib,
+      positiveReplies: b.pr,
+    });
+  }
+
+  const warnings: string[] = [];
+  let orphanFlows = 0;
+  for (const k of agg.keys()) {
+    if (!flowUuids.has(k)) orphanFlows += 1;
+  }
+  if (orphanFlows > 0) {
+    warnings.push(
+      `${orphanFlows} flow_uuid value(s) in AnalyticsSnapshots had no matching row in Flows (omitted from chart).`
+    );
+  }
+
+  flows.sort((a, b) => a.flowName.localeCompare(b.flowName));
+  return { flows, error: null, warnings };
+}
+
 /** Home / overview: sync time, analytics coverage, entity and conversation totals. */
 export interface ProjectDashboardSnapshot {
   lastSyncFinishedAt: string | null;
@@ -3078,6 +3221,7 @@ export interface ConversationListItem {
   /** Number of hypotheses the receiver's company appears in (for this project). */
   hypothesisCount: number;
   replyTag: ConversationReplyTag;
+  receiverPipelineStageUuid: string | null;
 }
 
 function deriveConversationReplyTag(item: {
@@ -3104,6 +3248,8 @@ export async function getConversationsList(
     /** Case-insensitive match on receiver/sender name, company, last message text. */
     search?: string | null;
     replyTag?: ConversationReplyTag | null;
+    needAttention?: boolean;
+    pipelineStageUuid?: string | null;
   }
 ): Promise<{ data: ConversationListItem[]; total: number; error: string | null }> {
   const rawMessages: Array<Record<string, unknown>> = [];
@@ -3169,7 +3315,7 @@ export async function getConversationsList(
       const chunk = leadUuids.slice(i, i + chunkSize);
       const { data: contacts, error: contactsErr } = await client
         .from(CONTACTS_TABLE)
-        .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_uuid")
+        .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_uuid, pipeline_stage_uuid")
         .in("uuid", chunk);
       if (contactsErr) {
         return { data: [], total: 0, error: contactsErr.message };
@@ -3290,6 +3436,9 @@ export async function getConversationsList(
       lastMessageIsOutbox,
       hypothesisCount: companyId ? (hypothesisCountByCompany.get(companyId) ?? 0) : 0,
       replyTag,
+      receiverPipelineStageUuid: contact
+        ? ((contact.pipeline_stage_uuid as string | null) ?? null)
+        : null,
     });
   }
 
@@ -3317,10 +3466,40 @@ export async function getConversationsList(
     filtered = filtered.filter((c) => c.replyTag === tagFilter);
   }
 
+  if (options?.needAttention) {
+    filtered = filtered.filter((c) => c.inboxCount > 0 && !c.lastMessageIsOutbox);
+  }
+
+  const pipelineStageUuid = options?.pipelineStageUuid?.trim() ?? "";
+  if (pipelineStageUuid) {
+    filtered = filtered.filter((c) => c.receiverPipelineStageUuid === pipelineStageUuid);
+  }
+
   const offset = options?.offset ?? 0;
   const limit = Math.min(options?.limit ?? 50, 200);
   const total = filtered.length;
   return { data: filtered.slice(offset, offset + limit), total, error: null };
+}
+
+export async function listContactPipelineStages(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ data: Array<{ uuid: string; name: string }>; error: string | null }> {
+  const { data, error } = await client
+    .from(PIPELINE_STAGES_TABLE)
+    .select("uuid, name, entity_object, stage_order")
+    .eq("project_id", projectId)
+    .eq("entity_object", "lead")
+    .order("stage_order", { ascending: true })
+    .order("name", { ascending: true });
+  if (error) return { data: [], error: error.message };
+  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  return {
+    data: rows
+      .filter((r) => typeof r.uuid === "string" && typeof r.name === "string")
+      .map((r) => ({ uuid: r.uuid as string, name: r.name as string })),
+    error: null,
+  };
 }
 
 // ── Company Hypotheses ────────────────────────────────────────────────────────

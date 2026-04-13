@@ -8,7 +8,15 @@ const apiPort = process.env.API_PORT ?? "3001";
 const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${apiPort}`;
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue({
+      template: {
+        compilerOptions: {
+          isCustomElement: (tag) => tag === "emoji-picker",
+        },
+      },
+    }),
+  ],
   root: ".",
   base: "/",
   resolve: {

@@ -17,6 +17,7 @@ import {
   handleSupabaseSyncCancel,
   handleAnalyticsCollectedDays,
   handleProjectDashboard,
+  handleFlowFunnel,
   handleAnalyticsSync,
   handleConversation,
   handleGetCompanyContext,
@@ -44,6 +45,7 @@ import {
   handleBuildContext,
   handleGetContextSnapshots,
   handleGetConversationsList,
+  handleGetContactPipelineStages,
   handleGetCompanyHypotheses,
   handleGetContactsByCompany,
   handleCreateCompany,
@@ -305,6 +307,14 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/flow-funnel":
+        if (req.method === "GET") {
+          await handleFlowFunnel(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/analytics-collected-days":
         if (req.method === "GET") {
           await handleAnalyticsCollectedDays(req, res);
@@ -330,6 +340,14 @@ const server = createServer(async (req, res) => {
       case "/api/conversations":
         if (req.method === "GET") {
           await handleGetConversationsList(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/pipeline-stages/contacts":
+        if (req.method === "GET") {
+          await handleGetContactPipelineStages(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -674,6 +692,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  POST /api/supabase-sync");
   console.log("  POST /api/supabase-sync-cancel");
   console.log("  GET  /api/project-dashboard?projectId=<id>");
+  console.log("  GET  /api/flow-funnel?projectId=<id>&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD");
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");
   console.log("  POST /api/analytics-sync");
   console.log("  GET  /api/supabase-table-query");

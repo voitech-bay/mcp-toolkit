@@ -40,6 +40,7 @@ import {
   ClipboardListIcon,
   CpuIcon,
   Link2Icon,
+  BarChart3Icon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 import { useWorkers, type WorkerEntry } from "./composables/useWorkers";
@@ -53,6 +54,7 @@ const route = useRoute();
 const router = useRouter();
 
 const isHome = computed(() => route.path === "/");
+const isFlowDashboard = computed(() => route.path === "/flow-dashboard");
 
 /** Grouped routes — highlight parent when any child is active. */
 const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
@@ -493,6 +495,16 @@ function renderWorkerLabel(option: DropdownOption) {
                   Home
                 </NButton>
 
+                <NButton
+                  quaternary
+                  :type="isFlowDashboard ? 'primary' : undefined"
+                  size="small"
+                  @click="router.push('/flow-dashboard')"
+                >
+                  <BarChart3Icon :size="14" style="margin-right: 4px" />
+                  Flow analytics
+                </NButton>
+
                 <NDropdown trigger="hover" placement="bottom-start" :options="dataMenuOptions" :show-arrow="true"
                   @select="onNavSelect">
                   <NButton quaternary size="small" :type="isDataGroupActive ? 'primary' : undefined"
@@ -658,7 +670,7 @@ function renderWorkerLabel(option: DropdownOption) {
 
 <style scoped lang="less">
 .header-card {
-  max-width: 1600px;
+  max-width: 1760px;
   margin: 0 auto;
 }
 
@@ -769,7 +781,7 @@ function renderWorkerLabel(option: DropdownOption) {
 
 .main {
   flex: 1;
-  max-width: 1600px;
+  max-width: 1760px;
   margin: 0 auto;
   width: 100%;
 }

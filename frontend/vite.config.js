@@ -7,7 +7,15 @@ var __dirname = dirname(fileURLToPath(import.meta.url));
 var apiPort = (_a = process.env.API_PORT) !== null && _a !== void 0 ? _a : "3001";
 var apiProxyTarget = (_b = process.env.VITE_API_PROXY_TARGET) !== null && _b !== void 0 ? _b : "http://localhost:".concat(apiPort);
 export default defineConfig({
-    plugins: [vue()],
+    plugins: [
+        vue({
+            template: {
+                compilerOptions: {
+                    isCustomElement: function (tag) { return tag === "emoji-picker"; },
+                },
+            },
+        }),
+    ],
     root: ".",
     base: "/",
     resolve: {

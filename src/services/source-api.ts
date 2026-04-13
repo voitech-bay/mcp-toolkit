@@ -379,17 +379,49 @@ async function countLeadsForDateRange(
   createdAtRange: DateRangeFilter
 ): Promise<number> {
   const url = `${config.baseUrl}${LEADS_COUNT_PATH}`;
-  const body = JSON.stringify({
+  const payloadPrimary = {
     filter: {
       all: true,
       leadFilter: {
         created_at: toGetSalesDateFilter(createdAtRange),
       },
     },
-  });
-  const res = await fetchJson<{ count?: number }>(url, config.apiKey, { method: "POST", body });
-  await sleep(DELAY_MS);
-  return res.count ?? 0;
+  };
+  try {
+    const res = await fetchJson<{ count?: number }>(url, config.apiKey, {
+      method: "POST",
+      body: JSON.stringify(payloadPrimary),
+    });
+    await sleep(DELAY_MS);
+    return res.count ?? 0;
+  } catch (e) {
+    console.error("Error counting leads for date range", JSON.stringify(payloadPrimary));
+    // Some GetSales deployments reject { from, to } operators on LeadFilter.
+    const msg = e instanceof Error ? e.message : String(e ?? "");
+    const shouldRetryWithGteLte =
+      msg.includes("Wrong filter operator") &&
+      msg.includes("LeadFilter") &&
+      msg.includes("operator: from");
+    if (!shouldRetryWithGteLte) throw e;
+
+    const payloadFallback = {
+      filter: {
+        all: true,
+        leadFilter: {
+          created_at: {
+            gte: createdAtRange.from,
+            lte: createdAtRange.to,
+          },
+        },
+      },
+    };
+    const res = await fetchJson<{ count?: number }>(url, config.apiKey, {
+      method: "POST",
+      body: JSON.stringify(payloadFallback),
+    });
+    await sleep(DELAY_MS);
+    return res.count ?? 0;
+  }
 }
 
 function cursorDateOnly(iso: string | null): string | null {
@@ -572,6 +604,7 @@ async function fetchContactsBucketRecursive(
   } catch (e) {
     if (e instanceof SyncCancelledError) throw e;
     const fe = fetchErrorFromUnknown(e);
+    console.error("Error counting leads for date range", JSON.stringify(range));
     return { data: [], error: fe.error, errorDetail: fe.errorDetail, fetchedCount: 0 };
   }
   if (onLog) {

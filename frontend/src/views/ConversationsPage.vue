@@ -17,6 +17,7 @@ import GenerateMessageModal from "../components/GenerateMessageModal.vue";
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type ConversationReplyTag = "no_response" | "waiting_for_response" | "got_response";
+type ConversationFilterTag = ConversationReplyTag | "need_attention" | "";
 
 interface ConversationListItem {
   conversationUuid: string;
@@ -66,6 +67,11 @@ interface ContactWithConversations {
 
 interface HypothesisItem {
   id: string;
+  name: string;
+}
+
+interface PipelineStageOption {
+  uuid: string;
   name: string;
 }
 
@@ -193,18 +199,74 @@ const debouncedSearchQuery = useDebounceFn(() => {
 watch(searchInput, () => debouncedSearchQuery());
 
 /** Empty string = all statuses (NSelect option typing). */
-const replyTagFilter = ref("");
+const replyTagFilter = ref<ConversationFilterTag>("");
+const pipelineStageFilter = ref("");
+const pipelineStageOptions = ref<PipelineStageOption[]>([]);
 
-const replyTagSelectOptions: Array<{ label: string; value: ConversationReplyTag | "" }> = [
-  { label: "All statuses", value: "" },
-  { label: "No response", value: "no_response" },
-  { label: "Waiting for response", value: "waiting_for_response" },
-  { label: "Got response", value: "got_response" },
+const replyTagSelectOptions: Array<{
+  label: string;
+  value: ConversationFilterTag;
+  hint: string;
+  icon: string;
+  type: "default" | "error" | "warning" | "info" | "success";
+}> = [
+  {
+    label: "Need attention",
+    value: "need_attention",
+    hint: "Contact sent a message and the latest message is from contact (you need to reply).",
+    icon: "🚨",
+    type: "error",
+  },
+  {
+    label: "No response",
+    value: "no_response",
+    hint: "You sent outbound messages, but contact has never replied.",
+    icon: "🟠",
+    type: "warning",
+  },
+  {
+    label: "Waiting for response",
+    value: "waiting_for_response",
+    hint: "Contact has replied before, and latest message is from you (waiting on contact now).",
+    icon: "⏳",
+    type: "info",
+  },
+  {
+    label: "Got response",
+    value: "got_response",
+    hint: "Contact replied at least once in this thread (includes both replied-and-waiting states).",
+    icon: "✅",
+    type: "success",
+  },
 ];
 
 watch(replyTagFilter, () => {
   resetAndFetch();
 });
+watch(pipelineStageFilter, () => {
+  resetAndFetch();
+});
+
+async function loadContactPipelineStages() {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId) {
+    pipelineStageOptions.value = [];
+    return;
+  }
+  try {
+    const r = await fetch(
+      `/api/pipeline-stages/contacts?projectId=${encodeURIComponent(projectId)}`
+    );
+    const j = (await r.json()) as { data?: PipelineStageOption[]; error?: string };
+    if (!r.ok || j.error) {
+      pipelineStageOptions.value = [];
+      return;
+    }
+    pipelineStageOptions.value = (j.data ?? []).map((s) => ({ uuid: s.uuid, name: s.name }));
+  } catch {
+    pipelineStageOptions.value = [];
+  }
+}
 
 async function fetchConversationsPage(offset: number, append: boolean) {
   const projectId = projectStore.selectedProjectId;
@@ -226,7 +288,10 @@ async function fetchConversationsPage(offset: number, append: boolean) {
     const tag = replyTagFilter.value.trim();
     if (tag === "no_response" || tag === "waiting_for_response" || tag === "got_response") {
       sp.set("replyTag", tag);
+    } else if (tag === "need_attention") {
+      sp.set("replyTag", "need_attention");
     }
+    if (pipelineStageFilter.value.trim()) sp.set("pipelineStageUuid", pipelineStageFilter.value.trim());
 
     const r = await fetch(`/api/conversations?${sp.toString()}`);
     const j = await r.json() as {
@@ -270,11 +335,21 @@ function resetAndFetch() {
   void fetchConversationsPage(0, false);
 }
 
+function toggleReplyTag(tag: ConversationFilterTag) {
+  replyTagFilter.value = replyTagFilter.value === tag ? "" : tag;
+}
+
+function togglePipelineStage(stageUuid: string) {
+  pipelineStageFilter.value = pipelineStageFilter.value === stageUuid ? "" : stageUuid;
+}
+
 watch(() => projectStore.selectedProjectId, () => {
   selectedConvUuid.value = null;
   searchInput.value = "";
   searchQuery.value = "";
   replyTagFilter.value = "";
+  pipelineStageFilter.value = "";
+  void loadContactPipelineStages();
   resetAndFetch();
 }, { immediate: true });
 
@@ -613,10 +688,132 @@ const replyContextOpen = ref(false);
 const generateMessageOpen = ref(false);
 const generateMessagePreset = ref<"simple" | "complex">("simple");
 const replyDraft = ref("");
+const QUICK_PRESETS_STORAGE_KEY = "generate-message.presets.bundle.v1";
+const QUICK_PRESETS_SCHEMA = "generate-message-presets.v1";
+const quickAddPickerFor = ref<string | null>(null);
+const quickAddSelectedPreset = ref<Record<string, string | null>>({});
+
+type QuickPreset = {
+  name: string;
+  messageExamples?: string[];
+  messageExamplesInput?: string;
+};
+
+type QuickPresetBundle = {
+  schema: string;
+  exportedAt: string;
+  defaultPresetName: string | null;
+  presets: QuickPreset[];
+};
+
+const quickPresetOptions = computed(() => {
+  try {
+    const raw = localStorage.getItem(QUICK_PRESETS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as Partial<QuickPresetBundle>;
+    if (parsed.schema !== QUICK_PRESETS_SCHEMA || !Array.isArray(parsed.presets)) return [];
+    return parsed.presets
+      .map((p) => (typeof p.name === "string" ? p.name.trim() : ""))
+      .filter(Boolean)
+      .map((name) => ({ label: name, value: name }));
+  } catch {
+    return [];
+  }
+});
 
 function openGenerateMessage(preset: "simple" | "complex") {
   generateMessagePreset.value = preset;
   generateMessageOpen.value = true;
+}
+
+function openQuickAddExample(rowKey: string) {
+  if (quickPresetOptions.value.length === 0) {
+    message.warning("Create at least one preset in Generate message popup first.");
+    return;
+  }
+  if (quickAddPickerFor.value === rowKey) {
+    quickAddPickerFor.value = null;
+    return;
+  }
+  quickAddPickerFor.value = rowKey;
+  quickAddSelectedPreset.value[rowKey] = null;
+}
+
+function normalizeExampleList(preset: QuickPreset): string[] {
+  if (Array.isArray(preset.messageExamples)) {
+    return preset.messageExamples
+      .map((v) => (typeof v === "string" ? v.trim() : ""))
+      .filter(Boolean);
+  }
+  if (typeof preset.messageExamplesInput === "string") {
+    return preset.messageExamplesInput
+      .split(/\r?\n+/)
+      .map((v) => v.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function addMessageToPresetExample(textInput: string, presetInput: string): boolean {
+  const selected = presetInput.trim();
+  if (!selected) {
+    message.warning("Select preset.");
+    return false;
+  }
+  const text = textInput.trim();
+  if (!text) {
+    message.warning("Message is empty.");
+    return false;
+  }
+  try {
+    const raw = localStorage.getItem(QUICK_PRESETS_STORAGE_KEY);
+    if (!raw) {
+      message.error("Preset storage missing.");
+      return false;
+    }
+    const parsed = JSON.parse(raw) as Partial<QuickPresetBundle>;
+    if (parsed.schema !== QUICK_PRESETS_SCHEMA || !Array.isArray(parsed.presets)) {
+      message.error("Preset storage invalid.");
+      return false;
+    }
+    const presets = parsed.presets.map((p) => ({ ...p }));
+    const idx = presets.findIndex((p) => p.name?.trim().toLowerCase() === selected.toLowerCase());
+    if (idx < 0) {
+      message.error("Preset not found.");
+      return false;
+    }
+    const currentExamples = normalizeExampleList(presets[idx]);
+    if (!currentExamples.some((v) => v.toLowerCase() === text.toLowerCase())) {
+      currentExamples.push(text);
+    }
+    presets[idx] = {
+      ...presets[idx],
+      messageExamples: currentExamples,
+    };
+    localStorage.setItem(
+      QUICK_PRESETS_STORAGE_KEY,
+      JSON.stringify({
+        schema: parsed.schema ?? QUICK_PRESETS_SCHEMA,
+        exportedAt: new Date().toISOString(),
+        defaultPresetName:
+          typeof parsed.defaultPresetName === "string" ? parsed.defaultPresetName : null,
+        presets,
+      } satisfies QuickPresetBundle)
+    );
+    message.success(`Message added to "${selected}" examples.`);
+    return true;
+  } catch {
+    message.error("Failed to update preset examples.");
+    return false;
+  }
+}
+
+function onPickPresetForMessage(rowKey: string, text: string, preset: string | null) {
+  if (!preset) return;
+  const ok = addMessageToPresetExample(text, preset);
+  if (!ok) return;
+  quickAddPickerFor.value = null;
+  quickAddSelectedPreset.value[rowKey] = null;
 }
 
 async function onGeneratedMessage(payload: { id: string; content: string; created_at: string }) {
@@ -706,13 +903,43 @@ const filteredRelatedContacts = computed(() => {
           >
             <template #prefix><SearchIcon :size="14" style="opacity:0.5" /></template>
           </NInput>
-          <NSelect
-            v-model:value="replyTagFilter"
-            :options="replyTagSelectOptions"
-            size="small"
-            placeholder="Status"
-            class="convpage__tag-filter"
-          />
+          <div class="convpage__filters-section">
+            <div class="convpage__filters-title">Status</div>
+            <div class="convpage__status-tags">
+              <NTooltip v-for="opt in replyTagSelectOptions" :key="`reply-filter-${opt.value || 'all'}`" placement="top">
+                <template #trigger>
+                  <NTag
+                    size="small"
+                    :type="opt.type"
+                    :bordered="replyTagFilter === opt.value"
+                    round
+                    :class="['convpage__status-tag', { 'convpage__status-tag--active': replyTagFilter === opt.value }]"
+                    @click="toggleReplyTag(opt.value)"
+                  >
+                    {{ opt.icon }} {{ opt.label }}
+                  </NTag>
+                </template>
+                {{ opt.hint }}
+              </NTooltip>
+            </div>
+          </div>
+          <div class="convpage__filters-section">
+            <div class="convpage__filters-title">Pipeline stage</div>
+            <div class="convpage__status-tags">
+              <template v-for="stage in pipelineStageOptions" :key="`pipeline-filter-${stage.uuid}`">
+                <NTag
+                  size="small"
+                  type="info"
+                  :bordered="pipelineStageFilter === stage.uuid"
+                  round
+                  :class="['convpage__status-tag', { 'convpage__status-tag--active': pipelineStageFilter === stage.uuid }]"
+                  @click="togglePipelineStage(stage.uuid)"
+                >
+                  🧭 {{ stage.name }}
+                </NTag>
+              </template>
+            </div>
+          </div>
         </div>
 
         <NSpin :show="convListLoading" class="convpage__spin">
@@ -805,6 +1032,26 @@ const filteredRelatedContacts = computed(() => {
                         <div class="convpage__msg-meta">
                           <span v-if="msg.sender" class="convpage__msg-sender">{{ msg.sender }}</span>
                           <span class="convpage__msg-time">{{ msg.sentAt }}</span>
+                          <NButton
+                            size="tiny"
+                            type="warning"
+                            secondary
+                            class="convpage__msg-example-btn convpage__msg-example-btn--active"
+                            @click="openQuickAddExample(`msg-${msg.key}`)"
+                          >
+                            <template #icon><PlusIcon :size="12" /></template>
+                            Add as example
+                          </NButton>
+                          <NSelect
+                            v-if="quickAddPickerFor === `msg-${msg.key}`"
+                            v-model:value="quickAddSelectedPreset[`msg-${msg.key}`]"
+                            size="tiny"
+                            class="convpage__msg-example-select"
+                            :options="quickPresetOptions"
+                            placeholder="Pick preset"
+                            filterable
+                            @update:value="(v) => onPickPresetForMessage(`msg-${msg.key}`, msg.text, v)"
+                          />
                         </div>
                         <div class="convpage__msg-text">{{ msg.text }}</div>
                       </div>
@@ -818,6 +1065,26 @@ const filteredRelatedContacts = computed(() => {
                         <div class="convpage__msg-meta">
                           <NTag size="small" type="warning" :bordered="false">PENDING</NTag>
                           <span class="convpage__msg-time">{{ formatDate(draft.created_at) }}</span>
+                          <NButton
+                            size="tiny"
+                            type="warning"
+                            secondary
+                            class="convpage__msg-example-btn convpage__msg-example-btn--active"
+                            @click="openQuickAddExample(`draft-${draft.id}`)"
+                          >
+                            <template #icon><PlusIcon :size="12" /></template>
+                            Add as example
+                          </NButton>
+                          <NSelect
+                            v-if="quickAddPickerFor === `draft-${draft.id}`"
+                            v-model:value="quickAddSelectedPreset[`draft-${draft.id}`]"
+                            size="tiny"
+                            class="convpage__msg-example-select"
+                            :options="quickPresetOptions"
+                            placeholder="Pick preset"
+                            filterable
+                            @update:value="(v) => onPickPresetForMessage(`draft-${draft.id}`, draft.content, v)"
+                          />
                           <NButton size="tiny" quaternary @click="copyDraftMessage(draft.content)">Copy</NButton>
                           <NPopconfirm @positive-click="deleteDraftMessage(draft.id)">
                             <template #trigger>
@@ -1057,6 +1324,7 @@ const filteredRelatedContacts = computed(() => {
         @click="confirmAddToHypothesis">Add</NButton>
     </NSpace>
   </NModal>
+
 </template>
 
 <style scoped>
@@ -1123,6 +1391,37 @@ const filteredRelatedContacts = computed(() => {
 
 .convpage__tag-filter {
   width: 100%;
+}
+
+.convpage__status-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.convpage__filters-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.convpage__filters-title {
+  font-size: 11px;
+  opacity: 0.65;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.convpage__status-tag {
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.75;
+}
+
+.convpage__status-tag--active {
+  opacity: 1;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25) inset;
 }
 
 .convpage__alert {
@@ -1378,6 +1677,20 @@ const filteredRelatedContacts = computed(() => {
 .convpage__msg-time {
   font-size: 10px;
   opacity: 0.45;
+}
+
+.convpage__msg-example-btn {
+  margin-left: auto;
+}
+
+.convpage__msg-example-btn--active {
+  --n-color: rgba(245, 158, 11, 0.2);
+  --n-color-hover: rgba(245, 158, 11, 0.3);
+  --n-color-pressed: rgba(245, 158, 11, 0.36);
+}
+
+.convpage__msg-example-select {
+  width: 180px;
 }
 
 .convpage__msg-text {

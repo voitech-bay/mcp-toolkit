@@ -63,6 +63,7 @@ type PromptInput = {
   format: GenerationFormat;
   mentionBlocks: MentionBlock[];
   additionalInstructions?: string;
+  messageExamples?: string[];
   contact: Record<string, unknown>;
   company: Record<string, unknown> | null;
   messages: Array<Record<string, unknown>>;
@@ -131,6 +132,23 @@ function focusInstruction(focus: FocusPreset): string {
   return "Focus=Neutral: balanced pain + value framing without emotional over-amplification.";
 }
 
+function formalityInstruction(formality: FormalityLevel): string {
+  if (formality === "formal") {
+    return "Formality=Formal: use complete sentences, professional sign-off style, avoid slang and contractions where it reads natural; stay respectful and business-appropriate.";
+  }
+  return "Formality=Casual: write like a peer on LinkedIn—natural, approachable, contractions OK; still professional, never sloppy or overly familiar.";
+}
+
+function emojiPolicyInstruction(policy: EmojiPolicy): string {
+  if (policy === "none") {
+    return "EmojiPolicy=None: do not use emojis or emoticons in the message.";
+  }
+  if (policy === "light") {
+    return "EmojiPolicy=Light: at most one emoji total, only if it fits tone; prefer none; never stack or decorate every line.";
+  }
+  return "EmojiPolicy=Allowed: emojis optional; use sparingly for warmth; never replace substance or look unprofessional.";
+}
+
 function ctaTypeInstruction(ctaType: CtaType): string {
   if (ctaType === "initiate_conversation") {
     return "CTAType=Initiate Conversation: ask an open-ended question to continue dialogue.";
@@ -173,6 +191,14 @@ function toMessageLines(messages: Array<Record<string, unknown>>): string {
       return `- ${direction}: ${text}`;
     })
     .join("\n");
+}
+
+function normalizeMessageExamples(examples: string[] | undefined): string[] {
+  if (!Array.isArray(examples)) return [];
+  return examples
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean)
+    .slice(0, 8);
 }
 
 function contactBlock(contact: Record<string, unknown>, mentionBlocks: MentionBlock[]): string {
@@ -225,6 +251,8 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
   contextPayload: Record<string, unknown>;
 } {
   const mentionBlocks = [...new Set(input.mentionBlocks)];
+  const messageExamples = normalizeMessageExamples(input.messageExamples);
+  const hasMessageExamples = messageExamples.length > 0;
   const systemPrompt = [
     "You write outbound LinkedIn replies.",
     "Keep it natural and specific.",
@@ -241,7 +269,9 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
     `Focus: ${input.focus}.`,
     `CTA type: ${input.ctaType}.`,
     `Formality: ${input.formality}.`,
+    formalityInstruction(input.formality),
     `Emoji policy: ${input.emojiPolicy}.`,
+    emojiPolicyInstruction(input.emojiPolicy),
     `Use at most ${input.questionCountMax} question(s).`,
     `Output exactly ${input.format.paragraphs} paragraph(s) and about ${input.format.sentences} sentence(s) total.`,
     methodologyInstruction(input.methodology),
@@ -251,6 +281,11 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
     lengthPresetInstruction(input.lengthPreset),
     focusInstruction(input.focus),
     ctaTypeInstruction(input.ctaType),
+    ...(hasMessageExamples
+      ? [
+          "MANDATORY: Message examples provided by user. Match their writing style, rhythm, and structure while still grounding claims in provided context facts.",
+        ]
+      : []),
     "If context is missing for a claim, omit the claim.",
     "Do not mention these instruction names in final output.",
     "Return only final message text. No labels or explanation.",
@@ -268,6 +303,9 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
     "Company context:",
     companyBlock(input.company, mentionBlocks),
   ];
+  if (hasMessageExamples) {
+    sections.push("", "Message examples:", ...messageExamples.map((x) => `- ${x}`));
+  }
   if (input.additionalInstructions?.trim()) {
     sections.push("", `Additional instructions: ${input.additionalInstructions.trim()}`);
   }
@@ -292,6 +330,7 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
       questionCountMax: input.questionCountMax,
       format: input.format,
       mentionBlocks,
+      messageExamples,
       additionalInstructions: input.additionalInstructions?.trim() || null,
       contact: input.contact,
       company: input.company,

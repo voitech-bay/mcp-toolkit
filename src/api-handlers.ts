@@ -39,6 +39,7 @@ import {
   getContextSnapshots,
   saveContextSnapshot,
   getConversationsList,
+  listContactPipelineStages,
   type ConversationReplyTag,
   getCompanyHypotheses,
   getContactsByCompany,
@@ -65,6 +66,8 @@ import {
   getEnrichmentAgentResultsMapForEntity,
   getEnrichmentAgentByName,
   getCollectedAnalyticsDays,
+  getAutomationFlowFunnelByFlow,
+  aggregateAutomationFlowFunnelTotals,
   getProjectDashboardSnapshot,
   type EnrichmentEntityType,
   createGeneratedMessage,
@@ -374,6 +377,113 @@ export async function handleProjectDashboard(
   }
   res.writeHead(200);
   res.end(JSON.stringify(snapshot));
+}
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+const PROJECT_ID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function funnelInclusiveDayCount(dateFrom: string, dateTo: string): number {
+  const a = new Date(`${dateFrom}T12:00:00`).getTime();
+  const b = new Date(`${dateTo}T12:00:00`).getTime();
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 1;
+  return Math.max(1, Math.round((b - a) / 86400000) + 1);
+}
+
+function funnelAddDaysYmd(ymd: string, delta: number): string {
+  const d = new Date(`${ymd}T12:00:00`);
+  d.setDate(d.getDate() + delta);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** GET /api/flow-funnel?projectId=&dateFrom=&dateTo= — per-flow funnel metrics (AnalyticsSnapshots). */
+export async function handleFlowFunnel(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const q = getQueryParams(req);
+  const projectId = q.get("projectId")?.trim() ?? "";
+  const dateFrom = q.get("dateFrom")?.trim() ?? "";
+  const dateTo = q.get("dateTo")?.trim() ?? "";
+  if (!projectId || !PROJECT_ID_RE.test(projectId)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid projectId" }));
+    return;
+  }
+  if (!YMD_RE.test(dateFrom) || !YMD_RE.test(dateTo)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "dateFrom and dateTo are required (YYYY-MM-DD)" }));
+    return;
+  }
+  if (dateFrom > dateTo) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "dateFrom must be <= dateTo" }));
+    return;
+  }
+  const { flows, error, warnings } = await getAutomationFlowFunnelByFlow(
+    client,
+    projectId,
+    dateFrom,
+    dateTo
+  );
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  const projectTotals = aggregateAutomationFlowFunnelTotals(flows);
+  const windowDays = funnelInclusiveDayCount(dateFrom, dateTo);
+  const previousTo = funnelAddDaysYmd(dateFrom, -1);
+  const previousFrom = funnelAddDaysYmd(previousTo, -(windowDays - 1));
+  const mergedWarnings = [...warnings];
+  let comparison: {
+    previousDateFrom: string;
+    previousDateTo: string;
+    totals: ReturnType<typeof aggregateAutomationFlowFunnelTotals>;
+  } | null = null;
+  const prevRes = await getAutomationFlowFunnelByFlow(
+    client,
+    projectId,
+    previousFrom,
+    previousTo
+  );
+  if (prevRes.error) {
+    mergedWarnings.push(`Previous window funnel (${previousFrom}…${previousTo}): ${prevRes.error}`);
+  } else {
+    mergedWarnings.push(...prevRes.warnings);
+    comparison = {
+      previousDateFrom: previousFrom,
+      previousDateTo: previousTo,
+      totals: aggregateAutomationFlowFunnelTotals(prevRes.flows),
+    };
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      flows,
+      dateFrom,
+      dateTo,
+      warnings: mergedWarnings,
+      projectTotals,
+      comparison,
+    })
+  );
 }
 
 /** GET /api/analytics-collected-days?projectId= — distinct snapshot dates already stored. */
@@ -756,6 +866,7 @@ export async function handlePostGenerateMessage(
         format?: { sentences?: number; paragraphs?: number };
         mentionBlocks?: MentionBlock[];
         additionalInstructions?: string;
+        messageExamples?: string[];
         hypothesisId?: string | null;
         temperature?: number;
         goal?: GenerationGoal;
@@ -878,6 +989,12 @@ export async function handlePostGenerateMessage(
     typeof body?.temperature === "number" && Number.isFinite(body.temperature)
       ? Math.min(2, Math.max(0, body.temperature))
       : 0.7;
+  const messageExamples = Array.isArray(body?.messageExamples)
+    ? body.messageExamples
+        .map((v) => (typeof v === "string" ? v.trim() : ""))
+        .filter(Boolean)
+        .slice(0, 8)
+    : [];
   const prompt = buildGeneratedMessagePrompt({
     tone,
     goal,
@@ -896,6 +1013,7 @@ export async function handlePostGenerateMessage(
     format,
     mentionBlocks,
     additionalInstructions: typeof body?.additionalInstructions === "string" ? body.additionalInstructions : "",
+    messageExamples,
     contact,
     company: (company as Record<string, unknown> | null) ?? null,
     messages: (conv.messages ?? []) as Array<Record<string, unknown>>,
@@ -1924,15 +2042,19 @@ export async function handleGetConversationsList(
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
   const search = params.get("search")?.trim() ?? "";
   const replyTagRaw = params.get("replyTag")?.trim() ?? "";
+  const pipelineStageUuid = params.get("pipelineStageUuid")?.trim() ?? "";
   const allowedTags = new Set<string>(["no_response", "waiting_for_response", "got_response"]);
   const replyTag: ConversationReplyTag | null =
     replyTagRaw && allowedTags.has(replyTagRaw) ? (replyTagRaw as ConversationReplyTag) : null;
+  const needAttention = replyTagRaw === "need_attention";
 
   const result = await getConversationsList(client, projectId, {
     limit,
     offset,
     search: search || null,
     replyTag,
+    needAttention,
+    pipelineStageUuid: pipelineStageUuid || null,
   });
   if (result.error) {
     res.writeHead(500);
@@ -1941,6 +2063,40 @@ export async function handleGetConversationsList(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+export async function handleGetContactPipelineStages(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const result = await listContactPipelineStages(client, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
 }
 
 // ── Company hypotheses ────────────────────────────────────────────────────────

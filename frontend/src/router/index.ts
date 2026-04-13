@@ -4,6 +4,12 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: "/", name: "Home", component: () => import("../views/HomePage.vue"), meta: { title: "Overview | MCP Toolkit" } },
+    {
+      path: "/flow-dashboard",
+      name: "FlowDashboard",
+      component: () => import("../views/FlowDashboardPage.vue"),
+      meta: { title: "Flow analytics | MCP Toolkit" },
+    },
     { path: "/tables", name: "Tables", component: () => import("../views/TablesPage.vue"), meta: { title: "Tables | MCP Toolkit" } },
     { path: "/sync", name: "Sync", component: () => import("../views/SyncPage.vue"), meta: { title: "Sync | MCP Toolkit" } },
     { path: "/companies", name: "Companies", component: () => import("../views/CompaniesPage.vue"), meta: { title: "Companies | MCP Toolkit" } },
