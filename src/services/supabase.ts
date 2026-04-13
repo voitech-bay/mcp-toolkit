@@ -676,7 +676,6 @@ export async function insertSyncLogEntry(
 }
 
 export function getSupabase(): SupabaseClient | null {
-  console.log("Creating Supabase client", url, key);
 
   if (!url || !key) return null;
   return createClient(url, key);
