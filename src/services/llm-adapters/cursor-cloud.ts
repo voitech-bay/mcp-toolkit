@@ -96,6 +96,55 @@ function normalizeParsedValues(
   return out;
 }
 
+/** Cursor models often wrap the per-entity map in `{ "results": { ... } }` etc. */
+function tryUnwrapEntityResultMap(obj: Record<string, unknown>): Record<string, unknown> {
+  let current = obj;
+  for (let depth = 0; depth < 4; depth++) {
+    const keys = Object.keys(current);
+    if (keys.length !== 1) break;
+    const k = keys[0]!;
+    if (
+      !/^(results|data|output|response|entities|contacts|items|enrichment|findings)$/i.test(
+        k
+      )
+    ) {
+      break;
+    }
+    const inner = current[k];
+    if (!inner || typeof inner !== "object" || Array.isArray(inner)) break;
+    current = inner as Record<string, unknown>;
+  }
+  return current;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function normalizeMatchToken(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** True if JSON object key refers to this entity (domain, name, uuid, or uuid embedded in key). */
+export function jsonResultKeyMatchesEntity(key: string, candidate: string): boolean {
+  const k = key.trim();
+  const c = candidate.trim();
+  if (!k || !c) return false;
+  if (normalizeMatchToken(k) === normalizeMatchToken(c)) return true;
+  const nk = normalizeMatchToken(k);
+  const nc = normalizeMatchToken(c);
+  const cUuid = UUID_RE.test(c);
+  const kUuid = UUID_RE.test(k);
+  if (cUuid || kUuid) {
+    if (nk.includes(nc) || nc.includes(nk)) return true;
+    const dk = nk.replace(/-/g, "");
+    const dc = nc.replace(/-/g, "");
+    if (dk.length >= 32 && dc.length >= 32 && (dk.includes(dc) || dc.includes(dk))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export function parseEntityResultsFromAssistantText(
   text: string
 ): Record<string, Record<string, unknown>> {
@@ -110,39 +159,62 @@ export function parseEntityResultsFromAssistantText(
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Expected a JSON object at top level");
   }
-  return normalizeParsedValues(parsed as Record<string, unknown>);
+  const unwrapped = tryUnwrapEntityResultMap(parsed as Record<string, unknown>);
+  return normalizeParsedValues(unwrapped);
 }
 
 /**
  * Maps LLM JSON keys (domain, name, uuid, id) to internal entity ids.
  */
+function buildEntityMatchCandidates(
+  entity: { id: string; data: Record<string, unknown> }
+): string[] {
+  const d = entity.data;
+  const first = typeof d.first_name === "string" ? d.first_name.trim() : "";
+  const last = typeof d.last_name === "string" ? d.last_name.trim() : "";
+  const combined = [first, last].filter(Boolean).join(" ").trim();
+  const raw: unknown[] = [
+    d.domain,
+    d.name,
+    combined || undefined,
+    d.uuid,
+    d.company_uuid,
+    d.work_email,
+    entity.id,
+  ];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const x of raw) {
+    if (x === undefined || x === null) continue;
+    const s = String(x).trim();
+    if (!s) continue;
+    const sig = s.toLowerCase();
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push(s);
+  }
+  return out;
+}
+
 export function matchResultsToEntities(
   parsed: Record<string, Record<string, unknown>>,
   entities: Array<{ id: string; data: Record<string, unknown> }>
 ): Map<string, Record<string, unknown>> {
   const results = new Map<string, Record<string, unknown>>();
   for (const entity of entities) {
-    const candidates = [
-      entity.data.domain,
-      entity.data.name,
-      entity.data.uuid,
-      entity.id,
-    ]
-      .filter((x) => x !== undefined && x !== null && String(x).length > 0)
-      .map((x) => String(x));
+    const candidates = buildEntityMatchCandidates(entity);
     let matched = false;
     for (const key of Object.keys(parsed)) {
-      if (
-        candidates.some((c) => c.toLowerCase() === key.toLowerCase())
-      ) {
+      if (candidates.some((c) => jsonResultKeyMatchesEntity(key, c))) {
         results.set(entity.id, parsed[key]!);
         matched = true;
         break;
       }
     }
     if (!matched) {
+      const parsedKeys = Object.keys(parsed).join(", ") || "(none)";
       throw new Error(
-        `No JSON key matched entity ${entity.id} (candidates: ${candidates.join(", ") || "(none)"})`
+        `No JSON key matched entity ${entity.id} (candidates: ${candidates.join(", ") || "(none)"}; JSON keys: ${parsedKeys})`
       );
     }
   }
