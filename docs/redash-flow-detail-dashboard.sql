@@ -387,6 +387,9 @@ ORDER BY f.name, MIN(COALESCE(ps.stage_order, 2147483647)), pipeline_stage_name;
 -- -----------------------------------------------------------------------------
 -- 4c) Pipeline stage rates per flow (named buckets + other / no stage)
 -- -----------------------------------------------------------------------------
+-- Parameter `rate_metric` drives chart/table focus metric in Redash:
+--   reply | reply_positive | opportunity
+-- Create it as a Dropdown List in Redash query settings (default: reply).
 -- Denominator: distinct FlowLeads.lead_uuid in the flow (all enrolled contacts).
 -- Numerator: contacts whose **current** PipelineStages.name (trimmed) maps to a bucket.
 -- Buckets use **exact** TRIM(ps.name) (DB sample 2026-04 — distinct names):
@@ -397,7 +400,13 @@ ORDER BY f.name, MIN(COALESCE(ps.stage_order, 2147483647)), pipeline_stage_name;
 -- All other names → other. Extend CASE IN (...) if you add stages.
 -- Exposed: *rate_pct = 100 × count / contacts_in_flow_total; raw n_* counts for QA.
 WITH pid AS (
-  SELECT NULLIF(BTRIM('{{ project_id }}'), '')::uuid AS project_id
+  SELECT
+    NULLIF(BTRIM('{{ project_id }}'), '')::uuid AS project_id,
+    CASE LOWER(NULLIF(BTRIM('{{ rate_metric }}'), ''))
+      WHEN 'reply_positive' THEN 'reply_positive'
+      WHEN 'opportunity' THEN 'opportunity'
+      ELSE 'reply'
+    END AS rate_metric
 ),
 enriched AS (
   SELECT
@@ -447,6 +456,27 @@ agg AS (
 SELECT
   a.flow_name AS "flow_name::multiFilter",
   a.flow_uuid,
+  p.rate_metric AS selected_rate_key,
+  CASE p.rate_metric
+    WHEN 'reply_positive' THEN 'Reply positive rate'
+    WHEN 'opportunity' THEN 'Opportunity rate'
+    ELSE 'Reply rate'
+  END AS selected_rate_label,
+  CASE p.rate_metric
+    WHEN 'reply_positive' THEN a.n_replied_positive
+    WHEN 'opportunity' THEN a.n_opportunity
+    ELSE a.n_replied
+  END AS selected_rate_count,
+  ROUND(
+    100.0 * (
+      CASE p.rate_metric
+        WHEN 'reply_positive' THEN a.n_replied_positive
+        WHEN 'opportunity' THEN a.n_opportunity
+        ELSE a.n_replied
+      END
+    ) / NULLIF(a.contacts_in_flow_total, 0),
+    2
+  ) AS selected_rate_pct,
   a.contacts_in_flow_total,
   a.n_approaching,
   a.n_engaging,
@@ -463,6 +493,7 @@ SELECT
   ROUND(100.0 * a.n_opportunity / NULLIF(a.contacts_in_flow_total, 0), 2) AS opportunity_rate_pct,
   ROUND(100.0 * a.n_not_interested / NULLIF(a.contacts_in_flow_total, 0), 2) AS not_interested_rate_pct
 FROM agg a
+CROSS JOIN pid p
 ORDER BY a.flow_name;
 
 

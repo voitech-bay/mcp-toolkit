@@ -8,6 +8,11 @@ type OpenRouterModelCache = {
 
 let modelsCache: OpenRouterModelCache | null = null;
 
+type OpenRouterCacheControl = {
+  type: "ephemeral";
+  ttl?: "1h";
+};
+
 export interface OpenRouterModelSummary {
   id: string;
   name: string;
@@ -30,6 +35,21 @@ function getOpenRouterApiKey(): string {
 
 function getOpenRouterBaseUrl(): string {
   return (process.env.OPENROUTER_BASE_URL?.trim() || OPENROUTER_DEFAULT_BASE_URL).replace(/\/+$/, "");
+}
+
+function getPromptCacheControlForModel(model: string): OpenRouterCacheControl | null {
+  const enabledRaw = process.env.OPENROUTER_PROMPT_CACHE_ENABLED?.trim().toLowerCase();
+  const enabled = enabledRaw === "1" || enabledRaw === "true" || enabledRaw === "yes";
+  if (!enabled) return null;
+
+  // OpenRouter docs: Anthropic routing supports top-level cache_control.
+  const m = model.toLowerCase();
+  const isAnthropic = m.includes("anthropic") || m.includes("claude");
+  if (!isAnthropic) return null;
+
+  const ttlRaw = process.env.OPENROUTER_PROMPT_CACHE_TTL?.trim().toLowerCase();
+  if (ttlRaw === "1h") return { type: "ephemeral", ttl: "1h" };
+  return { type: "ephemeral" };
 }
 
 function asRecord(v: unknown): Record<string, unknown> | null {
@@ -116,11 +136,15 @@ export async function generateOpenRouterMessage(
     systemPrompt: string;
     userPrompt: string;
     temperature?: number;
+    user?: string;
+    sessionId?: string;
+    trace?: Record<string, unknown>;
   },
   options?: { signal?: AbortSignal }
 ): Promise<{ data: OpenRouterGenerateResult | null; error: string | null }> {
   const model = params.model?.trim();
   if (!model) return { data: null, error: "model is required." };
+  const cacheControl = getPromptCacheControlForModel(model);
   const apiKey = getOpenRouterApiKey();
   const url = `${getOpenRouterBaseUrl()}/chat/completions`;
   const res = await fetch(url, {
@@ -133,6 +157,10 @@ export async function generateOpenRouterMessage(
     body: JSON.stringify({
       model,
       temperature: params.temperature ?? 0.7,
+      ...(cacheControl ? { cache_control: cacheControl } : {}),
+      ...(params.user ? { user: params.user } : {}),
+      ...(params.sessionId ? { session_id: params.sessionId } : {}),
+      ...(params.trace ? { trace: params.trace } : {}),
       messages: [
         { role: "system", content: params.systemPrompt },
         { role: "user", content: params.userPrompt },

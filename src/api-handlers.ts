@@ -906,6 +906,22 @@ export async function handlePostGenerateMessage(
     systemPrompt: prompt.systemPrompt,
     userPrompt: prompt.userPrompt,
     temperature,
+    user: `contact:${contactId}`,
+    sessionId: `conversation:${conversationUuid}`,
+    trace: {
+      trace_id: `conversation:${conversationUuid}`,
+      trace_name: "Generated Message",
+      span_name: "Generate LinkedIn Reply",
+      generation_name: "OpenRouter Completion",
+      feature: "generated-message",
+      project_id: projectId,
+      conversation_uuid: conversationUuid,
+      contact_id: contactId,
+      hypothesis_id: hypothesisId,
+      methodology,
+      goal,
+      cta_type: ctaType,
+    },
   });
   if (llmRes.error || !llmRes.data) {
     res.writeHead(502);
