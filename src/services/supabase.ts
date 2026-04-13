@@ -20,6 +20,7 @@ export const ANALYTICS_SNAPSHOTS_TABLE = "AnalyticsSnapshots";
 export const COMPANIES_TABLE = "companies";
 export const CONTEXT_SNAPSHOTS_TABLE = "ContextSnapshots";
 export const GENERATED_MESSAGES_TABLE = "generated_messages";
+export const FIREFLIES_WEBHOOK_EVENTS_TABLE = "fireflies_webhook_events";
 
 /** Parse `companies.tags` jsonb (array of tag strings, or legacy numeric values) from PostgREST/JSON. */
 export function parseCompanyTagsColumn(raw: unknown): string[] {
@@ -5086,4 +5087,42 @@ export async function restartEnrichmentQueueTask(
   if (insErr) return { ok: false, newTaskId: null, error: insErr.message };
   const newId = (ins as { id: string }).id;
   return { ok: true, newTaskId: newId, error: null };
+}
+
+export async function insertFirefliesWebhookEvent(
+  client: SupabaseClient,
+  row: {
+    payload_variant: string;
+    event_type: string;
+    meeting_id: string | null;
+    client_reference_id: string | null;
+    fireflies_timestamp_ms: number | null;
+    payload: Record<string, unknown>;
+    signature_header: string | null;
+    signature_valid: boolean | null;
+    processing_status: string;
+  }
+): Promise<{ id: string | null; error: string | null }> {
+  const { data, error } = await client
+    .from(FIREFLIES_WEBHOOK_EVENTS_TABLE)
+    .insert(row)
+    .select("id")
+    .single();
+  if (error) return { id: null, error: error.message };
+  return { id: (data as { id: string }).id, error: null };
+}
+
+export async function updateFirefliesWebhookEventProcessing(
+  client: SupabaseClient,
+  id: string,
+  processing: { processing_status: string; context_agent_error?: string | null }
+): Promise<{ error: string | null }> {
+  const { error } = await client
+    .from(FIREFLIES_WEBHOOK_EVENTS_TABLE)
+    .update({
+      processing_status: processing.processing_status,
+      context_agent_error: processing.context_agent_error ?? null,
+    })
+    .eq("id", id);
+  return { error: error?.message ?? null };
 }

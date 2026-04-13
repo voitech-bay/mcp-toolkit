@@ -73,6 +73,8 @@ import {
   createGeneratedMessage,
   listGeneratedMessagesByContact,
   deleteGeneratedMessageById,
+  insertFirefliesWebhookEvent,
+  updateFirefliesWebhookEventProcessing,
   PROJECT_COMPANIES_TABLE,
   COMPANIES_TABLE,
 } from "./services/supabase.js";
@@ -126,18 +128,28 @@ import {
 import { persistWorkerPresenceToSupabase } from "./services/worker-presence-db.js";
 import { getWorkersUiSnapshot } from "./services/worker-ui-snapshot.js";
 import { broadcastEnrichmentBatchStarted } from "./services/enrichment-realtime.js";
+import {
+  verifyFirefliesHubSignature,
+  normalizeFirefliesPayload,
+  buildContextAgentJob,
+  isTranscriptReadyEvent,
+} from "./services/fireflies-webhook.js";
 
 export { generateContextText };
 
-/** Read and parse JSON body from request (for POST). */
-async function getParsedBody(req: IncomingMessage): Promise<unknown> {
-  const contentType = req.headers["content-type"] ?? "";
-  if (!contentType.includes("application/json")) return undefined;
+/** Raw UTF-8 body (e.g. Fireflies webhook HMAC). */
+async function getRawBody(req: IncomingMessage): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of req) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
-  const raw = Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function getParsedBody(req: IncomingMessage): Promise<unknown> {
+  const contentType = req.headers["content-type"] ?? "";
+  if (!contentType.includes("application/json")) return undefined;
+  const raw = await getRawBody(req);
   if (!raw.trim()) return undefined;
   try {
     return JSON.parse(raw) as unknown;
@@ -3386,4 +3398,143 @@ export async function handlePostEnrichmentWorkerBatchEvent(
   broadcastEnrichmentBatchStarted({ projectId, agentName, workerName, items });
   res.writeHead(200);
   res.end(JSON.stringify({ ok: true, broadcast: items.length }));
+}
+
+/**
+ * POST /api/webhooks/fireflies — Fireflies.ai transcription / lifecycle webhooks.
+ * @see docs/fireflies-webhooks.md
+ */
+export async function handleFirefliesWebhook(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+
+  const client = getSupabase();
+  if (!client) {
+    console.error("[fireflies] webhook: Supabase not configured");
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  const rawUtf8 = await getRawBody(req);
+  if (!rawUtf8.trim()) {
+    console.warn("[fireflies] webhook: empty body");
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Empty body" }));
+    return;
+  }
+
+  const secret = process.env.FIREFLIES_WEBHOOK_SECRET?.trim();
+  const sigHeader =
+    (req.headers["x-hub-signature"] as string | undefined) ??
+    (req.headers["X-Hub-Signature"] as string | undefined);
+
+  let signatureValid: boolean | null = null;
+  if (secret) {
+    if (!verifyFirefliesHubSignature(rawUtf8, sigHeader, secret)) {
+      console.warn("[fireflies] webhook: invalid signature");
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: "Invalid webhook signature" }));
+      return;
+    }
+    signatureValid = true;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawUtf8) as unknown;
+  } catch {
+    console.warn("[fireflies] webhook: invalid JSON");
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Invalid JSON" }));
+    return;
+  }
+  if (!isRecord(parsed)) {
+    console.warn("[fireflies] webhook: JSON must be an object");
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON must be an object" }));
+    return;
+  }
+
+  const normalized = normalizeFirefliesPayload(parsed);
+  const { id, error: insErr } = await insertFirefliesWebhookEvent(client, {
+    payload_variant: normalized.payloadVariant,
+    event_type: normalized.eventType,
+    meeting_id: normalized.meetingId,
+    client_reference_id: normalized.clientReferenceId,
+    fireflies_timestamp_ms: normalized.firefliesTimestampMs,
+    payload: parsed,
+    signature_header: sigHeader ?? null,
+    signature_valid: signatureValid,
+    processing_status: "received",
+  });
+
+  if (insErr || !id) {
+    console.error("[fireflies] webhook: insert failed", insErr ?? "no id");
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: insErr ?? "Insert failed" }));
+    return;
+  }
+
+  console.log(
+    "[fireflies] webhook stored",
+    JSON.stringify({
+      id,
+      variant: normalized.payloadVariant,
+      event: normalized.eventType,
+      meeting_id: normalized.meetingId,
+    })
+  );
+
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true, id }));
+
+  const forwardUrl = process.env.FIREFLIES_CONTEXT_AGENT_WEBHOOK_URL?.trim();
+  if (forwardUrl && isTranscriptReadyEvent(normalized)) {
+    const job = buildContextAgentJob(id, normalized, parsed);
+    console.log("[fireflies] forwarding to context agent", { id, url: forwardUrl });
+    setImmediate(() => {
+      void (async () => {
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        const bearer = process.env.FIREFLIES_CONTEXT_AGENT_WEBHOOK_BEARER?.trim();
+        if (bearer) headers.Authorization = `Bearer ${bearer}`;
+        try {
+          const r = await fetch(forwardUrl, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(job),
+          });
+          if (!r.ok) {
+            const t = await r.text().catch(() => "");
+            throw new Error(`HTTP ${r.status} ${t.slice(0, 500)}`);
+          }
+          await updateFirefliesWebhookEventProcessing(client, id, {
+            processing_status: "context_agent_queued",
+          });
+          console.log("[fireflies] context agent OK", { id, status: r.status });
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          console.error("[fireflies] context agent failed", { id, error: msg });
+          await updateFirefliesWebhookEventProcessing(client, id, {
+            processing_status: "context_agent_error",
+            context_agent_error: msg,
+          });
+        }
+      })();
+    });
+  } else if (forwardUrl && !isTranscriptReadyEvent(normalized)) {
+    console.log("[fireflies] skip context agent (not transcript-ready event)", {
+      id,
+      event: normalized.eventType,
+    });
+  }
 }

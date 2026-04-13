@@ -77,6 +77,7 @@ import {
   handlePostGenerateMessage,
   handleGetGeneratedMessages,
   handleDeleteGeneratedMessage,
+  handleFirefliesWebhook,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
@@ -330,6 +331,9 @@ const server = createServer(async (req, res) => {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
+        return;
+      case "/api/webhooks/fireflies":
+        await handleFirefliesWebhook(req, res);
         return;
       case "/api/supabase-table-query":
         await handleSupabaseTableQuery(req, res);
@@ -695,6 +699,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /api/flow-funnel?projectId=<id>&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD");
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");
   console.log("  POST /api/analytics-sync");
+  console.log("  POST /api/webhooks/fireflies");
   console.log("  GET  /api/supabase-table-query");
   console.log("  GET  /api/conversation");
   console.log("  GET  /api/company-context");
