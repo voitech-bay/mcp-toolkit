@@ -1,8 +1,11 @@
+var _a, _b;
 import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 var __dirname = dirname(fileURLToPath(import.meta.url));
+var apiPort = (_a = process.env.API_PORT) !== null && _a !== void 0 ? _a : "3001";
+var apiProxyTarget = (_b = process.env.VITE_API_PROXY_TARGET) !== null && _b !== void 0 ? _b : "http://localhost:".concat(apiPort);
 export default defineConfig({
     plugins: [vue()],
     root: ".",
@@ -22,7 +25,7 @@ export default defineConfig({
     server: {
         proxy: {
             "/api": {
-                target: "http://localhost:3001",
+                target: apiProxyTarget,
                 changeOrigin: true,
                 ws: true,
             },

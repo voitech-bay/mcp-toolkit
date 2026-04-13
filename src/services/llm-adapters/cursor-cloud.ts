@@ -10,13 +10,30 @@ const DEFAULT_REF = "main";
 const DEFAULT_POLL_MS = 5000;
 const DEFAULT_TIMEOUT_MS = 300_000;
 
-const RESULT_SUFFIX = `
+/**
+ * Tells the model exactly which strings must appear as top-level JSON keys (matches
+ * `entities[].id` / queue `company_id` or `contact_id` UUIDs).
+ */
+function buildJsonResultKeyInstructionSuffix(
+  entities: Array<{ id: string; data: Record<string, unknown> }>
+): string {
+  const ids = [...new Set(entities.map((e) => e.id).filter((id) => id.trim().length > 0))];
+  const bulletList = ids.map((id) => `- ${id}`).join("\n");
+  return `
 
-IMPORTANT: Return your results as a single JSON code block.
-The JSON must be an object where each key is the entity identifier
-(company domain or contact uuid) from the input above.
-Each value is an object with your enrichment findings for that entity.
+IMPORTANT: Return your results as a single fenced JSON code block. The root value MUST be a JSON object with one entry per entity in this batch (not an array).
+
+CRITICAL — top-level object keys MUST be entity IDs (UUIDs) exactly as listed below:
+- Copy each key character-for-character: same hex digits, hyphens, and letter case as shown.
+- Do NOT use person names, company names, domains, batch markers like [@1], numeric indices, or invented labels as JSON keys.
+- Do NOT use only a wrapper key (e.g. "results") without these UUIDs as the inner keys; if you nest, the map keyed by these UUIDs must appear at the inner level.
+
+Required keys (one object value per key, your enrichment payload for that entity):
+${bulletList || "- (no entity ids — return {})"}
+
+Each value must be a JSON object with your enrichment findings for that entity.
 `;
+}
 
 function delay(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -313,7 +330,8 @@ export class CursorCloudAdapter implements LlmAdapter {
     options?: { signal?: AbortSignal }
   ): Promise<LlmExecuteResult> {
     const signal = options?.signal;
-    const promptText = resolvedPrompt + RESULT_SUFFIX;
+    const promptText =
+      resolvedPrompt + buildJsonResultKeyInstructionSuffix(entities);
     const createRes = await fetch(`${this.apiBase}/v0/agents`, {
       method: "POST",
       headers: this.authHeaders(),

@@ -4,6 +4,8 @@ import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const apiPort = process.env.API_PORT ?? "3001";
+const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${apiPort}`;
 
 export default defineConfig({
   plugins: [vue()],
@@ -24,7 +26,7 @@ export default defineConfig({
   server: {
     proxy: {
       "/api": {
-        target: "http://localhost:3000",
+        target: apiProxyTarget,
         changeOrigin: true,
         ws: true,
       },

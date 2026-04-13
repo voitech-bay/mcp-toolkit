@@ -67,6 +67,11 @@ import {
   getCollectedAnalyticsDays,
   getProjectDashboardSnapshot,
   type EnrichmentEntityType,
+  createGeneratedMessage,
+  listGeneratedMessagesByContact,
+  deleteGeneratedMessageById,
+  PROJECT_COMPANIES_TABLE,
+  COMPANIES_TABLE,
 } from "./services/supabase.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
 import {
@@ -85,6 +90,24 @@ import {
   type SyncEntityKey,
 } from "./services/sync-supabase.js";
 import { verifyGetSalesCredentials } from "./services/source-api.js";
+import { listOpenRouterModels, generateOpenRouterMessage } from "./services/openrouter.js";
+import {
+  buildGeneratedMessagePrompt,
+  type GenerationTone,
+  type MentionBlock,
+  type GenerationGoal,
+  type GenerationCtaStyle,
+  type PersonalizationDepth,
+  type ReadingLevel,
+  type FormalityLevel,
+  type EmojiPolicy,
+  type ReadingLevelPreset,
+  type TonePreset,
+  type LengthPreset,
+  type MethodologyPreset,
+  type FocusPreset,
+  type CtaType,
+} from "./services/generated-message-prompt.js";
 import {
   requestSyncCancellation,
   SyncCancelledError,
@@ -514,6 +537,410 @@ export async function handleConversation(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ contact: result.contact ?? null, messages: result.messages }));
+}
+
+const ALLOWED_GENERATION_TONES = new Set<GenerationTone>([
+  "professional",
+  "friendly",
+  "confident",
+  "consultative",
+  "direct",
+]);
+
+const ALLOWED_MENTION_BLOCKS = new Set<MentionBlock>([
+  "contact_experience",
+  "contact_posts",
+  "contact_headline",
+  "company_about",
+  "company_industry",
+  "conversation_recap",
+]);
+const ALLOWED_GOALS = new Set<GenerationGoal>([
+  "book_call",
+  "ask_question",
+  "reengage",
+  "follow_up",
+  "close_loop",
+]);
+const ALLOWED_CTA_STYLES = new Set<GenerationCtaStyle>(["soft", "medium", "hard", "no_cta"]);
+const ALLOWED_PERSONALIZATION_DEPTH = new Set<PersonalizationDepth>(["low", "medium", "high"]);
+const ALLOWED_READING_LEVEL = new Set<ReadingLevel>(["simple", "expert"]);
+const ALLOWED_FORMALITY = new Set<FormalityLevel>(["casual", "formal"]);
+const ALLOWED_EMOJI_POLICY = new Set<EmojiPolicy>(["none", "light", "allowed"]);
+const ALLOWED_READING_LEVEL_PRESET = new Set<ReadingLevelPreset>([
+  "eighth_grade",
+  "high_school",
+  "college",
+  "professional",
+]);
+const ALLOWED_TONE_PRESET = new Set<TonePreset>(["casual", "neutral", "formal"]);
+const ALLOWED_LENGTH_PRESET = new Set<LengthPreset>([
+  "extra_short",
+  "short",
+  "medium",
+  "long",
+  "extra_long",
+]);
+const ALLOWED_METHODOLOGY_PRESET = new Set<MethodologyPreset>([
+  "pas",
+  "aida",
+  "bab",
+  "jtbd",
+]);
+const ALLOWED_FOCUS_PRESET = new Set<FocusPreset>(["pain", "neutral", "benefits"]);
+const ALLOWED_CTA_TYPE = new Set<CtaType>([
+  "initiate_conversation",
+  "schedule_meeting",
+  "request_introduction",
+  "ask_for_feedback",
+  "find_time_to_connect",
+  "politely_disengage",
+  "smart_cta",
+  "custom",
+]);
+
+function parseGenerationTone(raw: unknown): GenerationTone {
+  if (typeof raw === "string" && ALLOWED_GENERATION_TONES.has(raw as GenerationTone)) {
+    return raw as GenerationTone;
+  }
+  return "professional";
+}
+
+function parseMentionBlocks(raw: unknown): MentionBlock[] {
+  if (!Array.isArray(raw)) return ["conversation_recap", "contact_experience", "company_about"];
+  const values = raw.filter((v): v is MentionBlock =>
+    typeof v === "string" && ALLOWED_MENTION_BLOCKS.has(v as MentionBlock)
+  );
+  const unique = [...new Set(values)];
+  return unique.length > 0 ? unique : ["conversation_recap", "contact_experience", "company_about"];
+}
+
+function parseEnumOrDefault<T extends string>(raw: unknown, allowed: Set<T>, fallback: T): T {
+  if (typeof raw === "string" && allowed.has(raw as T)) return raw as T;
+  return fallback;
+}
+
+function parseGenerationFormat(raw: unknown): { sentences: number; paragraphs: number } {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { sentences: 3, paragraphs: 1 };
+  }
+  const rec = raw as Record<string, unknown>;
+  const sentences = Math.min(
+    12,
+    Math.max(1, Number.isFinite(Number(rec.sentences)) ? Math.floor(Number(rec.sentences)) : 3)
+  );
+  const paragraphs = Math.min(
+    6,
+    Math.max(1, Number.isFinite(Number(rec.paragraphs)) ? Math.floor(Number(rec.paragraphs)) : 1)
+  );
+  return { sentences, paragraphs };
+}
+
+/** GET /api/openrouter/models */
+export async function handleGetOpenRouterModels(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  try {
+    const result = await listOpenRouterModels();
+    if (result.error) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ data: [], error: result.error }));
+      return;
+    }
+    res.writeHead(200);
+    res.end(JSON.stringify({ data: result.data }));
+  } catch (e) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: e instanceof Error ? e.message : String(e) }));
+  }
+}
+
+/** GET /api/generated-messages?contactId=... */
+export async function handleGetGeneratedMessages(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const contactId = params.get("contactId")?.trim() ?? "";
+  if (!contactId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: contactId" }));
+    return;
+  }
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "20", 10) || 20, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await listGeneratedMessagesByContact(client, contactId, { limit, offset });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+/** DELETE /api/generated-messages/:id */
+export async function handleDeleteGeneratedMessage(
+  req: IncomingMessage,
+  res: ServerResponse,
+  generatedMessageId: string
+): Promise<void> {
+  if (req.method !== "DELETE") {
+    res.writeHead(405, { Allow: "DELETE" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await deleteGeneratedMessageById(client, generatedMessageId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
+/** POST /api/generated-messages/generate */
+export async function handlePostGenerateMessage(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        projectId?: string;
+        conversationUuid?: string;
+        model?: string;
+        tone?: GenerationTone;
+        format?: { sentences?: number; paragraphs?: number };
+        mentionBlocks?: MentionBlock[];
+        additionalInstructions?: string;
+        hypothesisId?: string | null;
+        temperature?: number;
+        goal?: GenerationGoal;
+        ctaStyle?: GenerationCtaStyle;
+        personalizationDepth?: PersonalizationDepth;
+        readingLevel?: ReadingLevel;
+        formality?: FormalityLevel;
+        emojiPolicy?: EmojiPolicy;
+        questionCountMax?: 0 | 1 | 2;
+        readingLevelPreset?: ReadingLevelPreset;
+        tonePreset?: TonePreset;
+        lengthPreset?: LengthPreset;
+        methodology?: MethodologyPreset;
+        focus?: FocusPreset;
+        ctaType?: CtaType;
+      }
+    | undefined;
+  const projectId = body?.projectId?.trim();
+  const conversationUuid = body?.conversationUuid?.trim();
+  const model = body?.model?.trim();
+  const hypothesisId =
+    typeof body?.hypothesisId === "string" && body.hypothesisId.trim()
+      ? body.hypothesisId.trim()
+      : null;
+  if (!projectId || !conversationUuid || !model) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId, conversationUuid, and model are required" }));
+    return;
+  }
+
+  const conv = await getConversation(client, { conversationUuid, messageLimit: 200 });
+  if (conv.error) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: conv.error }));
+    return;
+  }
+  const contact = conv.contact ?? null;
+  if (!contact) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Conversation has no linked contact." }));
+    return;
+  }
+  const contactIdRaw = contact.uuid;
+  const contactId = typeof contactIdRaw === "string" ? contactIdRaw.trim() : "";
+  if (!contactId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Contact UUID missing for conversation." }));
+    return;
+  }
+  const companyIdRaw = contact.company_uuid ?? contact.company_id;
+  const companyId = typeof companyIdRaw === "string" ? companyIdRaw.trim() : "";
+  if (!companyId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Contact is not linked to a company in DB." }));
+    return;
+  }
+
+  const [{ data: company, error: companyError }, { data: projectCompany, error: projectCompanyError }] =
+    await Promise.all([
+      client
+        .from(COMPANIES_TABLE)
+        .select("id,name,domain,website,industry,about,tagline")
+        .eq("id", companyId)
+        .maybeSingle(),
+      client
+        .from(PROJECT_COMPANIES_TABLE)
+        .select("id")
+        .eq("project_id", projectId)
+        .eq("company_id", companyId)
+        .limit(1)
+        .maybeSingle(),
+    ]);
+  if (companyError) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: companyError.message }));
+    return;
+  }
+  if (projectCompanyError) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: projectCompanyError.message }));
+    return;
+  }
+  const projectCompanyId =
+    projectCompany && typeof projectCompany.id === "string" ? projectCompany.id : null;
+  if (!projectCompanyId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Company is not attached to selected project." }));
+    return;
+  }
+
+  const tone = parseGenerationTone(body?.tone);
+  const format = parseGenerationFormat(body?.format);
+  const mentionBlocks = parseMentionBlocks(body?.mentionBlocks);
+  const goal = parseEnumOrDefault(body?.goal, ALLOWED_GOALS, "follow_up");
+  const ctaStyle = parseEnumOrDefault(body?.ctaStyle, ALLOWED_CTA_STYLES, "soft");
+  const personalizationDepth = parseEnumOrDefault(
+    body?.personalizationDepth,
+    ALLOWED_PERSONALIZATION_DEPTH,
+    "medium"
+  );
+  const readingLevel = parseEnumOrDefault(body?.readingLevel, ALLOWED_READING_LEVEL, "simple");
+  const formality = parseEnumOrDefault(body?.formality, ALLOWED_FORMALITY, "casual");
+  const emojiPolicy = parseEnumOrDefault(body?.emojiPolicy, ALLOWED_EMOJI_POLICY, "none");
+  const questionCountMaxRaw =
+    typeof body?.questionCountMax === "number" && Number.isFinite(body.questionCountMax)
+      ? Math.floor(body.questionCountMax)
+      : 1;
+  const questionCountMax = questionCountMaxRaw <= 0 ? 0 : questionCountMaxRaw >= 2 ? 2 : 1;
+  const readingLevelPreset = parseEnumOrDefault(
+    body?.readingLevelPreset,
+    ALLOWED_READING_LEVEL_PRESET,
+    "high_school"
+  );
+  const tonePreset = parseEnumOrDefault(body?.tonePreset, ALLOWED_TONE_PRESET, "casual");
+  const lengthPreset = parseEnumOrDefault(body?.lengthPreset, ALLOWED_LENGTH_PRESET, "medium");
+  const methodology = parseEnumOrDefault(body?.methodology, ALLOWED_METHODOLOGY_PRESET, "pas");
+  const focus = parseEnumOrDefault(body?.focus, ALLOWED_FOCUS_PRESET, "pain");
+  const ctaType = parseEnumOrDefault(body?.ctaType, ALLOWED_CTA_TYPE, "initiate_conversation");
+  const temperature =
+    typeof body?.temperature === "number" && Number.isFinite(body.temperature)
+      ? Math.min(2, Math.max(0, body.temperature))
+      : 0.7;
+  const prompt = buildGeneratedMessagePrompt({
+    tone,
+    goal,
+    ctaStyle,
+    personalizationDepth,
+    readingLevel,
+    formality,
+    emojiPolicy,
+    questionCountMax,
+    readingLevelPreset,
+    tonePreset,
+    lengthPreset,
+    methodology,
+    focus,
+    ctaType,
+    format,
+    mentionBlocks,
+    additionalInstructions: typeof body?.additionalInstructions === "string" ? body.additionalInstructions : "",
+    contact,
+    company: (company as Record<string, unknown> | null) ?? null,
+    messages: (conv.messages ?? []) as Array<Record<string, unknown>>,
+  });
+
+  const llmRes = await generateOpenRouterMessage({
+    model,
+    systemPrompt: prompt.systemPrompt,
+    userPrompt: prompt.userPrompt,
+    temperature,
+  });
+  if (llmRes.error || !llmRes.data) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: llmRes.error ?? "Generation failed" }));
+    return;
+  }
+
+  const insertRes = await createGeneratedMessage(client, {
+    hypothesisId,
+    contactId,
+    projectCompanyId,
+    content: llmRes.data.text,
+    generationContext: {
+      provider: "openrouter",
+      provider_run_id: llmRes.data.id,
+      provider_model: llmRes.data.model,
+      conversation_uuid: conversationUuid,
+      temperature,
+      ...prompt.contextPayload,
+    },
+  });
+  if (insertRes.error || !insertRes.data) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: insertRes.error ?? "Failed to persist generated message." }));
+    return;
+  }
+
+  res.writeHead(201);
+  res.end(JSON.stringify({
+    data: {
+      generatedMessage: insertRes.data,
+      content: llmRes.data.text,
+      model: llmRes.data.model,
+    },
+  }));
 }
 
 export async function handleGetCompanyContext(

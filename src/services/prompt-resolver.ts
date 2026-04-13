@@ -199,12 +199,17 @@ function llmSingleLine(val: string): string {
  * Expects optional `data.company` (record) from `company_uuid` hydration.
  */
 export function buildBatchContactsLlmBlocks(
-  entities: Array<{ data: Record<string, unknown> }>
+  entities: Array<{ id: string; data: Record<string, unknown> }>
 ): string {
   const blocks: string[] = [];
   for (let i = 0; i < entities.length; i++) {
-    const data = entities[i]!.data;
-    const lines: string[] = [`[@${i + 1}]`, "contact:"];
+    const ent = entities[i]!;
+    const data = ent.data;
+    const lines: string[] = [
+      `[@${i + 1}]`,
+      `entity_id: ${ent.id}`,
+      "contact:",
+    ];
     for (const k of CONTACT_LLM_KEYS) {
       const v = data[k];
       if (isEmptyForLlmBlock(k, v)) continue;

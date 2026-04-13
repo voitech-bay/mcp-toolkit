@@ -19,6 +19,7 @@ export const ANALYTICS_SNAPSHOTS_TABLE = "AnalyticsSnapshots";
 /** Core companies table. Contacts link via company_uuid (equals companies.id). */
 export const COMPANIES_TABLE = "companies";
 export const CONTEXT_SNAPSHOTS_TABLE = "ContextSnapshots";
+export const GENERATED_MESSAGES_TABLE = "generated_messages";
 
 /** Parse `companies.tags` jsonb (array of tag strings, or legacy numeric values) from PostgREST/JSON. */
 export function parseCompanyTagsColumn(raw: unknown): string[] {
@@ -813,6 +814,16 @@ export interface GetConversationResult {
   error: string | null;
 }
 
+export interface GeneratedMessageRow {
+  id: string;
+  hypothesis_id: string | null;
+  contact_id: string;
+  project_company_id: string;
+  content: string;
+  generation_context: Record<string, unknown> | null;
+  created_at: string;
+}
+
 /**
  * Get LinkedIn conversation(s) by contact (leadUuid), by message (conversationUuid),
  * or by sender (senderProfileUuid). Messages ordered by sent_at ascending.
@@ -881,6 +892,83 @@ export async function getConversation(
     return { messages: msgResult.error ? [] : msgResult.data, error: msgResult.error };
   }
   return { messages: [], error: "Provide leadUuid, conversationUuid, or senderProfileUuid." };
+}
+
+export async function createGeneratedMessage(
+  client: SupabaseClient,
+  payload: {
+    hypothesisId?: string | null;
+    contactId: string;
+    projectCompanyId: string;
+    content: string;
+    generationContext?: Record<string, unknown> | null;
+  }
+): Promise<{ data: GeneratedMessageRow | null; error: string | null }> {
+  const contactId = payload.contactId?.trim();
+  const projectCompanyId = payload.projectCompanyId?.trim();
+  const content = payload.content?.trim();
+  if (!contactId) return { data: null, error: "contactId is required." };
+  if (!projectCompanyId) return { data: null, error: "projectCompanyId is required." };
+  if (!content) return { data: null, error: "content is required." };
+  const insert = {
+    hypothesis_id: payload.hypothesisId ?? null,
+    contact_id: contactId,
+    project_company_id: projectCompanyId,
+    content,
+    generation_context: payload.generationContext ?? null,
+  };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGES_TABLE)
+    .insert(insert)
+    .select("*")
+    .single();
+  if (error) return { data: null, error: error.message };
+  return { data: data as GeneratedMessageRow, error: null };
+}
+
+export async function listGeneratedMessagesByContact(
+  client: SupabaseClient,
+  contactId: string,
+  options?: { limit?: number; offset?: number }
+): Promise<{ data: GeneratedMessageRow[]; total: number; error: string | null }> {
+  const id = contactId?.trim();
+  if (!id) return { data: [], total: 0, error: "contactId is required." };
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 100);
+  const offset = Math.max(options?.offset ?? 0, 0);
+  const { data, error, count } = await client
+    .from(GENERATED_MESSAGES_TABLE)
+    .select("*", { count: "exact" })
+    .eq("contact_id", id)
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (error) return { data: [], total: 0, error: error.message };
+  return { data: (data ?? []) as GeneratedMessageRow[], total: count ?? 0, error: null };
+}
+
+export async function linkLinkedinMessageToGeneratedMessage(
+  client: SupabaseClient,
+  linkedinMessageId: string,
+  generatedMessageId: string
+): Promise<{ error: string | null }> {
+  const messageId = linkedinMessageId?.trim();
+  const generatedId = generatedMessageId?.trim();
+  if (!messageId) return { error: "linkedinMessageId is required." };
+  if (!generatedId) return { error: "generatedMessageId is required." };
+  const { error } = await client
+    .from(LINKEDIN_MESSAGES_TABLE)
+    .update({ generated_message_id: generatedId })
+    .eq("uuid", messageId);
+  return { error: error?.message ?? null };
+}
+
+export async function deleteGeneratedMessageById(
+  client: SupabaseClient,
+  id: string
+): Promise<{ error: string | null }> {
+  const generatedId = id?.trim();
+  if (!generatedId) return { error: "id is required." };
+  const { error } = await client.from(GENERATED_MESSAGES_TABLE).delete().eq("id", generatedId);
+  return { error: error?.message ?? null };
 }
 
 // --- CompaniesContext (table: CompaniesContext) ---
@@ -3058,29 +3146,59 @@ export async function getConversationsList(
   }
 
   // Collect unique lead_uuids and sender_profile_uuids for batch fetching
-  const leadUuids = [...new Set([...grouped.values()].map((g) => g.lead_uuid).filter(Boolean) as string[])];
-  const senderUuids = [...new Set([...grouped.values()].map((g) => g.sender_profile_uuid).filter(Boolean) as string[])];
+  const leadUuids = [
+    ...new Set(
+      [...grouped.values()]
+        .map((g) => (typeof g.lead_uuid === "string" ? g.lead_uuid.trim() : ""))
+        .filter(Boolean)
+    ),
+  ];
+  const senderUuids = [
+    ...new Set(
+      [...grouped.values()]
+        .map((g) => (typeof g.sender_profile_uuid === "string" ? g.sender_profile_uuid.trim() : ""))
+        .filter(Boolean)
+    ),
+  ];
 
   const contactMap = new Map<string, Record<string, unknown>>();
   const senderMap = new Map<string, Record<string, unknown>>();
 
   if (leadUuids.length > 0) {
-    const { data: contacts } = await client
-      .from(CONTACTS_TABLE)
-      .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_uuid")
-      .in("uuid", leadUuids);
-    for (const c of (contacts ?? []) as Array<Record<string, unknown>>) {
-      if (c.uuid) contactMap.set(c.uuid as string, c);
+    const chunkSize = 200;
+    for (let i = 0; i < leadUuids.length; i += chunkSize) {
+      const chunk = leadUuids.slice(i, i + chunkSize);
+      const { data: contacts, error: contactsErr } = await client
+        .from(CONTACTS_TABLE)
+        .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_uuid")
+        .in("uuid", chunk);
+      if (contactsErr) {
+        return { data: [], total: 0, error: contactsErr.message };
+      }
+      for (const c of (contacts ?? []) as Array<Record<string, unknown>>) {
+        if (typeof c.uuid === "string" && c.uuid.trim()) {
+          contactMap.set(c.uuid.trim(), c);
+        }
+      }
     }
   }
 
   if (senderUuids.length > 0) {
-    const { data: senders } = await client
-      .from(SENDERS_TABLE)
-      .select("uuid, first_name, last_name, label")
-      .in("uuid", senderUuids);
-    for (const s of (senders ?? []) as Array<Record<string, unknown>>) {
-      if (s.uuid) senderMap.set(s.uuid as string, s);
+    const chunkSize = 200;
+    for (let i = 0; i < senderUuids.length; i += chunkSize) {
+      const chunk = senderUuids.slice(i, i + chunkSize);
+      const { data: senders, error: sendersErr } = await client
+        .from(SENDERS_TABLE)
+        .select("uuid, first_name, last_name, label")
+        .in("uuid", chunk);
+      if (sendersErr) {
+        return { data: [], total: 0, error: sendersErr.message };
+      }
+      for (const s of (senders ?? []) as Array<Record<string, unknown>>) {
+        if (typeof s.uuid === "string" && s.uuid.trim()) {
+          senderMap.set(s.uuid.trim(), s);
+        }
+      }
     }
   }
 

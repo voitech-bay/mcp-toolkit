@@ -71,6 +71,10 @@ import {
   handleGetEnrichmentPromptSettings,
   handlePatchEnrichmentPromptSettings,
   handlePostEnrichmentPromptPreview,
+  handleGetOpenRouterModels,
+  handlePostGenerateMessage,
+  handleGetGeneratedMessages,
+  handleDeleteGeneratedMessage,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
@@ -177,6 +181,9 @@ const server = createServer(async (req, res) => {
   const contactIdMatch =
     pathname !== "/api/contacts/by-company" &&
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
+  const generatedMessageIdMatch =
+    pathname !== "/api/generated-messages/generate" &&
+    pathname.match(/^\/api\/generated-messages\/([^/]+)$/);
 
   try {
     if (pathname.startsWith("/mcp")) {
@@ -257,6 +264,17 @@ const server = createServer(async (req, res) => {
       const contactId = decodeURIComponent(contactIdMatch[1]);
       if (req.method === "PATCH") {
         await handlePatchContactCompany(req, res, contactId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (generatedMessageIdMatch) {
+      const generatedMessageId = decodeURIComponent(generatedMessageIdMatch[1]);
+      if (req.method === "DELETE") {
+        await handleDeleteGeneratedMessage(req, res, generatedMessageId);
       } else {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -511,6 +529,30 @@ const server = createServer(async (req, res) => {
       case "/api/enrichment/prompt-preview":
         if (req.method === "POST") {
           await handlePostEnrichmentPromptPreview(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/openrouter/models":
+        if (req.method === "GET") {
+          await handleGetOpenRouterModels(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/generated-messages":
+        if (req.method === "GET") {
+          await handleGetGeneratedMessages(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/generated-messages/generate":
+        if (req.method === "POST") {
+          await handlePostGenerateMessage(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

@@ -6,12 +6,13 @@ import {
 } from "naive-ui";
 import {
   MessageCircleIcon, UserIcon, BuildingIcon, LightbulbIcon,
-  PlusIcon, UsersIcon, SearchIcon, LinkIcon, XIcon,
+  PlusIcon, UsersIcon, SearchIcon, LinkIcon, XIcon, SparklesIcon,
 } from "lucide-vue-next";
 import { useDebounceFn } from "@vueuse/core";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
 import ReplyContextModal from "../components/ReplyContextModal.vue";
+import GenerateMessageModal from "../components/GenerateMessageModal.vue";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -44,6 +45,12 @@ interface DialogueMessage {
   sentAt: string;
   sender: string;
   direction: "inbound" | "outbound";
+}
+
+interface GeneratedDraftMessage {
+  id: string;
+  content: string;
+  created_at: string;
 }
 
 interface ContactWithConversations {
@@ -312,6 +319,9 @@ const dialogueMessages = ref<DialogueMessage[]>([]);
 const dialogueContact = ref<Record<string, unknown> | null>(null);
 const dialogueLoading = ref(false);
 const dialogueError = ref("");
+const generatedDrafts = ref<GeneratedDraftMessage[]>([]);
+const generatedDraftsLoading = ref(false);
+const generatedDraftsError = ref("");
 
 function messageDirection(msg: Record<string, unknown>): "inbound" | "outbound" {
   const t = String(msg["type"] ?? msg["linkedin_type"] ?? "").toLowerCase();
@@ -346,7 +356,13 @@ async function fetchDialogue(convUuid: string) {
 
 watch(selectedConvUuid, (uuid) => {
   if (uuid) void fetchDialogue(uuid);
-  else { dialogueMessages.value = []; dialogueContact.value = null; dialogueError.value = ""; }
+  else {
+    dialogueMessages.value = [];
+    dialogueContact.value = null;
+    dialogueError.value = "";
+    generatedDrafts.value = [];
+    generatedDraftsError.value = "";
+  }
 });
 
 // Derived contact info
@@ -521,6 +537,65 @@ const dialogueContactId = computed(() => {
   return typeof v === "string" && v.trim() ? v.trim() : null;
 });
 
+async function fetchGeneratedDrafts(contactId: string) {
+  generatedDraftsLoading.value = true;
+  generatedDraftsError.value = "";
+  try {
+    const r = await fetch(`/api/generated-messages?contactId=${encodeURIComponent(contactId)}&limit=20`);
+    const j = (await r.json()) as { data?: GeneratedDraftMessage[]; error?: string };
+    if (!r.ok || j.error) {
+      generatedDraftsError.value = j.error ?? "Failed to load generated drafts.";
+      generatedDrafts.value = [];
+      return;
+    }
+    generatedDrafts.value = (j.data ?? []).map((d) => ({
+      id: d.id,
+      content: d.content,
+      created_at: d.created_at,
+    }));
+  } catch (e) {
+    generatedDraftsError.value = e instanceof Error ? e.message : "Failed to load generated drafts.";
+    generatedDrafts.value = [];
+  } finally {
+    generatedDraftsLoading.value = false;
+  }
+}
+
+watch(dialogueContactId, (contactId) => {
+  if (!contactId) {
+    generatedDrafts.value = [];
+    generatedDraftsError.value = "";
+    return;
+  }
+  void fetchGeneratedDrafts(contactId);
+});
+
+async function copyDraftMessage(text: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    message.success("Draft copied.");
+  } catch {
+    message.error("Failed to copy draft.");
+  }
+}
+
+async function deleteDraftMessage(id: string) {
+  try {
+    const r = await fetch(`/api/generated-messages/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    const j = (await r.json().catch(() => ({}))) as { error?: string };
+    if (!r.ok || j.error) {
+      message.error(j.error ?? "Failed to delete draft.");
+      return;
+    }
+    generatedDrafts.value = generatedDrafts.value.filter((d) => d.id !== id);
+    message.success("Draft deleted.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to delete draft.");
+  }
+}
+
 function onReceiverCompanyAttached(payload: { companyId: string; companyName: string }) {
   if (!dialogueContact.value) return;
   dialogueContact.value = {
@@ -535,6 +610,23 @@ function onReceiverCompanyAttached(payload: { companyId: string; companyName: st
 // ── Cursor / Start reply ──────────────────────────────────────────────────────
 
 const replyContextOpen = ref(false);
+const generateMessageOpen = ref(false);
+const generateMessagePreset = ref<"simple" | "complex">("simple");
+const replyDraft = ref("");
+
+function openGenerateMessage(preset: "simple" | "complex") {
+  generateMessagePreset.value = preset;
+  generateMessageOpen.value = true;
+}
+
+async function onGeneratedMessage(payload: { id: string; content: string; created_at: string }) {
+  generatedDrafts.value = [
+    payload,
+    ...generatedDrafts.value.filter((d) => d.id !== payload.id),
+  ];
+  const contactId = dialogueContactId.value;
+  if (contactId) await fetchGeneratedDrafts(contactId);
+}
 
 /** Optional: ReplyContextModal "Copy context" still uses /api/build-context + clipboard. */
 function onReplyContextBuilt(contextText: string) {
@@ -705,19 +797,73 @@ const filteredRelatedContacts = computed(() => {
             <div class="convpage__messages-col">
               <NSpin :show="dialogueLoading">
                 <NAlert v-if="dialogueError" type="error" style="margin-bottom:12px">{{ dialogueError }}</NAlert>
-                <div class="convpage__thread">
-                  <div v-for="msg in dialogueMessages" :key="msg.key" class="convpage__msg"
-                    :class="msg.direction === 'outbound' ? 'convpage__msg--out' : 'convpage__msg--in'">
-                    <div class="convpage__bubble">
-                      <div class="convpage__msg-meta">
-                        <span v-if="msg.sender" class="convpage__msg-sender">{{ msg.sender }}</span>
-                        <span class="convpage__msg-time">{{ msg.sentAt }}</span>
+                <div class="convpage__messages-stack">
+                  <div class="convpage__thread">
+                    <div v-for="msg in dialogueMessages" :key="msg.key" class="convpage__msg"
+                      :class="msg.direction === 'outbound' ? 'convpage__msg--out' : 'convpage__msg--in'">
+                      <div class="convpage__bubble">
+                        <div class="convpage__msg-meta">
+                          <span v-if="msg.sender" class="convpage__msg-sender">{{ msg.sender }}</span>
+                          <span class="convpage__msg-time">{{ msg.sentAt }}</span>
+                        </div>
+                        <div class="convpage__msg-text">{{ msg.text }}</div>
                       </div>
-                      <div class="convpage__msg-text">{{ msg.text }}</div>
+                    </div>
+                    <div
+                      v-for="draft in generatedDrafts"
+                      :key="`draft-${draft.id}`"
+                      class="convpage__msg convpage__msg--out convpage__msg--pending"
+                    >
+                      <div class="convpage__bubble convpage__bubble--pending">
+                        <div class="convpage__msg-meta">
+                          <NTag size="small" type="warning" :bordered="false">PENDING</NTag>
+                          <span class="convpage__msg-time">{{ formatDate(draft.created_at) }}</span>
+                          <NButton size="tiny" quaternary @click="copyDraftMessage(draft.content)">Copy</NButton>
+                          <NPopconfirm @positive-click="deleteDraftMessage(draft.id)">
+                            <template #trigger>
+                              <NButton size="tiny" quaternary type="error">Delete</NButton>
+                            </template>
+                            Delete this generated draft?
+                          </NPopconfirm>
+                        </div>
+                        <div class="convpage__msg-text">{{ draft.content }}</div>
+                      </div>
+                    </div>
+                    <NAlert
+                      v-if="generatedDraftsError"
+                      type="warning"
+                      style="margin-top: 8px"
+                    >
+                      {{ generatedDraftsError }}
+                    </NAlert>
+                    <NEmpty v-if="!dialogueLoading && dialogueMessages.length === 0 && !dialogueError"
+                      description="No messages" />
+                  </div>
+
+                  <div class="convpage__composer">
+                    <div class="convpage__composer-input-wrap">
+                      <NInput
+                        v-model:value="replyDraft"
+                        type="textarea"
+                        :rows="3"
+                        placeholder="Write a reply..."
+                        class="convpage__composer-input"
+                      />
+                      <NButton
+                        size="tiny"
+                        type="success"
+                        quaternary
+                        class="convpage__composer-ai-btn"
+                        :disabled="!selectedConvUuid"
+                        @click="openGenerateMessage('simple')"
+                      >
+                        <template #icon>
+                          <SparklesIcon :size="14" />
+                        </template>
+                        Generate
+                      </NButton>
                     </div>
                   </div>
-                  <NEmpty v-if="!dialogueLoading && dialogueMessages.length === 0 && !dialogueError"
-                    description="No messages" />
                 </div>
               </NSpin>
             </div>
@@ -849,7 +995,6 @@ const filteredRelatedContacts = computed(() => {
                 </NSpin>
               </NCard>
 
-              <!-- Cursor block: deeplink / start reply -->
               <NCard class="convpage__info-card" size="small">
                 <div class="convpage__section-header">
                   <LinkIcon :size="14" />
@@ -877,6 +1022,16 @@ const filteredRelatedContacts = computed(() => {
     :hypotheses="hypotheses"
     :related-contacts="filteredRelatedContacts"
     @built="onReplyContextBuilt"
+  />
+
+  <GenerateMessageModal
+    v-model:show="generateMessageOpen"
+    :project-id="projectStore.selectedProjectId"
+    :conversation-uuid="selectedConvUuid"
+    :contact-id="dialogueContactId"
+    :preset="generateMessagePreset"
+    :hypotheses="hypotheses"
+    @generated="onGeneratedMessage"
   />
 
   <AttachCompanyModal
@@ -1140,6 +1295,38 @@ const filteredRelatedContacts = computed(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.convpage__messages-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+  min-height: 0;
+}
+
+.convpage__composer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--n-border-color, rgba(128, 128, 128, 0.2));
+  padding-top: 10px;
+}
+
+.convpage__composer-input-wrap {
+  position: relative;
+}
+
+.convpage__composer-input {
+  padding-top: 24px;
+}
+
+.convpage__composer-ai-btn {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 2;
 }
 
 .convpage__msg {
@@ -1164,6 +1351,11 @@ const filteredRelatedContacts = computed(() => {
 .convpage__msg--out .convpage__bubble {
   background: rgba(99, 143, 242, 0.2);
   border-bottom-right-radius: 4px;
+}
+
+.convpage__bubble--pending {
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px dashed rgba(245, 158, 11, 0.45);
 }
 
 .convpage__msg--in .convpage__bubble {
@@ -1192,6 +1384,7 @@ const filteredRelatedContacts = computed(() => {
   font-size: 13px;
   line-height: 1.5;
   word-break: break-word;
+  white-space: pre-wrap;
 }
 
 /* Sidebar */
