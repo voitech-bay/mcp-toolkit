@@ -92,6 +92,7 @@ import {
 } from "./services/worker-socket.js";
 import { attachEnrichmentTableSocket } from "./services/enrichment-realtime.js";
 import { createMcpHandler } from "./server.js";
+import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
 const mcpHandler = createMcpHandler();
@@ -149,6 +150,48 @@ const servesStatic = async (pathname: string, res: import("node:http").ServerRes
     return false;
   }
 };
+
+/** GET|HEAD /charts-public/* → repo-root charts-public/ (Docker: mount volume here). */
+async function serveChartsPublicFile(
+  pathname: string,
+  method: string,
+  res: import("node:http").ServerResponse
+): Promise<boolean> {
+  if (!pathname.startsWith("/charts-public/")) return false;
+  const rel = decodeURIComponent(pathname.slice("/charts-public/".length));
+  if (!rel || rel.includes("..")) return false;
+
+  const filePath = path.resolve(CHARTS_PUBLIC_DIR, rel);
+  const root = path.resolve(CHARTS_PUBLIC_DIR);
+  if (filePath !== root && !filePath.startsWith(root + path.sep)) {
+    return false;
+  }
+
+  try {
+    const stats = await fs.stat(filePath);
+    if (!stats.isFile()) return false;
+    const ext = path.extname(filePath).toLowerCase();
+    const ctype = MIME_TYPES[ext] ?? "application/octet-stream";
+    if (method === "HEAD") {
+      res.writeHead(200, {
+        "Content-Type": ctype,
+        "Content-Length": String(stats.size),
+        "Cache-Control": "public, max-age=300",
+      });
+      res.end();
+      return true;
+    }
+    const body = await fs.readFile(filePath);
+    res.writeHead(200, {
+      "Content-Type": ctype,
+      "Cache-Control": "public, max-age=300",
+    });
+    res.end(body);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const server = createServer(async (req, res) => {
   const url = req.url ?? "";
@@ -218,8 +261,22 @@ const server = createServer(async (req, res) => {
           api: true,
           mcpPath: "/mcp",
           static: "GET /* → public/",
+          chartsPublic: "GET|HEAD /charts-public/* → charts-public/",
         })
       );
+      return;
+    }
+
+    if (pathname.startsWith("/charts-public/")) {
+      if (req.method === "GET" || req.method === "HEAD") {
+        const ok = await serveChartsPublicFile(pathname, req.method, res);
+        if (ok) return;
+      }
+      res.writeHead(
+        req.method === "GET" || req.method === "HEAD" ? 404 : 405,
+        { "Content-Type": "application/json" }
+      );
+      res.end(JSON.stringify({ error: "Not found" }));
       return;
     }
 
@@ -748,6 +805,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`API + static + MCP: http://localhost:${PORT}`);
   console.log("  MCP  Streamable HTTP: GET|POST /mcp");
   console.log("  GET  /health");
+  console.log("  GET  /charts-public/<file>  (charts-public/ volume)");
   console.log("  GET  /api/supabase-state");
   console.log("  POST /api/supabase-sync");
   console.log("  POST /api/supabase-sync-cancel");

@@ -6,6 +6,10 @@ import { registerFindProjectLinkedinConversationsTool } from "./tools/find-proje
 import { registerFindProjectFlowsTool } from "./tools/find-project-flows.js";
 import { registerFindProjectHypothesisTool } from "./tools/find-project-hypothesis.js";
 import { registerFindProjectAnalyticsTool } from "./tools/find-project-analytics.js";
+import { registerGetProjectSyncStatusTool } from "./tools/get-project-sync-status.js";
+import { registerStartProjectSyncTool } from "./tools/start-project-sync.js";
+import { registerRenderChartTool } from "./tools/render-chart.js";
+import { registerRenderFunnelChartTool } from "./tools/render-funnel-chart.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -13,10 +17,14 @@ function createMcpServer(): McpServer {
     version: "0.1.0",
   });
   registerFindProjectsTool(server);
+  registerGetProjectSyncStatusTool(server);
+  registerStartProjectSyncTool(server);
   registerFindProjectLinkedinConversationsTool(server);
   registerFindProjectFlowsTool(server);
   registerFindProjectHypothesisTool(server);
   registerFindProjectAnalyticsTool(server);
+  registerRenderChartTool(server);
+  registerRenderFunnelChartTool(server);
   return server;
 }
 

@@ -16,5 +16,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 
+# Persist MCP render_chart output: docker run -v $(pwd)/charts-public:/app/charts-public ...
+
 EXPOSE 3000
 CMD ["node", "dist/standalone-http.js"]

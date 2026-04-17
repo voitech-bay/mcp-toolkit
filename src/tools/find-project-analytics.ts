@@ -1,72 +1,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { getSupabase } from "../services/supabase.js";
 import {
-  ANALYTICS_SNAPSHOTS_TABLE,
-  FLOWS_TABLE,
-  FLOW_LEADS_TABLE,
-  getHypothesesWithCounts,
-  getHypothesisTagContacts,
-  getSupabase,
-} from "../services/supabase.js";
-
-interface FunnelMetrics {
-  connection_sent: number;
-  connection_accepted: number;
-  inbox: number;
-  positive_replies: number;
-  accepted_rate_pct: number | null;
-  inbox_rate_pct: number | null;
-  positive_rate_pct: number | null;
-}
-
-function emptyMetrics(): FunnelMetrics {
-  return {
-    connection_sent: 0,
-    connection_accepted: 0,
-    inbox: 0,
-    positive_replies: 0,
-    accepted_rate_pct: null,
-    inbox_rate_pct: null,
-    positive_rate_pct: null,
-  };
-}
-
-function toInt(v: unknown): number {
-  if (v == null || v === "") return 0;
-  if (typeof v === "number" && Number.isFinite(v)) return Math.trunc(v);
-  if (typeof v === "bigint") return Number(v);
-  if (typeof v === "string") {
-    const n = parseInt(v, 10);
-    return Number.isFinite(n) ? n : 0;
-  }
-  return 0;
-}
-
-function finalizeRates(m: FunnelMetrics): FunnelMetrics {
-  if (m.connection_sent > 0) {
-    m.accepted_rate_pct = (100 * m.connection_accepted) / m.connection_sent;
-    m.inbox_rate_pct = (100 * m.inbox) / m.connection_sent;
-    m.positive_rate_pct = (100 * m.positive_replies) / m.connection_sent;
-  }
-  return m;
-}
-
-function addInto(dst: FunnelMetrics, metrics: Record<string, unknown>): void {
-  dst.connection_sent += toInt(metrics.linkedin_connection_request_sent_count);
-  dst.connection_accepted += toInt(metrics.linkedin_connection_request_accepted_count);
-  dst.inbox += toInt(metrics.linkedin_inbox_count);
-  dst.positive_replies += toInt(metrics.linkedin_positive_count);
-}
-
-function daysBetween(fromYmd: string, toYmd: string): number | null {
-  const m = /^\d{4}-\d{2}-\d{2}$/;
-  if (!m.test(fromYmd) || !m.test(toYmd)) return null;
-  const a = new Date(fromYmd + "T00:00:00Z").getTime();
-  const b = new Date(toYmd + "T00:00:00Z").getTime();
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  if (b < a) return null;
-  return Math.floor((b - a) / 86_400_000) + 1;
-}
+  aggregateMetricsByFlow,
+  daysBetween,
+  emptyMetrics,
+  finalizeRates,
+  getFlowNameMap,
+  resolveHypothesisFlows,
+} from "../services/analytics-funnel.js";
 
 /**
  * `find_project_analytics` — aggregate AnalyticsSnapshots for a date range (≤ 30 days).
@@ -122,57 +64,23 @@ export function registerFindProjectAnalyticsTool(server: McpServer): void {
         };
       }
 
-      // Aggregate snapshot metrics per flow_uuid (paginated).
-      const metricsByFlow = new Map<string, FunnelMetrics>();
-      const pageSize = 1000;
-      for (let offset = 0; ; offset += pageSize) {
-        const { data, error } = await client
-          .from(ANALYTICS_SNAPSHOTS_TABLE)
-          .select("flow_uuid, metrics")
-          .eq("project_id", args.projectId)
-          .eq("group_by", "sender_profiles")
-          .not("flow_uuid", "is", null)
-          .gte("snapshot_date", args.dateFrom)
-          .lte("snapshot_date", args.dateTo)
-          .range(offset, offset + pageSize - 1);
-        if (error) {
-          return {
-            content: [{ type: "text" as const, text: `Error: ${error.message}` }],
-            isError: true,
-          };
-        }
-        const rows = (data ?? []) as Array<Record<string, unknown>>;
-        if (rows.length === 0) break;
-        for (const row of rows) {
-          const fu = row.flow_uuid as string | null;
-          if (!fu) continue;
-          const m =
-            row.metrics && typeof row.metrics === "object"
-              ? (row.metrics as Record<string, unknown>)
-              : {};
-          if (!metricsByFlow.has(fu)) metricsByFlow.set(fu, emptyMetrics());
-          addInto(metricsByFlow.get(fu)!, m);
-        }
-        if (rows.length < pageSize) break;
-      }
-
-      // Resolve flow names for the project
-      const { data: flowRows, error: flowErr } = await client
-        .from(FLOWS_TABLE)
-        .select("uuid, name")
-        .eq("project_id", args.projectId);
-      if (flowErr) {
+      const agg = await aggregateMetricsByFlow(client, args.projectId, args.dateFrom, args.dateTo);
+      if (agg.error) {
         return {
-          content: [{ type: "text" as const, text: `Error: ${flowErr.message}` }],
+          content: [{ type: "text" as const, text: `Error: ${agg.error}` }],
           isError: true,
         };
       }
-      const flowNameByUuid = new Map<string, string>();
-      for (const row of (flowRows ?? []) as Array<Record<string, unknown>>) {
-        const u = row.uuid as string | undefined;
-        const n = (row.name as string | null) ?? null;
-        if (u) flowNameByUuid.set(u, n ?? "(unnamed flow)");
+      const metricsByFlow = agg.data;
+
+      const flowNames = await getFlowNameMap(client, args.projectId);
+      if (flowNames.error) {
+        return {
+          content: [{ type: "text" as const, text: `Error: ${flowNames.error}` }],
+          isError: true,
+        };
       }
+      const flowNameByUuid = flowNames.data;
 
       if (args.type === "flow") {
         const filterIds = args.entityIds && args.entityIds.length > 0
@@ -215,44 +123,16 @@ export function registerFindProjectAnalyticsTool(server: McpServer): void {
       }
 
       // type === "hypothesis"
-      const { data: allHyps, error: hErr } = await getHypothesesWithCounts(client, args.projectId);
-      if (hErr) {
+      const hypsRes = await resolveHypothesisFlows(client, args.projectId, args.entityIds);
+      if (hypsRes.error) {
         return {
-          content: [{ type: "text" as const, text: `Error: ${hErr}` }],
+          content: [{ type: "text" as const, text: `Error: ${hypsRes.error}` }],
           isError: true,
         };
       }
-      const selectedHyps = args.entityIds && args.entityIds.length > 0
-        ? allHyps.filter((h) => args.entityIds!.includes(h.id))
-        : allHyps;
 
-      const groups = [];
-      for (const h of selectedHyps) {
-        // Hypothesis → contacts (via GetSales tag)
-        const tagRes = await getHypothesisTagContacts(client, h.id);
-        const contactUuids = (tagRes.error ? [] : tagRes.data)
-          .map((c) => c.contact_uuid)
-          .filter(Boolean);
-
-        // Contacts → flow_uuids via FlowLeads
-        const flowUuids = new Set<string>();
-        if (contactUuids.length > 0) {
-          const chunkSize = 500;
-          for (let i = 0; i < contactUuids.length; i += chunkSize) {
-            const chunk = contactUuids.slice(i, i + chunkSize);
-            const { data } = await client
-              .from(FLOW_LEADS_TABLE)
-              .select("flow_uuid")
-              .eq("project_id", args.projectId)
-              .in("lead_uuid", chunk);
-            for (const row of (data ?? []) as Array<Record<string, unknown>>) {
-              const fu = row.flow_uuid as string | null;
-              if (fu) flowUuids.add(fu);
-            }
-          }
-        }
-
-        const flowsBreakdown = [...flowUuids]
+      const groups = hypsRes.data.map((h) => {
+        const flowsBreakdown = h.flow_uuids
           .map((fu) => ({
             uuid: fu,
             name: flowNameByUuid.get(fu) ?? null,
@@ -269,7 +149,7 @@ export function registerFindProjectAnalyticsTool(server: McpServer): void {
         }
         finalizeRates(total);
 
-        groups.push({
+        return {
           type: "hypothesis" as const,
           hypothesis: {
             id: h.id,
@@ -278,13 +158,13 @@ export function registerFindProjectAnalyticsTool(server: McpServer): void {
             getsales_tag_uuid: h.getsales_tag_uuid,
             getsales_tag_name: h.getsales_tag_name,
           },
-          contacts_count: contactUuids.length,
+          contacts_count: h.contacts_count,
           flows_count: flowsBreakdown.length,
           metrics: total,
           flows: flowsBreakdown,
-          tag_lookup_error: tagRes.error ?? null,
-        });
-      }
+          tag_lookup_error: h.tag_lookup_error,
+        };
+      });
 
       return {
         content: [

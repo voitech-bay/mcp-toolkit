@@ -23,14 +23,24 @@ function compactMessage(m: Record<string, unknown>) {
   };
 }
 
+/** Case-insensitive substring match (SQL `%LIKE%` equivalent). */
+function likeMatch(haystack: string | null | undefined, needle: string): boolean {
+  if (!haystack) return false;
+  return haystack.toLowerCase().includes(needle.toLowerCase());
+}
+
+/** Upper bound for in-memory scan when name filters are applied. */
+const FILTER_SCAN_LIMIT = 500;
+
 /**
  * `find_project_linkedin_conversations` — most recent conversations within a project
  * with the last N messages + contact (receiver) + sender info for each.
+ * Supports optional %LIKE% filters on contact (receiver) name and sender name.
  */
 export function registerFindProjectLinkedinConversationsTool(server: McpServer): void {
   server.tool(
     "find_project_linkedin_conversations",
-    "Return the most recent LinkedIn conversations for a project. For each conversation includes the contact (receiver) info, the sender profile info, and the last N messages (newest→oldest). Use `limit` for # of conversations (default 10, max 50) and `messageLimit` for # of messages per conversation (default 4, max 20).",
+    "Return the most recent LinkedIn conversations for a project. Each item includes receiver (contact) info, sender profile info, and the last N messages (newest→oldest). `limit` = # of conversations (default 10, max 50). `messageLimit` = # of messages per conversation (default 4, max 20). Optional %LIKE% (case-insensitive substring) filters: `contactName` (receiver name / company / display) and `senderName` (sender display / label).",
     {
       projectId: z.string().uuid().describe("Supabase project id (from find_projects)."),
       limit: z
@@ -47,6 +57,16 @@ export function registerFindProjectLinkedinConversationsTool(server: McpServer):
         .max(20)
         .optional()
         .describe("Max number of recent messages per conversation (default 4)."),
+      contactName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Case-insensitive substring match on contact (receiver) name or company. LIKE '%value%'."),
+      senderName: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Case-insensitive substring match on sender display name / label. LIKE '%value%'."),
     },
     async (args) => {
       const client = getSupabase();
@@ -61,8 +81,17 @@ export function registerFindProjectLinkedinConversationsTool(server: McpServer):
 
       const limit = args.limit ?? 10;
       const messageLimit = args.messageLimit ?? 4;
+      const contactNeedle = args.contactName?.trim() ?? "";
+      const senderNeedle = args.senderName?.trim() ?? "";
+      const hasFilter = contactNeedle.length > 0 || senderNeedle.length > 0;
 
-      const listRes = await getConversationsList(client, args.projectId, { limit, offset: 0 });
+      // When filtering, pull a larger window and apply filters in memory, then truncate.
+      const fetchLimit = hasFilter ? FILTER_SCAN_LIMIT : limit;
+
+      const listRes = await getConversationsList(client, args.projectId, {
+        limit: fetchLimit,
+        offset: 0,
+      });
       if (listRes.error) {
         return {
           content: [{ type: "text" as const, text: `Error: ${listRes.error}` }],
@@ -70,7 +99,25 @@ export function registerFindProjectLinkedinConversationsTool(server: McpServer):
         };
       }
 
-      const conversations = listRes.data;
+      let conversations = listRes.data;
+      const totalBeforeFilter = conversations.length;
+
+      if (contactNeedle) {
+        conversations = conversations.filter(
+          (c) =>
+            likeMatch(c.receiverDisplayName, contactNeedle) ||
+            likeMatch(c.receiverCompanyName, contactNeedle)
+        );
+      }
+      if (senderNeedle) {
+        conversations = conversations.filter((c) =>
+          likeMatch(c.senderDisplayName, senderNeedle)
+        );
+      }
+
+      if (hasFilter) {
+        conversations = conversations.slice(0, limit);
+      }
 
       const contactUuids = [
         ...new Set(
@@ -191,7 +238,18 @@ export function registerFindProjectLinkedinConversationsTool(server: McpServer):
         project_id: args.projectId,
         returned: rich.length,
         total_conversations: listRes.total,
+        scanned_before_filter: hasFilter ? totalBeforeFilter : undefined,
         message_limit_per_conversation: messageLimit,
+        filters: hasFilter
+          ? {
+              contact_name: contactNeedle || null,
+              sender_name: senderNeedle || null,
+              note:
+                totalBeforeFilter >= FILTER_SCAN_LIMIT
+                  ? `Only scanned the latest ${FILTER_SCAN_LIMIT} conversations; narrow the query if needed.`
+                  : undefined,
+            }
+          : undefined,
         conversations: rich,
       };
 
