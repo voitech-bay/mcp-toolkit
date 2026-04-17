@@ -45,7 +45,7 @@ export interface GenerationFormat {
   paragraphs: number;
 }
 
-type PromptInput = {
+export type PromptInput = {
   tone: GenerationTone;
   goal: GenerationGoal;
   ctaStyle: GenerationCtaStyle;
@@ -69,6 +69,15 @@ type PromptInput = {
   messages: Array<Record<string, unknown>>;
 };
 
+export interface GeneratedMessageQuality {
+  questionCount: number;
+  maxQuestionsOk: boolean;
+  paragraphCount: number;
+  paragraphCountOk: boolean;
+  hasSpecificPersonalization: boolean;
+  warnings: string[];
+}
+
 function methodologyInstruction(methodology: MethodologyPreset): string {
   if (methodology === "pas") {
     return "Methodology=PAS (Problem-Agitate-Solution): 1) state concrete problem from context, 2) agitate business impact briefly, 3) propose practical path to improvement, 4) close with low-friction CTA.";
@@ -80,19 +89,6 @@ function methodologyInstruction(methodology: MethodologyPreset): string {
     return "Methodology=BAB (Before-After-Bridge): describe current state, show improved future state, then bridge with specific next step.";
   }
   return "Methodology=JTBD: center on job-to-be-done and desired progress; frame message around what recipient needs to accomplish, then offer concise help path.";
-}
-
-function methodologyExample(methodology: MethodologyPreset): string {
-  if (methodology === "pas") {
-    return 'Example(PAS): "Saw many RevOps teams lose pipeline from slow lead routing (problem). Even 1-day delays can kill intent and CAC efficiency (agitate). We helped automate triage in CRM with minimal setup - open to a quick walkthrough?"';
-  }
-  if (methodology === "aida") {
-    return 'Example(AIDA): "Noticed your team doubled outbound this quarter (attention). Curious how reps handle follow-up prioritization today (interest). We usually raise reply rate by tightening timing + targeting (desire). Worth a 15-min chat next week?"';
-  }
-  if (methodology === "bab") {
-    return 'Example(BAB): "Before: reps manually chase warm leads and context gets lost. After: top-intent accounts get instant, personalized follow-up. Bridge: we can show the playbook we use with similar SaaS teams - interested?"';
-  }
-  return 'Example(JTBD): "If job is to revive stalled opportunities before quarter close, priority is fast signal + next-best action. We built a lightweight workflow for that exact outcome. Want the template?"';
 }
 
 function readingLevelPresetInstruction(level: ReadingLevelPreset): string {
@@ -180,9 +176,9 @@ function asCleanText(v: unknown): string | null {
   return t ? t : null;
 }
 
-function toMessageLines(messages: Array<Record<string, unknown>>): string {
+function toMessageLines(messages: Array<Record<string, unknown>>, max = 8): string {
   if (messages.length === 0) return "(no conversation history)";
-  const recent = messages.slice(-15);
+  const recent = messages.slice(-Math.max(1, max));
   return recent
     .map((m) => {
       const type = String(m.type ?? m.linkedin_type ?? "").toLowerCase();
@@ -201,7 +197,7 @@ function normalizeMessageExamples(examples: string[] | undefined): string[] {
     .slice(0, 8);
 }
 
-function contactBlock(contact: Record<string, unknown>, mentionBlocks: MentionBlock[]): string {
+function contactBlock(contact: Record<string, unknown>, mentionBlocks: MentionBlock[]): string[] {
   const lines: string[] = [];
   const fullName =
     asCleanText(contact.name) ||
@@ -222,11 +218,11 @@ function contactBlock(contact: Record<string, unknown>, mentionBlocks: MentionBl
     const posts = asCleanText(contact.posts);
     if (posts) lines.push(`Latest posts: ${posts}`);
   }
-  return lines.join("\n");
+  return lines;
 }
 
-function companyBlock(company: Record<string, unknown> | null, mentionBlocks: MentionBlock[]): string {
-  if (!company) return "Company info: unavailable";
+function companyBlock(company: Record<string, unknown> | null, mentionBlocks: MentionBlock[]): string[] {
+  if (!company) return ["Company info: unavailable"];
   const lines: string[] = [];
   const name = asCleanText(company.name);
   if (name) lines.push(`Name: ${name}`);
@@ -242,7 +238,74 @@ function companyBlock(company: Record<string, unknown> | null, mentionBlocks: Me
     const about = asCleanText(company.about);
     if (about) lines.push(`About: ${about}`);
   }
-  return lines.length > 0 ? lines.join("\n") : "Company info: unavailable";
+  return lines.length > 0 ? lines : ["Company info: unavailable"];
+}
+
+function gatherTopSignals(input: PromptInput, mentionBlocks: MentionBlock[]): string[] {
+  const out: string[] = [];
+  const last = input.messages.length > 0 ? input.messages[input.messages.length - 1] : null;
+  const lastText = last ? asCleanText(last.text) : null;
+  const lastType = last ? String(last.type ?? last.linkedin_type ?? "").toLowerCase() : "";
+  if (lastText) {
+    const who = lastType === "outbox" ? "you" : "contact";
+    out.push(`Most recent message from ${who}: ${lastText}`);
+  }
+  const contactTitle = asCleanText(input.contact.title) || asCleanText(input.contact.position);
+  if (contactTitle) out.push(`Contact role: ${contactTitle}`);
+  const companyName = asCleanText(input.company?.name);
+  if (companyName) out.push(`Company: ${companyName}`);
+  if (mentionBlocks.includes("company_industry")) {
+    const industry = asCleanText(input.company?.industry);
+    if (industry) out.push(`Industry: ${industry}`);
+  }
+  return out.slice(0, 6);
+}
+
+function questionCount(text: string): number {
+  const m = text.match(/\?/g);
+  return m ? m.length : 0;
+}
+
+function paragraphCount(text: string): number {
+  return text
+    .split(/\n{2,}/)
+    .map((x) => x.trim())
+    .filter(Boolean).length;
+}
+
+function hasPersonalization(text: string, input: PromptInput): boolean {
+  const lc = text.toLowerCase();
+  const probes = [
+    asCleanText(input.contact.first_name),
+    asCleanText(input.contact.name),
+    asCleanText(input.contact.title),
+    asCleanText(input.contact.position),
+    asCleanText(input.company?.name),
+    asCleanText(input.company?.industry),
+  ]
+    .filter((x): x is string => Boolean(x))
+    .map((x) => x.toLowerCase());
+  return probes.some((p) => p.length >= 3 && lc.includes(p));
+}
+
+export function evaluateGeneratedMessageQuality(text: string, input: PromptInput): GeneratedMessageQuality {
+  const qCount = questionCount(text);
+  const pCount = paragraphCount(text);
+  const maxQuestionsOk = qCount <= input.questionCountMax;
+  const paragraphCountOk = pCount === input.format.paragraphs;
+  const personalized = hasPersonalization(text, input);
+  const warnings: string[] = [];
+  if (!maxQuestionsOk) warnings.push(`questions_exceeded:${qCount}>${input.questionCountMax}`);
+  if (!paragraphCountOk) warnings.push(`paragraph_mismatch:${pCount}!=${input.format.paragraphs}`);
+  if (!personalized) warnings.push("weak_personalization_signal");
+  return {
+    questionCount: qCount,
+    maxQuestionsOk,
+    paragraphCount: pCount,
+    paragraphCountOk,
+    hasSpecificPersonalization: personalized,
+    warnings,
+  };
 }
 
 export function buildGeneratedMessagePrompt(input: PromptInput): {
@@ -253,56 +316,44 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
   const mentionBlocks = [...new Set(input.mentionBlocks)];
   const messageExamples = normalizeMessageExamples(input.messageExamples);
   const hasMessageExamples = messageExamples.length > 0;
+  const topSignals = gatherTopSignals(input, mentionBlocks);
+  const objective = `${input.goal}/${input.ctaType}/${input.ctaStyle}`;
   const systemPrompt = [
-    "You write outbound LinkedIn replies.",
-    "Keep it natural and specific.",
+    "YOU ARE OUTBOUND GTM MESSAGE MANAGER for generating high-converting outbound messages.",
+    "You write high-converting LinkedIn reply drafts.",
+    "Primary objective: maximize likelihood of a positive reply while staying factual and specific.",
+    "Instruction precedence (highest to lowest): factual grounding > hard format constraints > additional instructions > style examples > tone preferences.",
     "Never invent facts not present in context.",
-    `Goal: ${input.goal}.`,
-    `CTA style: ${input.ctaStyle}.`,
-    `Tone: ${input.tone}.`,
-    `Personalization depth: ${input.personalizationDepth}.`,
-    `Reading level: ${input.readingLevel}.`,
-    `Reading level preset: ${input.readingLevelPreset}.`,
-    `Tone preset: ${input.tonePreset}.`,
-    `Length preset: ${input.lengthPreset}.`,
-    `Methodology: ${input.methodology}.`,
-    `Focus: ${input.focus}.`,
-    `CTA type: ${input.ctaType}.`,
-    `Formality: ${input.formality}.`,
-    formalityInstruction(input.formality),
-    `Emoji policy: ${input.emojiPolicy}.`,
-    emojiPolicyInstruction(input.emojiPolicy),
-    `Use at most ${input.questionCountMax} question(s).`,
-    `Output exactly ${input.format.paragraphs} paragraph(s) and about ${input.format.sentences} sentence(s) total.`,
+    `Strategy: objective=${objective}; toneProfile=${input.tonePreset}; readingLevel=${input.readingLevelPreset}; length=${input.lengthPreset}.`,
+    `Hard constraints: questions<=${input.questionCountMax}; paragraphs=${input.format.paragraphs}; sentences~${input.format.sentences}.`,
     methodologyInstruction(input.methodology),
-    methodologyExample(input.methodology),
     readingLevelPresetInstruction(input.readingLevelPreset),
     tonePresetInstruction(input.tonePreset),
     lengthPresetInstruction(input.lengthPreset),
     focusInstruction(input.focus),
     ctaTypeInstruction(input.ctaType),
-    ...(hasMessageExamples
-      ? [
-          "MANDATORY: Message examples provided by user. Match their writing style, rhythm, and structure while still grounding claims in provided context facts.",
-        ]
-      : []),
-    "If context is missing for a claim, omit the claim.",
-    "Do not mention these instruction names in final output.",
-    "Return only final message text. No labels or explanation.",
+    formalityInstruction(input.formality),
+    emojiPolicyInstruction(input.emojiPolicy),
+    ...(hasMessageExamples ? ["Use message examples to match rhythm and wording style, but do not copy lines verbatim."] : []),
+    "If context missing for claim, omit claim.",
+    "Return final message text only.",
   ].join(" ");
 
-  const sections = [
-    "Conversation history:",
-    mentionBlocks.includes("conversation_recap")
-      ? toMessageLines(input.messages)
-      : "(conversation recap disabled by user)",
-    "",
-    "Contact context:",
-    contactBlock(input.contact, mentionBlocks),
-    "",
-    "Company context:",
-    companyBlock(input.company, mentionBlocks),
-  ];
+  const sections: string[] = [];
+  sections.push("Top signals (highest relevance):");
+  if (topSignals.length > 0) sections.push(...topSignals.map((x) => `- ${x}`));
+  else sections.push("- (none)");
+  sections.push("");
+  sections.push("Conversation recap:");
+  sections.push(
+    mentionBlocks.includes("conversation_recap") ? toMessageLines(input.messages, 8) : "(conversation recap disabled)"
+  );
+  sections.push("");
+  sections.push("Contact context:");
+  sections.push(...contactBlock(input.contact, mentionBlocks).map((x) => `- ${x}`));
+  sections.push("");
+  sections.push("Company context:");
+  sections.push(...companyBlock(input.company, mentionBlocks).map((x) => `- ${x}`));
   if (hasMessageExamples) {
     sections.push("", "Message examples:", ...messageExamples.map((x) => `- ${x}`));
   }
@@ -331,6 +382,7 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
       format: input.format,
       mentionBlocks,
       messageExamples,
+      topSignals,
       additionalInstructions: input.additionalInstructions?.trim() || null,
       contact: input.contact,
       company: input.company,

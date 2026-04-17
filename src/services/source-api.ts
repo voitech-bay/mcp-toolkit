@@ -5,8 +5,8 @@
  * Contacts and companies list sync use **date-partitioned** requests by default so Elasticsearch
  * `from`+`size` stays within ~10k (see `SOURCE_API_MAX_OFFSET_PLUS_LIMIT`). Flow leads use a single
  * unfiltered `POST /flows/api/flows-leads/list` pass (no `filter.created_at` — not supported like
- * `LeadFilter`) plus client-side incremental cursor on `created_at`. Leads use
- * `POST /leads/api/leads/count` (GetSales) to size buckets before paging.
+ * `LeadFilter`) plus client-side incremental cursor on `created_at`. Leads/companies bucket by date
+ * and split buckets only when Elasticsearch pagination window is exceeded.
  */
 
 import { SyncCancelledError } from "./sync-cancellation.js";
@@ -17,7 +17,6 @@ export interface ApiCredentials {
 }
 
 const CONTACTS_PATH = "/leads/api/leads/search";
-const LEADS_COUNT_PATH = "/leads/api/leads/count";
 const LINKEDIN_MESSAGES_PATH = "/flows/api/linkedin-messages";
 const SENDER_PROFILES_PATH = "/flows/api/sender-profiles";
 const FLOWS_PATH = "/flows/api/flows";
@@ -283,13 +282,12 @@ export type FetchLogger = (msg: string, data?: Record<string, unknown>) => Promi
 /** Calendar date bounds (YYYY-MM-DD) for GetSales `created_at` / `updated_at` filter objects. */
 export type DateRangeFilter = { from: string; to: string };
 
-/**
- * Wire format for date range filters per GetSales bundled API (YYYY-MM-DD):
- * - [searchleads.md](https://api.getsales.io/bundled/leads-(contacts)/searchleads.md): `filter.created_at`
- * - [countleads.md](https://api.getsales.io/bundled/leads-(contacts)/countleads.md): `filter.leadFilter.created_at`
- * - [listcompanies.md](https://api.getsales.io/bundled/companies-(accounts)/listcompanies.md): `created_at` / `updated_at` same object shape
- * Example: `{"from":"2025-01-01","to":"2025-03-01"}`. Do **not** use on `POST /flows/api/flows-leads/list`.
- */
+/** GetSales leads date filter format: ["YYYY-MM-DD","YYYY-MM-DD"] (for leadFilter.created_at). */
+function toGetSalesLeadDateRangeArray(range: DateRangeFilter): [string, string] {
+  return [range.from, range.to];
+}
+
+/** GetSales companies date filter format: { from, to }. */
 function toGetSalesDateFilter(range: DateRangeFilter): { from: string; to: string } {
   return { from: range.from, to: range.to };
 }
@@ -327,30 +325,28 @@ function addDaysYmd(ymd: string, days: number): string {
 }
 
 /** Inclusive month buckets from `rangeTo` month down to `rangeFrom` month (each bucket clipped to [rangeFrom, rangeTo]). */
-function enumerateMonthBucketsDescending(rangeFrom: string, rangeTo: string): DateRangeFilter[] {
+function enumerateMonthBucketsDescending(
+  rangeFrom: string,
+  rangeTo: string,
+  monthsPerBucket = 1
+): DateRangeFilter[] {
+  const span = Number.isFinite(monthsPerBucket) ? Math.max(1, Math.floor(monthsPerBucket)) : 1;
   const start = parseYmdUtc(rangeFrom);
   const end = parseYmdUtc(rangeTo);
   const out: DateRangeFilter[] = [];
-  let y = end.getUTCFullYear();
-  let mo = end.getUTCMonth();
-  const limitY = start.getUTCFullYear();
-  const limitM = start.getUTCMonth();
+  let cursor = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1));
+  const startMonth = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), 1));
   const startT = start.getTime();
   const endT = end.getTime();
-  while (y > limitY || (y === limitY && mo >= limitM)) {
-    const ms = new Date(Date.UTC(y, mo, 1));
-    const me = new Date(Date.UTC(y, mo + 1, 0));
+  while (cursor.getTime() >= startMonth.getTime()) {
+    const ms = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() - (span - 1), 1));
+    const me = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 0));
     const bf = Math.max(ms.getTime(), startT);
     const bt = Math.min(me.getTime(), endT);
     if (bf <= bt) {
       out.push({ from: formatYmdUtc(new Date(bf)), to: formatYmdUtc(new Date(bt)) });
     }
-    if (mo === 0) {
-      y -= 1;
-      mo = 11;
-    } else {
-      mo -= 1;
-    }
+    cursor = new Date(Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() - span, 1));
   }
   return out;
 }
@@ -368,60 +364,6 @@ function splitDateRangeHalves(range: DateRangeFilter): [DateRangeFilter, DateRan
   if (left.from > left.to) return [right, right];
   if (right.from > right.to) return [left, left];
   return [left, right];
-}
-
-/**
- * POST /leads/api/leads/count — see [countleads.md](https://api.getsales.io/bundled/leads-(contacts)/countleads.md):
- * `filter.all`, `filter.leadFilter.created_at` date range `{ from, to }`.
- */
-async function countLeadsForDateRange(
-  config: { baseUrl: string; apiKey: string },
-  createdAtRange: DateRangeFilter
-): Promise<number> {
-  const url = `${config.baseUrl}${LEADS_COUNT_PATH}`;
-  const payloadPrimary = {
-    filter: {
-      all: true,
-      leadFilter: {
-        created_at: toGetSalesDateFilter(createdAtRange),
-      },
-    },
-  };
-  try {
-    const res = await fetchJson<{ count?: number }>(url, config.apiKey, {
-      method: "POST",
-      body: JSON.stringify(payloadPrimary),
-    });
-    await sleep(DELAY_MS);
-    return res.count ?? 0;
-  } catch (e) {
-    console.error("Error counting leads for date range", JSON.stringify(payloadPrimary));
-    // Some GetSales deployments reject { from, to } operators on LeadFilter.
-    const msg = e instanceof Error ? e.message : String(e ?? "");
-    const shouldRetryWithGteLte =
-      msg.includes("Wrong filter operator") &&
-      msg.includes("LeadFilter") &&
-      msg.includes("operator: from");
-    if (!shouldRetryWithGteLte) throw e;
-
-    const payloadFallback = {
-      filter: {
-        all: true,
-        leadFilter: {
-          created_at: {
-            gte: createdAtRange.from,
-            lte: createdAtRange.to,
-          },
-        },
-      },
-    };
-    const res = await fetchJson<{ count?: number }>(url, config.apiKey, {
-      method: "POST",
-      body: JSON.stringify(payloadFallback),
-    });
-    await sleep(DELAY_MS);
-    return res.count ?? 0;
-  }
 }
 
 function cursorDateOnly(iso: string | null): string | null {
@@ -496,7 +438,9 @@ async function fetchContactsSearchPass(
   let lastTotal: number | undefined;
   const filter: Record<string, unknown> =
     createdAtRange != null
-      ? { created_at: toGetSalesDateFilter(createdAtRange) }
+      ? {
+          created_at: toGetSalesLeadDateRangeArray(createdAtRange),
+        }
       : {};
   try {
     while (true) {
@@ -598,58 +542,41 @@ async function fetchContactsBucketRecursive(
       fetchedCount: 0,
     };
   }
-  let count = 0;
-  try {
-    count = await countLeadsForDateRange(config, range);
-  } catch (e) {
-    if (e instanceof SyncCancelledError) throw e;
-    const fe = fetchErrorFromUnknown(e);
-    console.error("Error counting leads for date range", JSON.stringify(range));
-    return { data: [], error: fe.error, errorDetail: fe.errorDetail, fetchedCount: 0 };
+  const pass = await fetchContactsSearchPass(sinceCreatedAt, config, onLog, options, range);
+  if (pass.error == null) return pass;
+  if (!pass.error.includes(String(SOURCE_API_MAX_OFFSET_PLUS_LIMIT)) && !pass.error.includes("cannot paginate past")) {
+    return pass;
   }
-  if (onLog) {
-    await onLog(`contacts: count for ${range.from}..${range.to}`, { count });
+  if (range.from === range.to) {
+    return pass;
   }
-  if (count === 0) {
-    return { data: [], error: null, fetchedCount: 0 };
+  const [left, right] = splitDateRangeHalves(range);
+  if (
+    left.from === range.from &&
+    left.to === range.to &&
+    right.from === range.from &&
+    right.to === range.to
+  ) {
+    return pass;
   }
-  if (count > SOURCE_API_MAX_OFFSET_PLUS_LIMIT) {
-    if (range.from === range.to) {
-      return {
-        data: [],
-        error: `contacts: ${count} rows on ${range.from} exceed Elasticsearch page limit (${SOURCE_API_MAX_OFFSET_PLUS_LIMIT})`,
-        fetchedCount: 0,
-      };
-    }
-    const [left, right] = splitDateRangeHalves(range);
-    if (
-      left.from === range.from &&
-      left.to === range.to &&
-      right.from === range.from &&
-      right.to === range.to
-    ) {
-      return fetchContactsSearchPass(sinceCreatedAt, config, onLog, options, range);
-    }
-    if (left.from > left.to || right.from > right.to) {
-      return fetchContactsSearchPass(sinceCreatedAt, config, onLog, options, range);
-    }
-    const a = await fetchContactsBucketRecursive(sinceCreatedAt, config, onLog, options, left, depth + 1);
-    if (a.error) return a;
-    const b = await fetchContactsBucketRecursive(sinceCreatedAt, config, onLog, options, right, depth + 1);
-    return {
-      data: [],
-      error: b.error,
-      fetchedCount: a.fetchedCount + b.fetchedCount,
-      errorDetail: b.errorDetail,
-    };
+  if (left.from > left.to || right.from > right.to) {
+    return pass;
   }
-  return fetchContactsSearchPass(sinceCreatedAt, config, onLog, options, range);
+  const a = await fetchContactsBucketRecursive(sinceCreatedAt, config, onLog, options, left, depth + 1);
+  if (a.error) return a;
+  const b = await fetchContactsBucketRecursive(sinceCreatedAt, config, onLog, options, right, depth + 1);
+  return {
+    data: [],
+    error: b.error,
+    fetchedCount: a.fetchedCount + b.fetchedCount,
+    errorDetail: b.errorDetail,
+  };
 }
 
 /**
  * Fetch contacts from source API (newest first). Stops when a row has created_at <= sinceCreatedAt.
  * If sinceCreatedAt is null, fetches all (subject to empty-month streak / max years when no dateRange).
- * Uses monthly date buckets + POST /leads/api/leads/count to stay under Elasticsearch 10k offset limit.
+ * Uses monthly date buckets; if a bucket hits Elasticsearch 10k window, recursively split by date.
  */
 export async function fetchContactsIncremental(
   sinceCreatedAt: string | null,
@@ -686,7 +613,7 @@ export async function fetchContactsIncremental(
     rangeFrom = oldestAllowed;
   }
 
-  const months = enumerateMonthBucketsDescending(rangeFrom, rangeTo);
+  const months = enumerateMonthBucketsDescending(rangeFrom, rangeTo, 6);
   let totalFetched = 0;
   let streakEmpty = 0;
   let firstError: string | null = null;

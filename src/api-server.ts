@@ -77,6 +77,11 @@ import {
   handlePostGenerateMessage,
   handleGetGeneratedMessages,
   handleDeleteGeneratedMessage,
+  handleGetGeneratedMessagePresets,
+  handleGetGeneratedMessagePresetVersions,
+  handlePostSaveGeneratedMessagePreset,
+  handlePostSetGeneratedMessagePresetDefault,
+  handlePostRollbackGeneratedMessagePreset,
   handleFirefliesWebhook,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
@@ -187,6 +192,15 @@ const server = createServer(async (req, res) => {
   const generatedMessageIdMatch =
     pathname !== "/api/generated-messages/generate" &&
     pathname.match(/^\/api\/generated-messages\/([^/]+)$/);
+  const generatedMessagePresetVersionsMatch = pathname.match(
+    /^\/api\/generated-message-presets\/([^/]+)\/versions$/
+  );
+  const generatedMessagePresetSetDefaultMatch = pathname.match(
+    /^\/api\/generated-message-presets\/([^/]+)\/set-default$/
+  );
+  const generatedMessagePresetRollbackMatch = pathname.match(
+    /^\/api\/generated-message-presets\/([^/]+)\/rollback$/
+  );
 
   try {
     if (pathname.startsWith("/mcp")) {
@@ -236,6 +250,22 @@ const server = createServer(async (req, res) => {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Method not allowed" }));
       }
+      return;
+    }
+
+    if (generatedMessagePresetVersionsMatch) {
+      const presetId = decodeURIComponent(generatedMessagePresetVersionsMatch[1]);
+      await handleGetGeneratedMessagePresetVersions(req, res, presetId);
+      return;
+    }
+    if (generatedMessagePresetSetDefaultMatch) {
+      const presetId = decodeURIComponent(generatedMessagePresetSetDefaultMatch[1]);
+      await handlePostSetGeneratedMessagePresetDefault(req, res, presetId);
+      return;
+    }
+    if (generatedMessagePresetRollbackMatch) {
+      const presetId = decodeURIComponent(generatedMessagePresetRollbackMatch[1]);
+      await handlePostRollbackGeneratedMessagePreset(req, res, presetId);
       return;
     }
 
@@ -575,6 +605,22 @@ const server = createServer(async (req, res) => {
       case "/api/generated-messages/generate":
         if (req.method === "POST") {
           await handlePostGenerateMessage(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/generated-message-presets":
+        if (req.method === "GET") {
+          await handleGetGeneratedMessagePresets(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/generated-message-presets/save":
+        if (req.method === "POST") {
+          await handlePostSaveGeneratedMessagePreset(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

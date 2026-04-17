@@ -73,6 +73,12 @@ import {
   createGeneratedMessage,
   listGeneratedMessagesByContact,
   deleteGeneratedMessageById,
+  listGeneratedMessagePresets,
+  listGeneratedMessagePresetVersions,
+  setGeneratedMessagePresetDefault,
+  getGeneratedMessagePresetById,
+  getGeneratedMessagePresetByHash,
+  createGeneratedMessagePresetVersion,
   insertFirefliesWebhookEvent,
   updateFirefliesWebhookEventProcessing,
   PROJECT_COMPANIES_TABLE,
@@ -98,6 +104,7 @@ import { verifyGetSalesCredentials } from "./services/source-api.js";
 import { listOpenRouterModels, generateOpenRouterMessage } from "./services/openrouter.js";
 import {
   buildGeneratedMessagePrompt,
+  evaluateGeneratedMessageQuality,
   type GenerationTone,
   type MentionBlock,
   type GenerationGoal,
@@ -113,6 +120,11 @@ import {
   type FocusPreset,
   type CtaType,
 } from "./services/generated-message-prompt.js";
+import {
+  normalizePresetWithLlm,
+  normalizationHash,
+  type RawPresetSettings,
+} from "./services/generated-message-preset-normalizer.js";
 import {
   requestSyncCancellation,
   SyncCancelledError,
@@ -134,6 +146,15 @@ import {
   buildContextAgentJob,
   isTranscriptReadyEvent,
 } from "./services/fireflies-webhook.js";
+import {
+  cancelBatchWorkerJob,
+  createBatchWorkerJobFromEnrichment,
+  getLegacyBatchDetailFromBatchWorker,
+  isBatchWorkerEnabled,
+  listLegacyQueueFromBatchWorker,
+  listLegacyRunsFromBatchWorker,
+  retryBatchWorkerJob,
+} from "./services/batch-worker-client.js";
 
 export { generateContextText };
 
@@ -822,6 +843,258 @@ export async function handleGetGeneratedMessages(
   res.end(JSON.stringify({ data: result.data, total: result.total }));
 }
 
+/** GET /api/generated-message-presets?projectId=... */
+export async function handleGetGeneratedMessagePresets(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const projectId = getQueryParams(req).get("projectId")?.trim() ?? "";
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const result = await listGeneratedMessagePresets(client, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** GET /api/generated-message-presets/:id/versions */
+export async function handleGetGeneratedMessagePresetVersions(
+  req: IncomingMessage,
+  res: ServerResponse,
+  presetId: string
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await listGeneratedMessagePresetVersions(client, presetId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** POST /api/generated-message-presets/:id/set-default */
+export async function handlePostSetGeneratedMessagePresetDefault(
+  req: IncomingMessage,
+  res: ServerResponse,
+  presetId: string
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const result = await setGeneratedMessagePresetDefault(client, presetId);
+  if (result.error || !result.data) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error ?? "Failed to set default preset." }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+/** POST /api/generated-message-presets/:id/rollback */
+export async function handlePostRollbackGeneratedMessagePreset(
+  req: IncomingMessage,
+  res: ServerResponse,
+  presetId: string
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const current = await getGeneratedMessagePresetById(client, presetId);
+  if (current.error || !current.data) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: current.error ?? "Preset not found." }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { isDefault?: boolean } | undefined;
+  const created = await createGeneratedMessagePresetVersion(client, {
+    projectId: current.data.project_id,
+    name: current.data.name,
+    icon: current.data.icon,
+    isDefault: body?.isDefault === true || current.data.is_default === true,
+    status: "active",
+    rawSettings: current.data.raw_settings,
+    normalizedSystemPrompt: current.data.normalized_system_prompt,
+    normalizedStrategy: current.data.normalized_strategy,
+    normalizationModel: current.data.normalization_model,
+    normalizationHash: current.data.normalization_hash,
+    qualityNotes: { rollbackFromPresetId: current.data.id },
+  });
+  if (created.error || !created.data) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: created.error ?? "Failed to rollback preset." }));
+    return;
+  }
+  if (body?.isDefault === true || current.data.is_default === true) {
+    await setGeneratedMessagePresetDefault(client, created.data.id);
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ data: created.data }));
+}
+
+/** POST /api/generated-message-presets/save */
+export async function handlePostSaveGeneratedMessagePreset(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        projectId?: string;
+        name?: string;
+        icon?: string | null;
+        isDefault?: boolean;
+        model?: string;
+        settings?: RawPresetSettings;
+      }
+    | undefined;
+  const projectId = body?.projectId?.trim() ?? "";
+  const name = body?.name?.trim() ?? "";
+  const settings =
+    typeof body?.settings === "object" && body?.settings != null
+      ? (body.settings as RawPresetSettings)
+      : null;
+  if (!projectId || !name || settings == null) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId, name, settings are required." }));
+    return;
+  }
+  const hash = normalizationHash(settings);
+  const cached = await getGeneratedMessagePresetByHash(client, projectId, name, hash);
+  if (cached.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: cached.error }));
+    return;
+  }
+  if (cached.data) {
+    const reused = await createGeneratedMessagePresetVersion(client, {
+      projectId,
+      name,
+      icon: body?.icon ?? null,
+      isDefault: body?.isDefault === true,
+      rawSettings: settings,
+      normalizedSystemPrompt: cached.data.normalized_system_prompt,
+      normalizedStrategy: cached.data.normalized_strategy,
+      normalizationModel: cached.data.normalization_model,
+      normalizationHash: cached.data.normalization_hash,
+      qualityNotes: { reusedFromPresetId: cached.data.id },
+    });
+    if (reused.error || !reused.data) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: reused.error ?? "Failed to save preset version." }));
+      return;
+    }
+    if (body?.isDefault === true) {
+      await setGeneratedMessagePresetDefault(client, reused.data.id);
+    }
+    console.log(`[generated-message-presets] reused normalized strategy for ${projectId}/${name}`);
+    res.writeHead(201);
+    res.end(JSON.stringify({ data: reused.data, reused: true }));
+    return;
+  }
+
+  const normalized = await normalizePresetWithLlm({
+    rawSettings: settings,
+    model: body?.model,
+  });
+  const created = await createGeneratedMessagePresetVersion(client, {
+    projectId,
+    name,
+    icon: body?.icon ?? null,
+    isDefault: body?.isDefault === true,
+    status: normalized.error ? "failed" : "active",
+    rawSettings: settings,
+    normalizedSystemPrompt: normalized.strategy.systemPromptCompact,
+    normalizedStrategy: normalized.strategy as unknown as Record<string, unknown>,
+    normalizationModel: normalized.model,
+    normalizationHash: hash,
+    qualityNotes: normalized.error ? { normalizationError: normalized.error } : null,
+  });
+  if (created.error || !created.data) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: created.error ?? "Failed to save preset." }));
+    return;
+  }
+  if (normalized.error) {
+    console.warn(
+      `[generated-message-presets] normalization fallback used for ${projectId}/${name}: ${normalized.error}`
+    );
+  } else {
+    console.log(`[generated-message-presets] normalized preset saved for ${projectId}/${name}`);
+  }
+  if (body?.isDefault === true) {
+    await setGeneratedMessagePresetDefault(client, created.data.id);
+  }
+  res.writeHead(201);
+  res.end(JSON.stringify({ data: created.data, reused: false, normalizationError: normalized.error ?? null }));
+}
+
 /** DELETE /api/generated-messages/:id */
 export async function handleDeleteGeneratedMessage(
   req: IncomingMessage,
@@ -880,6 +1153,7 @@ export async function handlePostGenerateMessage(
         additionalInstructions?: string;
         messageExamples?: string[];
         hypothesisId?: string | null;
+        presetId?: string | null;
         temperature?: number;
         goal?: GenerationGoal;
         ctaStyle?: GenerationCtaStyle;
@@ -902,6 +1176,10 @@ export async function handlePostGenerateMessage(
   const hypothesisId =
     typeof body?.hypothesisId === "string" && body.hypothesisId.trim()
       ? body.hypothesisId.trim()
+      : null;
+  const presetId =
+    typeof body?.presetId === "string" && body.presetId.trim()
+      ? body.presetId.trim()
       : null;
   if (!projectId || !conversationUuid || !model) {
     res.writeHead(400);
@@ -1030,10 +1308,24 @@ export async function handlePostGenerateMessage(
     company: (company as Record<string, unknown> | null) ?? null,
     messages: (conv.messages ?? []) as Array<Record<string, unknown>>,
   });
+  let normalizedPreset: { id: string; model: string; strategy: Record<string, unknown> } | null = null;
+  let resolvedSystemPrompt = prompt.systemPrompt;
+  if (presetId != null) {
+    const preset = await getGeneratedMessagePresetById(client, presetId);
+    if (!preset.error && preset.data && preset.data.status === "active") {
+      resolvedSystemPrompt = preset.data.normalized_system_prompt;
+      normalizedPreset = {
+        id: preset.data.id,
+        model: preset.data.normalization_model,
+        strategy: preset.data.normalized_strategy,
+      };
+      console.log(`[generated-message] using normalized preset ${preset.data.id}`);
+    }
+  }
 
   const llmRes = await generateOpenRouterMessage({
     model,
-    systemPrompt: prompt.systemPrompt,
+    systemPrompt: resolvedSystemPrompt,
     userPrompt: prompt.userPrompt,
     temperature,
     user: `contact:${contactId}`,
@@ -1058,6 +1350,29 @@ export async function handlePostGenerateMessage(
     res.end(JSON.stringify({ error: llmRes.error ?? "Generation failed" }));
     return;
   }
+  const quality = evaluateGeneratedMessageQuality(llmRes.data.text, {
+    tone,
+    goal,
+    ctaStyle,
+    personalizationDepth,
+    readingLevel,
+    formality,
+    emojiPolicy,
+    questionCountMax,
+    readingLevelPreset,
+    tonePreset,
+    lengthPreset,
+    methodology,
+    focus,
+    ctaType,
+    format,
+    mentionBlocks,
+    additionalInstructions: typeof body?.additionalInstructions === "string" ? body.additionalInstructions : "",
+    messageExamples,
+    contact,
+    company: (company as Record<string, unknown> | null) ?? null,
+    messages: (conv.messages ?? []) as Array<Record<string, unknown>>,
+  });
 
   const insertRes = await createGeneratedMessage(client, {
     hypothesisId,
@@ -1070,6 +1385,9 @@ export async function handlePostGenerateMessage(
       provider_model: llmRes.data.model,
       conversation_uuid: conversationUuid,
       temperature,
+      preset_id: presetId,
+      normalized_preset: normalizedPreset,
+      quality,
       ...prompt.contextPayload,
     },
   });
@@ -2608,6 +2926,27 @@ export async function handlePostEnrichmentEnqueue(
     );
     return;
   }
+  if (isBatchWorkerEnabled()) {
+    try {
+      const created = await createBatchWorkerJobFromEnrichment({
+        projectId,
+        entityType,
+        agentName,
+        companyIds: body?.companyIds,
+        contactIds: body?.contactIds,
+        operationName: body?.operationName,
+        meta: body?.meta,
+      });
+      res.writeHead(201);
+      res.end(JSON.stringify({ inserted: created.inserted, batchJobId: created.jobId || null }));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to enqueue batch job";
+      res.writeHead(502);
+      res.end(JSON.stringify({ error: message, inserted: 0 }));
+      return;
+    }
+  }
   const enqueueResult = await enqueueEnrichmentTasks(client, {
     projectId,
     entityType,
@@ -2777,6 +3116,21 @@ export async function handleGetEnrichmentQueue(
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
   const status = params.get("status")?.trim() || null;
+  if (isBatchWorkerEnabled()) {
+    try {
+      const result = await listLegacyQueueFromBatchWorker(projectId);
+      const rows = status ? result.data.filter((row) => row.status === status) : result.data;
+      const paged = rows.slice(offset, offset + limit);
+      res.writeHead(200);
+      res.end(JSON.stringify({ data: paged, total: rows.length }));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read batch worker queue";
+      res.writeHead(502);
+      res.end(JSON.stringify({ data: [], total: 0, error: message }));
+      return;
+    }
+  }
   const result = await listEnrichmentQueueTasksForProject(client, projectId, {
     limit,
     offset,
@@ -2819,6 +3173,21 @@ export async function handleGetEnrichmentRunsList(
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
   const status = params.get("status")?.trim() || null;
+  if (isBatchWorkerEnabled()) {
+    try {
+      const result = await listLegacyRunsFromBatchWorker(projectId);
+      const rows = status ? result.data.filter((row) => row.status === status) : result.data;
+      const paged = rows.slice(offset, offset + limit);
+      res.writeHead(200);
+      res.end(JSON.stringify({ data: paged, total: rows.length }));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read batch worker runs";
+      res.writeHead(502);
+      res.end(JSON.stringify({ data: [], total: 0, error: message }));
+      return;
+    }
+  }
   const result = await listEnrichmentAgentRunsForProject(client, projectId, {
     limit,
     offset,
@@ -2859,6 +3228,29 @@ export async function handleGetEnrichmentBatchDetail(
     return;
   }
   const projectId = params.get("projectId")?.trim() ?? null;
+  if (isBatchWorkerEnabled()) {
+    try {
+      const detail = await getLegacyBatchDetailFromBatchWorker(batchId);
+      if (!detail) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ error: "Batch not found" }));
+        return;
+      }
+      if (projectId && typeof detail.batch.project_id === "string" && detail.batch.project_id !== projectId) {
+        res.writeHead(403);
+        res.end(JSON.stringify({ error: "batch does not belong to this project" }));
+        return;
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify(detail));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to read batch detail";
+      res.writeHead(502);
+      res.end(JSON.stringify({ error: message }));
+      return;
+    }
+  }
   const result = await getEnrichmentBatchDetail(client, batchId);
   if (result.error) {
     const notFound = result.error === "Batch not found";
@@ -2913,6 +3305,19 @@ export async function handlePostEnrichmentStop(
     res.end(JSON.stringify({ error: "projectId and queueTaskId are required" }));
     return;
   }
+  if (isBatchWorkerEnabled()) {
+    try {
+      await cancelBatchWorkerJob(queueTaskId);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Stop failed";
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: message }));
+      return;
+    }
+  }
   const result = await stopEnrichmentQueueTask(client, projectId, queueTaskId);
   if (!result.ok) {
     res.writeHead(400);
@@ -2950,6 +3355,19 @@ export async function handlePostEnrichmentRestart(
     res.writeHead(400);
     res.end(JSON.stringify({ error: "projectId and queueTaskId are required" }));
     return;
+  }
+  if (isBatchWorkerEnabled()) {
+    try {
+      await retryBatchWorkerJob(queueTaskId);
+      res.writeHead(201);
+      res.end(JSON.stringify({ ok: true, newTaskId: queueTaskId }));
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Restart failed";
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: message }));
+      return;
+    }
   }
   const result = await restartEnrichmentQueueTask(client, projectId, queueTaskId);
   if (!result.ok) {

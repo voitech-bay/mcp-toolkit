@@ -20,6 +20,7 @@ export const ANALYTICS_SNAPSHOTS_TABLE = "AnalyticsSnapshots";
 export const COMPANIES_TABLE = "companies";
 export const CONTEXT_SNAPSHOTS_TABLE = "ContextSnapshots";
 export const GENERATED_MESSAGES_TABLE = "generated_messages";
+export const GENERATED_MESSAGE_PRESETS_TABLE = "generated_message_presets";
 export const FIREFLIES_WEBHOOK_EVENTS_TABLE = "fireflies_webhook_events";
 
 /** Parse `companies.tags` jsonb (array of tag strings, or legacy numeric values) from PostgREST/JSON. */
@@ -824,6 +825,25 @@ export interface GeneratedMessageRow {
   created_at: string;
 }
 
+export interface GeneratedMessagePresetRow {
+  id: string;
+  project_id: string;
+  name: string;
+  is_default: boolean;
+  icon: string | null;
+  version: number;
+  status: "active" | "archived" | "failed";
+  raw_settings: Record<string, unknown>;
+  normalized_system_prompt: string;
+  normalized_strategy: Record<string, unknown>;
+  normalization_model: string;
+  normalization_hash: string;
+  quality_notes: Record<string, unknown> | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 /**
  * Get LinkedIn conversation(s) by contact (leadUuid), by message (conversationUuid),
  * or by sender (senderProfileUuid). Messages ordered by sent_at ascending.
@@ -969,6 +989,178 @@ export async function deleteGeneratedMessageById(
   if (!generatedId) return { error: "id is required." };
   const { error } = await client.from(GENERATED_MESSAGES_TABLE).delete().eq("id", generatedId);
   return { error: error?.message ?? null };
+}
+
+export async function listGeneratedMessagePresets(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ data: GeneratedMessagePresetRow[]; error: string | null }> {
+  const pid = projectId?.trim();
+  if (!pid) return { data: [], error: "projectId is required." };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .select("*")
+    .eq("project_id", pid)
+    .eq("status", "active")
+    .order("is_default", { ascending: false })
+    .order("name", { ascending: true })
+    .order("version", { ascending: false });
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as GeneratedMessagePresetRow[], error: null };
+}
+
+export async function listGeneratedMessagePresetVersions(
+  client: SupabaseClient,
+  presetId: string
+): Promise<{ data: GeneratedMessagePresetRow[]; error: string | null }> {
+  const id = presetId?.trim();
+  if (!id) return { data: [], error: "presetId is required." };
+  const { data: one, error: oneErr } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .select("project_id,name")
+    .eq("id", id)
+    .maybeSingle();
+  if (oneErr) return { data: [], error: oneErr.message };
+  if (!one) return { data: [], error: "Preset not found." };
+  const row = one as { project_id: string; name: string };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .select("*")
+    .eq("project_id", row.project_id)
+    .eq("name", row.name)
+    .order("version", { ascending: false });
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as GeneratedMessagePresetRow[], error: null };
+}
+
+export async function getGeneratedMessagePresetById(
+  client: SupabaseClient,
+  presetId: string
+): Promise<{ data: GeneratedMessagePresetRow | null; error: string | null }> {
+  const id = presetId?.trim();
+  if (!id) return { data: null, error: "presetId is required." };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .select("*")
+    .eq("id", id)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: (data as GeneratedMessagePresetRow) ?? null, error: null };
+}
+
+export async function getGeneratedMessagePresetByHash(
+  client: SupabaseClient,
+  projectId: string,
+  name: string,
+  normalizationHash: string
+): Promise<{ data: GeneratedMessagePresetRow | null; error: string | null }> {
+  const pid = projectId?.trim();
+  const nm = name?.trim();
+  const h = normalizationHash?.trim();
+  if (!pid || !nm || !h) return { data: null, error: "projectId, name, normalizationHash required." };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .select("*")
+    .eq("project_id", pid)
+    .eq("name", nm)
+    .eq("normalization_hash", h)
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: (data as GeneratedMessagePresetRow) ?? null, error: null };
+}
+
+export async function getLatestActiveGeneratedMessagePresetByName(
+  client: SupabaseClient,
+  projectId: string,
+  name: string
+): Promise<{ data: GeneratedMessagePresetRow | null; error: string | null }> {
+  const pid = projectId?.trim();
+  const nm = name?.trim();
+  if (!pid || !nm) return { data: null, error: "projectId and name are required." };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .select("*")
+    .eq("project_id", pid)
+    .eq("name", nm)
+    .eq("status", "active")
+    .order("version", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: (data as GeneratedMessagePresetRow) ?? null, error: null };
+}
+
+export async function createGeneratedMessagePresetVersion(
+  client: SupabaseClient,
+  payload: {
+    projectId: string;
+    name: string;
+    isDefault?: boolean;
+    icon?: string | null;
+    status?: "active" | "archived" | "failed";
+    rawSettings: Record<string, unknown>;
+    normalizedSystemPrompt: string;
+    normalizedStrategy: Record<string, unknown>;
+    normalizationModel: string;
+    normalizationHash: string;
+    qualityNotes?: Record<string, unknown> | null;
+    createdBy?: string | null;
+  }
+): Promise<{ data: GeneratedMessagePresetRow | null; error: string | null }> {
+  const pid = payload.projectId?.trim();
+  const nm = payload.name?.trim();
+  if (!pid) return { data: null, error: "projectId is required." };
+  if (!nm) return { data: null, error: "name is required." };
+  const latest = await getLatestActiveGeneratedMessagePresetByName(client, pid, nm);
+  if (latest.error) return { data: null, error: latest.error };
+  const nextVersion = (latest.data?.version ?? 0) + 1;
+  const insert = {
+    project_id: pid,
+    name: nm,
+    is_default: payload.isDefault === true,
+    icon: payload.icon ?? null,
+    version: nextVersion,
+    status: payload.status ?? "active",
+    raw_settings: payload.rawSettings,
+    normalized_system_prompt: payload.normalizedSystemPrompt,
+    normalized_strategy: payload.normalizedStrategy,
+    normalization_model: payload.normalizationModel,
+    normalization_hash: payload.normalizationHash,
+    quality_notes: payload.qualityNotes ?? null,
+    created_by: payload.createdBy ?? null,
+  };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .insert(insert)
+    .select("*")
+    .single();
+  if (error) return { data: null, error: error.message };
+  return { data: data as GeneratedMessagePresetRow, error: null };
+}
+
+export async function setGeneratedMessagePresetDefault(
+  client: SupabaseClient,
+  presetId: string
+): Promise<{ data: GeneratedMessagePresetRow | null; error: string | null }> {
+  const current = await getGeneratedMessagePresetById(client, presetId);
+  if (current.error) return { data: null, error: current.error };
+  if (!current.data) return { data: null, error: "Preset not found." };
+  const projectId = current.data.project_id;
+  const { error: clearErr } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .update({ is_default: false })
+    .eq("project_id", projectId);
+  if (clearErr) return { data: null, error: clearErr.message };
+  const { data, error } = await client
+    .from(GENERATED_MESSAGE_PRESETS_TABLE)
+    .update({ is_default: true })
+    .eq("id", current.data.id)
+    .select("*")
+    .single();
+  if (error) return { data: null, error: error.message };
+  return { data: data as GeneratedMessagePresetRow, error: null };
 }
 
 // --- CompaniesContext (table: CompaniesContext) ---

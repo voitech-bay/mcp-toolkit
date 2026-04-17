@@ -106,6 +106,19 @@ const selectedHypothesisId = ref<string | null>(null);
 const generationLoading = ref(false);
 const generationError = ref("");
 const generatedText = ref("");
+const presetVersionsLoading = ref(false);
+const presetVersionsError = ref("");
+const presetVersions = ref<
+  Array<{
+    id: string;
+    version: number;
+    status: string;
+    created_at: string;
+    is_default: boolean;
+    normalized_system_prompt?: string;
+  }>
+>([]);
+const selectedVersionPrompt = ref("");
 const presetName = ref("");
 const presetIcon = ref<string | null>(null);
 const emojiPopoverShow = ref(false);
@@ -206,6 +219,8 @@ const hypothesisOptions = computed(() =>
 );
 
 type SavedPreset = {
+  id?: string;
+  version?: number;
   name: string;
   icon: string | null;
   model: string | null;
@@ -298,6 +313,8 @@ function savePresetsToStorage() {
 
 function currentPresetPayload(name: string): SavedPreset {
   return {
+    id: presets.value.find((p) => p.name === name)?.id,
+    version: presets.value.find((p) => p.name === name)?.version,
     name,
     icon: presetIcon.value,
     model: selectedModel.value,
@@ -325,7 +342,7 @@ function currentPresetPayload(name: string): SavedPreset {
   };
 }
 
-function savePreset() {
+async function savePreset() {
   deriveLegacyValuesFromStyle();
   const fallbackName = selectedPresetName.value?.trim() ?? "";
   const name = (presetName.value.trim() || fallbackName).trim();
@@ -334,14 +351,61 @@ function savePreset() {
     return;
   }
   const payload = currentPresetPayload(name);
-  const idx = presets.value.findIndex((p) => p.name.toLowerCase() === name.toLowerCase());
-  if (idx >= 0) presets.value[idx] = payload;
-  else presets.value.push(payload);
-  presets.value = [...presets.value].sort((a, b) => a.name.localeCompare(b.name));
-  savePresetsToStorage();
-  selectedPresetName.value = name;
-  presetName.value = name;
-  message.success("Preset saved.");
+  try {
+    if (props.projectId) {
+      const settings = {
+        model: payload.model,
+        tone: payload.tone,
+        goal: payload.goal,
+        ctaStyle: payload.ctaStyle,
+        personalizationDepth: payload.personalizationDepth,
+        readingLevel: payload.readingLevel,
+        formality: payload.formality,
+        emojiPolicy: payload.emojiPolicy,
+        questionCountMax: payload.questionCountMax,
+        readingLevelPreset: payload.readingLevelPreset,
+        tonePreset: payload.tonePreset,
+        lengthPreset: payload.lengthPreset,
+        methodology: payload.methodology,
+        focus: payload.focus,
+        ctaType: payload.ctaType,
+        format: { sentences: payload.sentences, paragraphs: payload.paragraphs },
+        mentionBlocks: payload.mentionBlocks,
+        selectedHypothesisId: payload.selectedHypothesisId,
+        additionalInstructions: payload.additionalInstructions,
+        messageExamples: payload.messageExamples,
+      };
+      const r = await fetch("/api/generated-message-presets/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          projectId: props.projectId,
+          name,
+          icon: payload.icon ?? null,
+          isDefault: defaultPresetName.value === name,
+          model: payload.model,
+          settings,
+        }),
+      });
+      const j = (await r.json()) as {
+        data?: { id?: string; version?: number };
+        error?: string;
+      };
+      if (!r.ok || j.error) throw new Error(j.error ?? "Failed to save preset.");
+      payload.id = j.data?.id ?? payload.id;
+      payload.version = j.data?.version ?? payload.version;
+    }
+    const idx = presets.value.findIndex((p) => p.name.toLowerCase() === name.toLowerCase());
+    if (idx >= 0) presets.value[idx] = payload;
+    else presets.value.push(payload);
+    presets.value = [...presets.value].sort((a, b) => a.name.localeCompare(b.name));
+    savePresetsToStorage();
+    selectedPresetName.value = name;
+    presetName.value = name;
+    message.success("Preset saved.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to save preset.");
+  }
 }
 
 function loadPresetByName(name: string | null) {
@@ -385,6 +449,7 @@ function selectPreset(name: string | null) {
   selectedPresetName.value = name;
   editingExampleIndex.value = null;
   loadPresetByName(name);
+  void loadPresetVersionsForSelected();
 }
 
 function deletePresetByName(name: string | null) {
@@ -395,7 +460,20 @@ function deletePresetByName(name: string | null) {
   if (selectedPresetName.value === name) selectedPresetName.value = null;
 }
 
-function setDefaultPreset(name: string | null) {
+async function setDefaultPreset(name: string | null) {
+  if (name && props.projectId) {
+    const p = presets.value.find((x) => x.name === name);
+    if (p?.id) {
+      try {
+        await fetch(`/api/generated-message-presets/${encodeURIComponent(p.id)}/set-default`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch {
+        // local default still works
+      }
+    }
+  }
   defaultPresetName.value = name;
   savePresetsToStorage();
   if (name) message.success(`Default preset set: ${name}`);
@@ -403,9 +481,134 @@ function setDefaultPreset(name: string | null) {
 
 function toggleDefaultPreset(name: string) {
   if (defaultPresetName.value === name) {
-    setDefaultPreset(null);
+    void setDefaultPreset(null);
   } else {
-    setDefaultPreset(name);
+    void setDefaultPreset(name);
+  }
+}
+
+async function loadPresetsFromApi(projectId: string) {
+  try {
+    const r = await fetch(`/api/generated-message-presets?projectId=${encodeURIComponent(projectId)}`);
+    const j = (await r.json()) as {
+      data?: Array<{
+        id: string;
+        name: string;
+        icon: string | null;
+        is_default: boolean;
+        version: number;
+        raw_settings: Record<string, unknown>;
+      }>;
+      error?: string;
+    };
+    if (!r.ok || j.error || !Array.isArray(j.data)) return;
+    const mapped: SavedPreset[] = j.data
+      .map((row) => {
+        const s = row.raw_settings ?? {};
+        return normalizePreset({
+          id: row.id,
+          version: row.version,
+          name: row.name,
+          icon: row.icon,
+          model: typeof s.model === "string" ? s.model : null,
+          tone: (typeof s.tone === "string" ? s.tone : "professional") as Tone,
+          goal: (typeof s.goal === "string" ? s.goal : "follow_up") as Goal,
+          ctaStyle: (typeof s.ctaStyle === "string" ? s.ctaStyle : "soft") as CtaStyle,
+          personalizationDepth: (typeof s.personalizationDepth === "string"
+            ? s.personalizationDepth
+            : "medium") as PersonalizationDepth,
+          readingLevel: (typeof s.readingLevel === "string" ? s.readingLevel : "simple") as ReadingLevel,
+          formality: (typeof s.formality === "string" ? s.formality : "casual") as Formality,
+          emojiPolicy: (typeof s.emojiPolicy === "string" ? s.emojiPolicy : "none") as EmojiPolicy,
+          questionCountMax: (typeof s.questionCountMax === "number" ? s.questionCountMax : 1) as 0 | 1 | 2,
+          readingLevelPreset: (typeof s.readingLevelPreset === "string"
+            ? s.readingLevelPreset
+            : "high_school") as ReadingLevelPreset,
+          tonePreset: (typeof s.tonePreset === "string" ? s.tonePreset : "casual") as TonePreset,
+          lengthPreset: (typeof s.lengthPreset === "string" ? s.lengthPreset : "medium") as LengthPreset,
+          methodology: (typeof s.methodology === "string" ? s.methodology : "pas") as MethodologyPreset,
+          focus: (typeof s.focus === "string" ? s.focus : "pain") as FocusPreset,
+          ctaType: (typeof s.ctaType === "string" ? s.ctaType : "initiate_conversation") as CtaType,
+          temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
+          sentences:
+            typeof (s.format as { sentences?: unknown } | undefined)?.sentences === "number"
+              ? Number((s.format as { sentences: number }).sentences)
+              : 3,
+          paragraphs:
+            typeof (s.format as { paragraphs?: unknown } | undefined)?.paragraphs === "number"
+              ? Number((s.format as { paragraphs: number }).paragraphs)
+              : 1,
+          mentionBlocks: Array.isArray(s.mentionBlocks)
+            ? (s.mentionBlocks as MentionBlock[])
+            : ["conversation_recap", "contact_experience", "company_about"],
+          selectedHypothesisId: typeof s.selectedHypothesisId === "string" ? s.selectedHypothesisId : null,
+          additionalInstructions:
+            typeof s.additionalInstructions === "string" ? s.additionalInstructions : "",
+          messageExamples: Array.isArray(s.messageExamples)
+            ? s.messageExamples.map((x) => String(x))
+            : [],
+        });
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+    presets.value = mapped;
+    const def = j.data.find((x) => x.is_default);
+    defaultPresetName.value = def?.name ?? defaultPresetName.value;
+    savePresetsToStorage();
+  } catch {
+    // keep local fallback
+  }
+}
+
+async function loadPresetVersionsForSelected() {
+  presetVersions.value = [];
+  presetVersionsError.value = "";
+  selectedVersionPrompt.value = "";
+  if (!selectedPresetName.value) return;
+  const p = presets.value.find((x) => x.name === selectedPresetName.value);
+  if (!p?.id) return;
+  presetVersionsLoading.value = true;
+  try {
+    const r = await fetch(`/api/generated-message-presets/${encodeURIComponent(p.id)}/versions`);
+    const j = (await r.json()) as {
+      data?: Array<{
+        id: string;
+        version: number;
+        status: string;
+        created_at: string;
+        is_default: boolean;
+        normalized_system_prompt?: string;
+      }>;
+      error?: string;
+    };
+    if (!r.ok || j.error) throw new Error(j.error ?? "Failed to load versions.");
+    presetVersions.value = Array.isArray(j.data) ? j.data : [];
+  } catch (e) {
+    presetVersionsError.value = e instanceof Error ? e.message : "Failed to load versions.";
+  } finally {
+    presetVersionsLoading.value = false;
+  }
+}
+
+function viewVersionPrompt(versionId: string) {
+  const row = presetVersions.value.find((v) => v.id === versionId);
+  selectedVersionPrompt.value = row?.normalized_system_prompt?.trim() ?? "";
+}
+
+async function rollbackToVersion(versionId: string) {
+  if (!versionId) return;
+  try {
+    const r = await fetch(`/api/generated-message-presets/${encodeURIComponent(versionId)}/rollback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ isDefault: true }),
+    });
+    const j = (await r.json()) as { data?: { id?: string; version?: number }; error?: string };
+    if (!r.ok || j.error) throw new Error(j.error ?? "Rollback failed.");
+    message.success("Rollback created as new latest version.");
+    if (props.projectId) await loadPresetsFromApi(props.projectId);
+    await loadPresetVersionsForSelected();
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Rollback failed.");
   }
 }
 
@@ -708,10 +911,14 @@ watch(
     presetIcon.value = null;
     selectedPresetName.value = null;
     loadPresetsFromStorage();
+    if (props.projectId) {
+      void loadPresetsFromApi(props.projectId);
+    }
     applyPreset(props.preset);
     if (defaultPresetName.value) {
       loadPresetByName(defaultPresetName.value);
       selectedPresetName.value = defaultPresetName.value;
+      void loadPresetVersionsForSelected();
     }
     void loadModels();
   }
@@ -740,6 +947,9 @@ async function generateMessage() {
   generationLoading.value = true;
   generationError.value = "";
   generatedText.value = "";
+  const selectedPreset = selectedPresetName.value
+    ? presets.value.find((p) => p.name === selectedPresetName.value) ?? null
+    : null;
   try {
     const r = await fetch("/api/generated-messages/generate", {
       method: "POST",
@@ -768,6 +978,7 @@ async function generateMessage() {
         messageExamples: messageExamples.value.map((v) => v.trim()).filter(Boolean),
         hypothesisId: selectedHypothesisId.value,
         temperature: temperature.value,
+        presetId: selectedPreset?.id ?? null,
       }),
     });
     const j = (await r.json()) as {
@@ -880,6 +1091,36 @@ async function copyGeneratedMessage() {
             </div>
           </div>
           <div class="gm-sidebar-bottom">
+            <div v-if="selectedPresetName" class="gm-preset-versions">
+              <div class="gm-preset-versions__title">Preset versions</div>
+              <NAlert v-if="presetVersionsError" type="error" style="margin-bottom: 8px">
+                {{ presetVersionsError }}
+              </NAlert>
+              <NSpin :show="presetVersionsLoading">
+                <div v-if="presetVersions.length === 0" class="gm-preset-versions__empty">No versions yet</div>
+                <div v-else class="gm-preset-versions__list">
+                  <div v-for="v in presetVersions" :key="v.id" class="gm-preset-version-row">
+                    <div class="gm-preset-version-row__meta">
+                      <span>v{{ v.version }}</span>
+                      <span>{{ new Date(v.created_at).toLocaleString() }}</span>
+                      <span v-if="v.is_default">default</span>
+                    </div>
+                    <div class="gm-preset-version-row__actions">
+                      <NButton size="tiny" @click="viewVersionPrompt(v.id)">View prompt</NButton>
+                      <NButton size="tiny" @click="rollbackToVersion(v.id)">Rollback</NButton>
+                    </div>
+                  </div>
+                </div>
+                <NInput
+                  v-if="selectedVersionPrompt"
+                  :value="selectedVersionPrompt"
+                  type="textarea"
+                  :rows="6"
+                  readonly
+                  style="margin-top: 8px"
+                />
+              </NSpin>
+            </div>
             <div class="gm-sidebar-editor">
               <NInput v-model:value="presetName" placeholder="Preset name">
                 <template #prefix>
@@ -1247,6 +1488,53 @@ async function copyGeneratedMessage() {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+
+.gm-preset-versions {
+  border-top: 1px solid rgba(128, 128, 128, 0.18);
+  padding-top: 8px;
+}
+
+.gm-preset-versions__title {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.gm-preset-versions__empty {
+  font-size: 12px;
+  opacity: 0.7;
+}
+
+.gm-preset-versions__list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.gm-preset-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  border-radius: 6px;
+  padding: 6px;
+}
+
+.gm-preset-version-row__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+.gm-preset-version-row__actions {
+  display: flex;
+  gap: 6px;
 }
 
 .gm-sidebar-actions {
