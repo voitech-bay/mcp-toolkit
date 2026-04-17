@@ -605,6 +605,79 @@ async function removeCompanyFromHypothesis(h: HypothesisItem) {
 
 const attachCompanyOpen = ref(false);
 
+const findContactLoading = ref(false);
+
+function deriveDisplayName(c: Record<string, unknown> | null, fallback: string): string {
+  if (!c) return fallback;
+  const n = typeof c.name === "string" ? c.name.trim() : "";
+  if (n) return n;
+  const f = typeof c.first_name === "string" ? c.first_name.trim() : "";
+  const l = typeof c.last_name === "string" ? c.last_name.trim() : "";
+  const joined = [f, l].filter(Boolean).join(" ");
+  if (joined) return joined;
+  return fallback;
+}
+
+async function findContactInGetSales() {
+  const leadUuid = selectedConvItem.value?.leadUuid;
+  const projectId = projectStore.selectedProjectId;
+  if (!leadUuid || !projectId) {
+    message.warning("No lead UUID on this conversation.");
+    return;
+  }
+  findContactLoading.value = true;
+  try {
+    const r = await fetch("/api/contacts/find-by-uuid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, leadUuid }),
+    });
+    const j = (await r.json()) as {
+      data?: Record<string, unknown>;
+      error?: string;
+      notFound?: boolean;
+    };
+    if (!r.ok || j.error) {
+      if (j.notFound) {
+        message.warning("GetSales returned no contact for this UUID (deleted or not visible).");
+      } else {
+        message.error(j.error ?? "Failed to find contact.");
+      }
+      return;
+    }
+    const contact = j.data ?? null;
+    dialogueContact.value = contact;
+    if (contact && leadUuid) {
+      const fallback = leadUuid.slice(0, 8) + "…";
+      const nextName = deriveDisplayName(contact, fallback);
+      const nextTitle = typeof contact.position === "string" ? contact.position : null;
+      const nextCompanyName =
+        typeof contact.company_name === "string" ? contact.company_name : null;
+      const nextAvatarUrl =
+        typeof contact.avatar_url === "string" ? contact.avatar_url : null;
+      const nextCompanyId =
+        typeof contact.company_uuid === "string" ? contact.company_uuid : null;
+      allConvList.value = allConvList.value.map((item) =>
+        item.leadUuid === leadUuid
+          ? {
+              ...item,
+              receiverDisplayName: nextName,
+              receiverTitle: nextTitle,
+              receiverCompanyName: nextCompanyName,
+              receiverAvatarUrl: nextAvatarUrl,
+              receiverCompanyId: nextCompanyId,
+            }
+          : item,
+      );
+    }
+    message.success("Contact fetched from GetSales.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to find contact.");
+  } finally {
+    findContactLoading.value = false;
+  }
+}
+
 const dialogueContactId = computed(() => {
   const c = dialogueContact.value;
   if (!c) return null;
@@ -1170,6 +1243,17 @@ const filteredRelatedContacts = computed(() => {
                   <div v-else-if="!dialogueLoading" class="convpage__no-contact">
                     <UserIcon :size="20" style="opacity:0.4" />
                     <span style="opacity:0.5">No contact info</span>
+                    <NButton
+                      v-if="selectedConvItem?.leadUuid"
+                      size="tiny"
+                      type="primary"
+                      :loading="findContactLoading"
+                      style="margin-left:8px"
+                      @click="findContactInGetSales"
+                    >
+                      <template #icon><SearchIcon :size="12" /></template>
+                      Find contact in GetSales
+                    </NButton>
                   </div>
                 </NSpin>
               </NCard>

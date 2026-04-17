@@ -3429,8 +3429,27 @@ function deriveConversationReplyTag(item: {
   return "no_response";
 }
 
-const CONV_LIST_PAGE = 1000;
-const CONV_LIST_MAX_PAGES = 200;
+interface ConversationSummaryRow {
+  linkedin_conversation_uuid: string | null;
+  lead_uuid: string | null;
+  sender_profile_uuid: string | null;
+  last_sent_at: string | null;
+  last_text: string | null;
+  last_type: string | null;
+  last_linkedin_type: string | null;
+  message_count: number | string | null;
+  inbox_count: number | string | null;
+  outbox_count: number | string | null;
+}
+
+function toIntSafe(v: unknown): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
 
 export async function getConversationsList(
   client: SupabaseClient,
@@ -3445,56 +3464,26 @@ export async function getConversationsList(
     pipelineStageUuid?: string | null;
   }
 ): Promise<{ data: ConversationListItem[]; total: number; error: string | null }> {
-  const rawMessages: Array<Record<string, unknown>> = [];
-  for (let page = 0; page < CONV_LIST_MAX_PAGES; page++) {
-    const from = page * CONV_LIST_PAGE;
-    const to = from + CONV_LIST_PAGE - 1;
-    const { data: chunk, error: msgErr } = await client
-      .from(LINKEDIN_MESSAGES_TABLE)
-      .select("linkedin_conversation_uuid, lead_uuid, sender_profile_uuid, text, sent_at, type, linkedin_type")
-      .eq("project_id", projectId)
-      .order("sent_at", { ascending: true })
-      .range(from, to);
+  const { data: rpcData, error: rpcErr } = await client.rpc(
+    "list_conversations_summary_for_project",
+    { p_project_id: projectId }
+  );
+  if (rpcErr) return { data: [], total: 0, error: rpcErr.message };
+  const summaries = (rpcData ?? []) as ConversationSummaryRow[];
 
-    if (msgErr) return { data: [], total: 0, error: msgErr.message };
-    const rows = (chunk ?? []) as Array<Record<string, unknown>>;
-    if (rows.length === 0) break;
-    rawMessages.push(...rows);
-    if (rows.length < CONV_LIST_PAGE) break;
-  }
-
-  // Group by conversation uuid
-  const grouped = new Map<string, {
-    lead_uuid: string | null;
-    sender_profile_uuid: string | null;
-    msgs: Array<Record<string, unknown>>;
-  }>();
-
-  for (const msg of rawMessages) {
-    const convId = msg["linkedin_conversation_uuid"] as string | null;
-    if (!convId) continue;
-    if (!grouped.has(convId)) {
-      grouped.set(convId, {
-        lead_uuid: (msg["lead_uuid"] as string | null) ?? null,
-        sender_profile_uuid: (msg["sender_profile_uuid"] as string | null) ?? null,
-        msgs: [],
-      });
-    }
-    grouped.get(convId)!.msgs.push(msg);
-  }
-
-  // Collect unique lead_uuids and sender_profile_uuids for batch fetching
   const leadUuids = [
     ...new Set(
-      [...grouped.values()]
-        .map((g) => (typeof g.lead_uuid === "string" ? g.lead_uuid.trim() : ""))
+      summaries
+        .map((s) => (typeof s.lead_uuid === "string" ? s.lead_uuid.trim() : ""))
         .filter(Boolean)
     ),
   ];
   const senderUuids = [
     ...new Set(
-      [...grouped.values()]
-        .map((g) => (typeof g.sender_profile_uuid === "string" ? g.sender_profile_uuid.trim() : ""))
+      summaries
+        .map((s) =>
+          typeof s.sender_profile_uuid === "string" ? s.sender_profile_uuid.trim() : ""
+        )
         .filter(Boolean)
     ),
   ];
@@ -3578,30 +3567,23 @@ export async function getConversationsList(
   }
 
   const allItems: ConversationListItem[] = [];
-  for (const [convId, group] of grouped.entries()) {
-    const { msgs } = group;
-    let inboxCount = 0;
-    let outboxCount = 0;
-    let lastMsg: Record<string, unknown> | null = null;
-    let lastAt: string | null = null;
+  for (const s of summaries) {
+    const convId = typeof s.linkedin_conversation_uuid === "string" ? s.linkedin_conversation_uuid : "";
+    if (!convId) continue;
 
-    for (const m of msgs) {
-      const t = String(m["type"] ?? m["linkedin_type"] ?? "").toLowerCase();
-      if (t === "inbox") inboxCount++;
-      else if (t === "outbox") outboxCount++;
-      const at = m["sent_at"] as string | null;
-      if (at && (!lastAt || at > lastAt)) {
-        lastAt = at;
-        lastMsg = m;
-      }
-    }
+    const leadUuid = typeof s.lead_uuid === "string" ? s.lead_uuid : null;
+    const senderProfileUuid =
+      typeof s.sender_profile_uuid === "string" ? s.sender_profile_uuid : null;
+    const inboxCount = toIntSafe(s.inbox_count);
+    const outboxCount = toIntSafe(s.outbox_count);
+    const messageCount = toIntSafe(s.message_count);
 
-    const lastMsgType = lastMsg
-      ? String(lastMsg["type"] ?? lastMsg["linkedin_type"] ?? "").toLowerCase()
-      : "";
+    const lastMsgType = String(s.last_type ?? s.last_linkedin_type ?? "").toLowerCase();
+    const lastAt = typeof s.last_sent_at === "string" ? s.last_sent_at : null;
+    const lastText = typeof s.last_text === "string" ? s.last_text : null;
 
-    const contact = group.lead_uuid ? contactMap.get(group.lead_uuid) ?? null : null;
-    const sender = group.sender_profile_uuid ? senderMap.get(group.sender_profile_uuid) ?? null : null;
+    const contact = leadUuid ? contactMap.get(leadUuid) ?? null : null;
+    const sender = senderProfileUuid ? senderMap.get(senderProfileUuid) ?? null : null;
     const companyId = contact ? ((contact.company_uuid as string | null) ?? null) : null;
 
     const lastMessageIsOutbox = lastMsgType === "outbox";
@@ -3613,17 +3595,20 @@ export async function getConversationsList(
 
     allItems.push({
       conversationUuid: convId,
-      leadUuid: group.lead_uuid,
-      senderProfileUuid: group.sender_profile_uuid,
+      leadUuid,
+      senderProfileUuid,
       senderDisplayName: displayName(sender, "Unknown Sender"),
-      receiverDisplayName: displayName(contact, group.lead_uuid ? group.lead_uuid.slice(0, 8) + "…" : "Unknown"),
+      receiverDisplayName: displayName(
+        contact,
+        leadUuid ? leadUuid.slice(0, 8) + "…" : "Unknown"
+      ),
       receiverTitle: contact ? ((contact.position as string | null) ?? null) : null,
       receiverCompanyName: contact ? ((contact.company_name as string | null) ?? null) : null,
       receiverAvatarUrl: contact ? ((contact.avatar_url as string | null) ?? null) : null,
       receiverCompanyId: companyId,
-      lastMessageText: lastMsg ? ((lastMsg.text as string | null) ?? null) : null,
+      lastMessageText: lastText,
       lastMessageAt: lastAt,
-      messageCount: msgs.length,
+      messageCount,
       inboxCount,
       outboxCount,
       lastMessageIsOutbox,

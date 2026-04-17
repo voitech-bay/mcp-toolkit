@@ -82,6 +82,7 @@ import {
   handlePostSaveGeneratedMessagePreset,
   handlePostSetGeneratedMessagePresetDefault,
   handlePostRollbackGeneratedMessagePreset,
+  handlePostFindContactByUuid,
   handleFirefliesWebhook,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
@@ -185,9 +186,10 @@ const server = createServer(async (req, res) => {
   const companyHypothesesMatch = pathname.match(
     /^\/api\/companies\/([^/]+)\/hypotheses$/
   );
-  // Match /api/contacts/:id — exclude known sub-paths like "by-company"
+  // Match /api/contacts/:id — exclude known sub-paths like "by-company", "find-by-uuid"
   const contactIdMatch =
     pathname !== "/api/contacts/by-company" &&
+    pathname !== "/api/contacts/find-by-uuid" &&
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
   const generatedMessageIdMatch =
     pathname !== "/api/generated-messages/generate" &&
@@ -390,6 +392,14 @@ const server = createServer(async (req, res) => {
       case "/api/contacts/by-company":
         if (req.method === "GET") {
           await handleGetContactsByCompany(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contacts/find-by-uuid":
+        if (req.method === "POST") {
+          await handlePostFindContactByUuid(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

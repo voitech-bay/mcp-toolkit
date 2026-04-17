@@ -51,6 +51,7 @@ import {
 } from "./supabase-schema.js";
 import {
   fetchContactsIncremental,
+  fetchContactsByUuidsConcurrent,
   fetchLinkedInMessagesIncremental,
   fetchSendersIncremental,
   fetchFlowsIncremental,
@@ -285,7 +286,7 @@ const GET_SALES_TAGS_ALLOWED = new Set<string>(GET_SALES_TAGS_COLUMNS);
 const PIPELINE_STAGES_ALLOWED = new Set<string>(PIPELINE_STAGES_COLUMNS);
 
 /** Whitelist to Contacts columns; omit backfilled columns unless present in API row. */
-function mapContactForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+export function mapContactForSupabase(row: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(row)) {
     if (!CONTACTS_ALLOWED.has(key)) continue;
@@ -1187,6 +1188,7 @@ export async function syncSupabaseFromSource(
   const msgBuf: Record<string, unknown>[] = [];
   let msgUpsertTotal = 0;
   const msgErrorsAcc: string[] = [];
+  const leadUuidsThisRun = new Set<string>();
   const flushMsgBuf = async (batch: Record<string, unknown>[]) => {
     const { upserted, errors } = await flushLinkedInMessagesMappedBatches(client, batch, logger);
     msgUpsertTotal += upserted;
@@ -1195,6 +1197,10 @@ export async function syncSupabaseFromSource(
   const pushMsgPage = async (rows: Record<string, unknown>[]) => {
     const mapped = rows.map(mapMessageForSupabase);
     if (projectId) injectProjectId(mapped, projectId);
+    for (const row of mapped) {
+      const leadUuid = typeof row.lead_uuid === "string" ? row.lead_uuid.trim() : "";
+      if (leadUuid) leadUuidsThisRun.add(leadUuid);
+    }
     msgBuf.push(...mapped);
     while (msgBuf.length >= syncBufferRows) {
       const batch = msgBuf.splice(0, syncBufferRows);
@@ -1222,6 +1228,69 @@ export async function syncSupabaseFromSource(
       result.linkedin_messages.error = `${msgErrorsAcc.length} chunk(s) failed: ${msgErrorsAcc.join("; ")}`;
     }
     await logger.log("linkedin_messages: upserted", { count: result.linkedin_messages.upserted });
+  }
+
+  // Post-step: rehydrate missing Contacts referenced by messages just upserted. The Contacts table
+  // key is `uuid` (see flushContactMappedBatches). GetSales has no batch-by-UUID search, so we use
+  // a bounded concurrency pool of GET /leads/api/leads/{uuid}.
+  if (!messagesRes.error && leadUuidsThisRun.size > 0) {
+    try {
+      await syncShouldStop();
+      const all = [...leadUuidsThisRun];
+      const existingUuids = new Set<string>();
+      const probeChunkSize = 500;
+      for (let i = 0; i < all.length; i += probeChunkSize) {
+        await syncShouldStop();
+        const chunk = all.slice(i, i + probeChunkSize);
+        const { data: existing, error: existingErr } = await client
+          .from(CONTACTS_TABLE)
+          .select("uuid")
+          .in("uuid", chunk);
+        if (existingErr) {
+          await logger.logError("linkedin_messages: contact gap probe error", {
+            error: existingErr.message,
+            chunkSize: chunk.length,
+          });
+          continue;
+        }
+        for (const row of existing ?? []) {
+          const u = (row as { uuid?: unknown }).uuid;
+          if (typeof u === "string") existingUuids.add(u);
+        }
+      }
+      const missing = all.filter((u) => !existingUuids.has(u));
+      await logger.log("linkedin_messages: contact gap", {
+        referenced: all.length,
+        missing: missing.length,
+      });
+      if (missing.length > 0) {
+        const {
+          rows: fetchedLeads,
+          missing: notFound,
+          errors: fetchErrors,
+        } = await fetchContactsByUuidsConcurrent(credentials, missing, {
+          concurrency: 5,
+          onBefore: syncShouldStop,
+          onLog: fetchLog,
+        });
+        const mapped = fetchedLeads.map(mapContactForSupabase);
+        if (projectId) injectProjectId(mapped, projectId);
+        const { upserted: rehydratedUpserts, errors: flushErrors } =
+          await flushContactMappedBatches(client, mapped, logger, rlsHint);
+        result.contacts.upserted += rehydratedUpserts;
+        await logger.log("linkedin_messages: contacts rehydrated", {
+          fetched: fetchedLeads.length,
+          upserted: rehydratedUpserts,
+          notFound: notFound.length,
+          fetchErrors: fetchErrors.length,
+          flushErrors: flushErrors.length,
+        });
+      }
+    } catch (e) {
+      if (e instanceof SyncCancelledError) throw e;
+      const msg = e instanceof Error ? e.message : String(e);
+      await logger.logError("linkedin_messages: contact rehydration failed", { error: msg });
+    }
   }
   }
 

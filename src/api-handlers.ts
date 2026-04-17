@@ -83,6 +83,7 @@ import {
   updateFirefliesWebhookEventProcessing,
   PROJECT_COMPANIES_TABLE,
   COMPANIES_TABLE,
+  CONTACTS_TABLE,
 } from "./services/supabase.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
 import {
@@ -98,9 +99,10 @@ import {
   syncSupabaseFromSource,
   syncAnalyticsSnapshots,
   isSyncEntityKey,
+  mapContactForSupabase,
   type SyncEntityKey,
 } from "./services/sync-supabase.js";
-import { verifyGetSalesCredentials } from "./services/source-api.js";
+import { fetchContactByUuid, verifyGetSalesCredentials } from "./services/source-api.js";
 import { listOpenRouterModels, generateOpenRouterMessage } from "./services/openrouter.js";
 import {
   buildGeneratedMessagePrompt,
@@ -2501,6 +2503,97 @@ export async function handleGetContactsByCompany(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data }));
+}
+
+/**
+ * POST /api/contacts/find-by-uuid — on-demand rehydrate a single Contacts row by GetSales UUID.
+ * Body: { projectId, leadUuid }. Calls GET /leads/api/leads/{uuid}, upserts into Contacts (uuid conflict),
+ * returns the stored row so UI can replace `dialogueContact`.
+ */
+export async function handlePostFindContactByUuid(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | { projectId?: string; leadUuid?: string }
+    | undefined;
+  const projectId = body?.projectId?.trim() ?? "";
+  const leadUuid = body?.leadUuid?.trim() ?? "";
+  if (!projectId || !leadUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and leadUuid are required." }));
+    return;
+  }
+  const { data: project, error: projectErr } = await getProjectById(client, projectId);
+  if (projectErr || !project) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: projectErr ?? "Project not found" }));
+    return;
+  }
+  const baseUrl =
+    (project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL)?.replace(/\/$/, "") ?? "";
+  const apiKey = project.source_api_key ?? process.env.SOURCE_API_KEY ?? "";
+  if (!baseUrl || !apiKey) {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "GetSales credentials missing on project and environment.",
+      })
+    );
+    return;
+  }
+  let fetched: Record<string, unknown> | null = null;
+  try {
+    fetched = await fetchContactByUuid({ baseUrl, apiKey }, leadUuid);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: `GetSales request failed: ${message}` }));
+    return;
+  }
+  if (!fetched) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Contact not found in GetSales.", notFound: true }));
+    return;
+  }
+  const mapped = mapContactForSupabase(fetched);
+  if (typeof mapped.uuid !== "string" || !mapped.uuid) {
+    mapped.uuid = leadUuid;
+  }
+  mapped.project_id = projectId;
+  const { error: upsertErr } = await client
+    .from(CONTACTS_TABLE)
+    .upsert([mapped], { onConflict: "uuid" });
+  if (upsertErr) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: `Failed to store contact: ${upsertErr.message}` }));
+    return;
+  }
+  const { data: stored, error: selectErr } = await client
+    .from(CONTACTS_TABLE)
+    .select("*")
+    .eq("uuid", mapped.uuid as string)
+    .maybeSingle();
+  if (selectErr) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: selectErr.message }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: stored ?? mapped }));
 }
 
 // ── Create company ────────────────────────────────────────────────────────────

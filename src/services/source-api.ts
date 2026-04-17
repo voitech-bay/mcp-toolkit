@@ -670,6 +670,84 @@ export async function fetchContactsIncremental(
   };
 }
 
+/**
+ * GET /leads/api/leads/{uuid} — single contact lookup. GetSales has no batch-by-UUID endpoint
+ * (see [getleadbyuuid.md](https://api.getsales.io/bundled/leads-(contacts)/getleadbyuuid.md)
+ * and [searchleads.md](https://api.getsales.io/bundled/leads-(contacts)/searchleads.md) which
+ * lacks `filter.uuid`). Returns the unwrapped lead row, or `null` on HTTP 404 (deleted / not visible).
+ */
+export async function fetchContactByUuid(
+  credentials: ApiCredentials | undefined,
+  uuid: string
+): Promise<Record<string, unknown> | null> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const trimmed = uuid.trim();
+  if (!trimmed) return null;
+  const url = `${config.baseUrl}/leads/api/leads/${encodeURIComponent(trimmed)}`;
+  try {
+    const json = await fetchJson<ContactItem>(url, config.apiKey, { method: "GET" });
+    return unwrapContact(json);
+  } catch (e) {
+    if (e instanceof SourceApiRequestError && e.response?.status === 404) return null;
+    throw e;
+  }
+}
+
+/**
+ * Fetch many contacts by UUID via a bounded concurrency pool of `GET /leads/api/leads/{uuid}` calls.
+ * Never throws: per-UUID failures collected in `errors`; 404s recorded in `missing`.
+ * Cancellation: `onBefore` is awaited before each dequeue (wire to sync cancellation token).
+ */
+export async function fetchContactsByUuidsConcurrent(
+  credentials: ApiCredentials | undefined,
+  uuids: string[],
+  opts: {
+    concurrency?: number;
+    onBefore?: () => Promise<void>;
+    onLog?: FetchLogger;
+  } = {}
+): Promise<{
+  rows: Record<string, unknown>[];
+  missing: string[];
+  errors: Array<{ uuid: string; error: string }>;
+}> {
+  const rows: Record<string, unknown>[] = [];
+  const missing: string[] = [];
+  const errors: Array<{ uuid: string; error: string }> = [];
+  const unique = Array.from(new Set(uuids.map((u) => (typeof u === "string" ? u.trim() : ""))))
+    .filter(Boolean);
+  if (unique.length === 0) return { rows, missing, errors };
+  const concurrency = Math.max(1, Math.min(20, Math.floor(opts.concurrency ?? 5)));
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (true) {
+      if (opts.onBefore) await opts.onBefore();
+      const idx = cursor++;
+      if (idx >= unique.length) return;
+      const uuid = unique[idx];
+      try {
+        const row = await fetchContactByUuid(credentials, uuid);
+        if (row == null) {
+          missing.push(uuid);
+          continue;
+        }
+        rows.push(row);
+      } catch (e) {
+        if (e instanceof SyncCancelledError) throw e;
+        const msg = e instanceof Error ? e.message : String(e);
+        errors.push({ uuid, error: msg });
+        if (opts.onLog) {
+          await opts.onLog("contacts-by-uuid: fetch error", { uuid, error: msg });
+        }
+      }
+    }
+  };
+  const workers = Array.from({ length: Math.min(concurrency, unique.length) }, () => worker());
+  await Promise.all(workers);
+  return { rows, missing, errors };
+}
+
 export interface FetchLinkedInMessagesResult {
   data: Record<string, unknown>[];
   error: string | null;
