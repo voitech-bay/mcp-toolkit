@@ -24,6 +24,12 @@ const SAFE_NAME = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/;
 function getPublicBaseUrl(): string {
   const explicit = process.env.CHARTS_PUBLIC_BASE_URL?.trim();
   if (explicit) return explicit.replace(/\/+$/, "");
+  // Railway injects RAILWAY_PUBLIC_DOMAIN as hostname only (e.g. "voitech.up.railway.app").
+  const railway = process.env.RAILWAY_PUBLIC_DOMAIN?.trim();
+  if (railway) {
+    const host = railway.replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    return `https://${host}`;
+  }
   const port = process.env.PORT ?? process.env.API_PORT ?? "3000";
   return `http://localhost:${port}`;
 }
@@ -46,6 +52,17 @@ export interface SavedChartResult {
   url: string;
 }
 
+/**
+ * Font stack used inside SSR SVG. The Docker runtime installs:
+ *   - font-noto (Latin, Cyrillic, Greek, …)
+ *   - font-noto-cjk (Chinese / Japanese / Korean)
+ *   - font-noto-emoji
+ *   - ttf-dejavu (fallback)
+ * Naming matches what fontconfig reports (see `fc-list` in the image).
+ */
+const DEFAULT_FONT_FAMILY =
+  '"Noto Sans", "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Color Emoji", "DejaVu Sans", sans-serif';
+
 export function renderEChartOptionToSvg(
   option: Record<string, unknown>,
   width: number,
@@ -58,9 +75,16 @@ export function renderEChartOptionToSvg(
     height,
   });
   try {
+    const userTextStyle =
+      (option as { textStyle?: Record<string, unknown> }).textStyle ?? {};
     chart.setOption({
       animation: false,
       ...option,
+      // Merge so caller-provided textStyle wins, but we always supply a fontFamily default.
+      textStyle: {
+        fontFamily: DEFAULT_FONT_FAMILY,
+        ...userTextStyle,
+      },
     });
     return chart.renderToSVGString();
   } finally {
