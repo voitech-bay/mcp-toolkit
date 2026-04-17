@@ -57,9 +57,13 @@ export interface SavedChartResult {
 /**
  * Font stack used inside SSR SVG. Matches the bundled TTFs under `fonts/`
  * (see `fontconfig-init.ts`). DejaVu Sans covers Latin, Cyrillic, Greek, Vietnamese, math.
- * Fallbacks are harmless aliases in case host fontconfig has extras.
+ *
+ * IMPORTANT: no inner quotes. ECharts writes this verbatim into
+ *   `font-family="…"` attributes, so any `"` inside would break XML parsing
+ *   ("attributes construct error"). CSS allows unquoted multi-word family names
+ *   (see https://drafts.csswg.org/css-fonts/#family-name-value).
  */
-const DEFAULT_FONT_FAMILY = '"DejaVu Sans", sans-serif';
+const DEFAULT_FONT_FAMILY = "DejaVu Sans, sans-serif";
 
 export function renderEChartOptionToSvg(
   option: Record<string, unknown>,
