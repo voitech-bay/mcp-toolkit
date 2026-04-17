@@ -14,13 +14,17 @@ ENV PORT=3000
 
 # Fonts for chart rendering (sharp → librsvg needs fontconfig + TTFs).
 # Noto covers Latin, Cyrillic, Greek, etc.; Noto-CJK covers Chinese/Japanese/Korean; DejaVu as fallback.
+# Sharp's prebuilt libvips bundles its own librsvg/fontconfig — point it at Alpine's config + font dirs.
+ENV FONTCONFIG_PATH=/etc/fonts
+ENV FONTCONFIG_FILE=/etc/fonts/fonts.conf
 RUN apk add --no-cache \
       fontconfig \
       ttf-dejavu \
       font-noto \
       font-noto-cjk \
       font-noto-emoji \
-    && fc-cache -f
+    && fc-cache -f \
+    && fc-list | head -n 5
 
 COPY package*.json ./
 RUN npm ci --omit=dev

@@ -2,6 +2,8 @@
  * Server-side ECharts → SVG (Apache ECharts SSR), persisted under repo-root charts-public/.
  * @see https://apache.github.io/echarts-handbook/en/how-to/cross-platform/server/
  */
+// MUST import before `sharp` — sets FONTCONFIG_FILE so libvips finds bundled TTFs.
+import "./fontconfig-init.js";
 import { randomBytes } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -53,15 +55,11 @@ export interface SavedChartResult {
 }
 
 /**
- * Font stack used inside SSR SVG. The Docker runtime installs:
- *   - font-noto (Latin, Cyrillic, Greek, …)
- *   - font-noto-cjk (Chinese / Japanese / Korean)
- *   - font-noto-emoji
- *   - ttf-dejavu (fallback)
- * Naming matches what fontconfig reports (see `fc-list` in the image).
+ * Font stack used inside SSR SVG. Matches the bundled TTFs under `fonts/`
+ * (see `fontconfig-init.ts`). DejaVu Sans covers Latin, Cyrillic, Greek, Vietnamese, math.
+ * Fallbacks are harmless aliases in case host fontconfig has extras.
  */
-const DEFAULT_FONT_FAMILY =
-  '"Noto Sans", "Noto Sans CJK SC", "Noto Sans CJK JP", "Noto Color Emoji", "DejaVu Sans", sans-serif';
+const DEFAULT_FONT_FAMILY = '"DejaVu Sans", sans-serif';
 
 export function renderEChartOptionToSvg(
   option: Record<string, unknown>,
