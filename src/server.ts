@@ -1,6 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { registerExecuteReadonlySqlTool } from "./tools/execute-readonly-sql.js";
+import { registerFindCompaniesTool } from "./tools/find-companies.js";
+import { registerFindContactsTool } from "./tools/find-contacts.js";
 import { registerFindProjectsTool } from "./tools/find-projects.js";
 import { registerFindProjectLinkedinConversationsTool } from "./tools/find-project-linkedin-conversations.js";
 import { registerFindProjectFlowsTool } from "./tools/find-project-flows.js";
@@ -10,6 +13,7 @@ import { registerGetProjectSyncStatusTool } from "./tools/get-project-sync-statu
 import { registerStartProjectSyncTool } from "./tools/start-project-sync.js";
 import { registerRenderChartTool } from "./tools/render-chart.js";
 import { registerRenderFunnelChartTool } from "./tools/render-funnel-chart.js";
+import { registerListSupabaseSchemaTool } from "./tools/list-supabase-schema.js";
 
 function createMcpServer(): McpServer {
   const server = new McpServer({
@@ -17,6 +21,10 @@ function createMcpServer(): McpServer {
     version: "0.1.0",
   });
   registerFindProjectsTool(server);
+  registerFindContactsTool(server);
+  registerFindCompaniesTool(server);
+  registerListSupabaseSchemaTool(server);
+  registerExecuteReadonlySqlTool(server);
   registerGetProjectSyncStatusTool(server);
   registerStartProjectSyncTool(server);
   registerFindProjectLinkedinConversationsTool(server);

@@ -28,7 +28,8 @@ function pct(v: number | null): string {
 }
 
 /**
- * Build ECharts option: N funnels laid out in a grid. Each funnel has 4 stages.
+ * Build ECharts option: N funnels laid out in a grid. Each funnel has 4 stages
+ * (connection sent → accepted → inbox → positive; same counts as AnalyticsSnapshots).
  * Uses one `funnel` series per cell with pixel-free percentage positioning.
  */
 function buildFunnelChartOption(opts: {
@@ -38,7 +39,12 @@ function buildFunnelChartOption(opts: {
   rows: number;
 }): Record<string, unknown> {
   const { cells, headerText, cols, rows } = opts;
-  const stageNames = ["Sent", "Accepted", "Inbox", "Positive"];
+  const stageNames = [
+    "Connection sent",
+    "Connection accepted",
+    "Inbox reply",
+    "Inbox positive",
+  ];
   const palette = ["#5470c6", "#91cc75", "#fac858", "#ee6666"];
 
   // Reserve header (top) and legend area. Grid starts below.
@@ -83,7 +89,13 @@ function buildFunnelChartOption(opts: {
     const m = cell.metrics;
     const subtitle =
       `sent ${m.connection_sent}  ·  acc ${pct(m.accepted_rate_pct)}  ·  ` +
-      `inbox ${pct(m.inbox_rate_pct)}  ·  pos ${pct(m.positive_rate_pct)}`;
+      `inbox ${pct(m.inbox_rate_pct)}  ·  pos ${pct(m.positive_rate_pct)}` +
+      (m.messages_sent > 0
+        ? `  ·  LinkedIn msgs (all sends) ${m.messages_sent}` +
+          (m.connection_request_rate_pct != null
+            ? ` (${pct(m.connection_request_rate_pct)} with conn. req.)`
+            : "")
+        : "");
 
     titles.push({
       text: cell.title,
@@ -105,7 +117,7 @@ function buildFunnelChartOption(opts: {
       min: 0,
       minSize: "15%",
       maxSize: "100%",
-      sort: "descending",
+      sort: "none",
       gap: 2,
       label: {
         show: true,
@@ -118,10 +130,10 @@ function buildFunnelChartOption(opts: {
       labelLine: { show: false },
       itemStyle: { borderColor: "#fff", borderWidth: 1 },
       data: [
-        { value: m.connection_sent, name: "Sent", itemStyle: { color: palette[0] } },
-        { value: m.connection_accepted, name: "Accepted", itemStyle: { color: palette[1] } },
-        { value: m.inbox, name: "Inbox", itemStyle: { color: palette[2] } },
-        { value: m.positive_replies, name: "Positive", itemStyle: { color: palette[3] } },
+        { value: m.connection_sent, name: "Connection sent", itemStyle: { color: palette[0] } },
+        { value: m.connection_accepted, name: "Connection accepted", itemStyle: { color: palette[1] } },
+        { value: m.inbox, name: "Inbox reply", itemStyle: { color: palette[2] } },
+        { value: m.positive_replies, name: "Inbox positive", itemStyle: { color: palette[3] } },
       ],
     });
   });
@@ -162,7 +174,7 @@ Trigger phrases (non-exhaustive): "funnel", "funnel chart", "render funnel", "dr
 "show funnel for flow/hypothesis", "outreach funnel", "conversion funnel", "LinkedIn funnel".
 
 Output: PNG (default) or SVG saved under charts-public/, returns the public image URL.
-Each funnel shows 4 stages: Sent → Accepted → Inbox → Positive, plus subtitle with rates.
+Each funnel shows 4 stages: Connection sent → Connection accepted → Inbox reply → Inbox positive (AnalyticsSnapshots). Subtitle adds rates and optional LinkedIn “all messages sent” count (not a funnel stage).
 
 type="flows": one funnel per flow; entityIds = flow uuids (omit for all flows in project).
 type="hypothesis": resolves hypothesis→flows via GetSales tag→contacts→FlowLeads; one funnel per flow,
@@ -290,7 +302,10 @@ export function registerRenderFunnelChartTool(server: McpServer): void {
       }
 
       // Sort cells by total sent desc for consistent visual order.
-      cells.sort((a, b) => b.metrics.connection_sent - a.metrics.connection_sent);
+      cells.sort((a, b) => {
+        const d = b.metrics.connection_sent - a.metrics.connection_sent;
+        return d !== 0 ? d : b.metrics.messages_sent - a.metrics.messages_sent;
+      });
 
       if (cells.length === 0) {
         return {

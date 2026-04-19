@@ -5,10 +5,16 @@ const router = createRouter({
   routes: [
     { path: "/", name: "Home", component: () => import("../views/HomePage.vue"), meta: { title: "Overview | MCP Toolkit" } },
     {
+      path: "/analytics",
+      name: "Analytics",
+      component: () => import("../views/FlowDashboardPage.vue"),
+      meta: { title: "Analytics | MCP Toolkit" },
+    },
+    {
       path: "/flow-dashboard",
       name: "FlowDashboard",
       component: () => import("../views/FlowDashboardPage.vue"),
-      meta: { title: "Flow analytics | MCP Toolkit" },
+      meta: { title: "Analytics | MCP Toolkit" },
     },
     { path: "/tables", name: "Tables", component: () => import("../views/TablesPage.vue"), meta: { title: "Tables | MCP Toolkit" } },
     { path: "/sync", name: "Sync", component: () => import("../views/SyncPage.vue"), meta: { title: "Sync | MCP Toolkit" } },

@@ -1,0 +1,20 @@
+/**
+ * Naive UI DataTable paints cell backgrounds on <td> with high specificity.
+ * Scoped / :deep from parent SFC often fails to override — keep these rules global
+ * and scope by .amm-metric-matrix-root only.
+ */
+
+/* Broad: works for main + fixed-column split tables when scroll-x is set */
+.amm-metric-matrix-root tbody tr.n-data-table-tr.amm-metric-row--selected td.n-data-table-td,
+.amm-metric-matrix-root tbody tr.n-data-table-tr.amm-metric-row--selected th.n-data-table-th {
+  background-color: color-mix(
+    in srgb,
+    var(--n-primary-color) 32%,
+    var(--n-color-embedded, var(--n-color))
+  ) !important;
+}
+
+
+.amm-metric-row--selected {
+  background:rgba(255,255,255,0.08) !important;
+}

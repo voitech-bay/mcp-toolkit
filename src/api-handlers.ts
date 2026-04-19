@@ -85,6 +85,12 @@ import {
   COMPANIES_TABLE,
   CONTACTS_TABLE,
 } from "./services/supabase.js";
+import {
+  getProjectAnalyticsDashboard,
+  getProjectAnalyticsDailySeries,
+  type ProjectAnalyticsDashboardTotals,
+} from "./services/analytics-funnel.js";
+import { getProjectConversationGeoAggregates } from "./services/project-conversation-geo.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
 import {
   resolvePromptForBatch,
@@ -517,6 +523,204 @@ export async function handleFlowFunnel(
       warnings: mergedWarnings,
       projectTotals,
       comparison,
+    })
+  );
+}
+
+function projectAnalyticsTotalsToJson(t: ProjectAnalyticsDashboardTotals) {
+  return {
+    messagesSent: t.messagesSent,
+    connectionSent: t.connectionSent,
+    connectionAccepted: t.connectionAccepted,
+    inbox: t.inbox,
+    positiveReplies: t.positiveReplies,
+    connectionRequestRatePct: t.connectionRequestRatePct,
+    acceptedRatePct: t.acceptedRatePct,
+    inboxRatePct: t.inboxRatePct,
+    positiveRatePct: t.positiveRatePct,
+  };
+}
+
+/**
+ * GET /api/project-analytics?projectId=&dateFrom=&dateTo=&groupBy=flow|hypothesis
+ * — same aggregation as `find_project_analytics` MCP tool (flow vs hypothesis rollups).
+ */
+export async function handleProjectAnalytics(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const q = getQueryParams(req);
+  const projectId = q.get("projectId")?.trim() ?? "";
+  const dateFrom = q.get("dateFrom")?.trim() ?? "";
+  const dateTo = q.get("dateTo")?.trim() ?? "";
+  const groupByRaw = (q.get("groupBy") ?? "flow").trim().toLowerCase();
+  const groupBy = groupByRaw === "hypothesis" ? "hypothesis" : "flow";
+
+  if (!projectId || !PROJECT_ID_RE.test(projectId)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid projectId" }));
+    return;
+  }
+  if (!YMD_RE.test(dateFrom) || !YMD_RE.test(dateTo)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "dateFrom and dateTo are required (YYYY-MM-DD)" }));
+    return;
+  }
+  if (dateFrom > dateTo) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "dateFrom must be <= dateTo" }));
+    return;
+  }
+  if (groupByRaw !== "flow" && groupByRaw !== "hypothesis") {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "groupBy must be flow or hypothesis" }));
+    return;
+  }
+
+  const dash = await getProjectAnalyticsDashboard(client, projectId, dateFrom, dateTo, groupBy);
+  if (dash.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: dash.error }));
+    return;
+  }
+
+  const windowDays = funnelInclusiveDayCount(dateFrom, dateTo);
+  const previousTo = funnelAddDaysYmd(dateFrom, -1);
+  const previousFrom = funnelAddDaysYmd(previousTo, -(windowDays - 1));
+  const mergedWarnings = [...dash.warnings];
+  let comparison: {
+    previousDateFrom: string;
+    previousDateTo: string;
+    totals: ReturnType<typeof projectAnalyticsTotalsToJson>;
+  } | null = null;
+  const prevDash = await getProjectAnalyticsDashboard(
+    client,
+    projectId,
+    previousFrom,
+    previousTo,
+    groupBy
+  );
+  if (prevDash.error) {
+    mergedWarnings.push(
+      `Previous window (${previousFrom}…${previousTo}): ${prevDash.error}`
+    );
+  } else {
+    mergedWarnings.push(...prevDash.warnings);
+    comparison = {
+      previousDateFrom: previousFrom,
+      previousDateTo: previousTo,
+      totals: projectAnalyticsTotalsToJson(prevDash.projectTotals),
+    };
+  }
+
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      groupBy,
+      flows: dash.flows,
+      dateFrom,
+      dateTo,
+      warnings: mergedWarnings,
+      projectTotals: projectAnalyticsTotalsToJson(dash.projectTotals),
+      comparison,
+    })
+  );
+}
+
+/**
+ * GET /api/project-analytics-daily?projectId=&dateFrom=&dateTo=&groupBy=flow|hypothesis&entityIds=uuid,uuid
+ * — per-day sums of AnalyticsSnapshots for the union of flows behind the selected entities.
+ */
+export async function handleProjectAnalyticsDaily(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const q = getQueryParams(req);
+  const projectId = q.get("projectId")?.trim() ?? "";
+  const dateFrom = q.get("dateFrom")?.trim() ?? "";
+  const dateTo = q.get("dateTo")?.trim() ?? "";
+  const groupByRaw = (q.get("groupBy") ?? "flow").trim().toLowerCase();
+  const groupBy = groupByRaw === "hypothesis" ? "hypothesis" : "flow";
+  const entityIdsParam = q.get("entityIds")?.trim() ?? "";
+  const entityIds = entityIdsParam
+    .split(",")
+    .map((s) => s.trim())
+    .filter((id) => PROJECT_ID_RE.test(id));
+  const perEntityRaw = (q.get("perEntity") ?? "").trim().toLowerCase();
+  const perEntity = perEntityRaw === "1" || perEntityRaw === "true" || perEntityRaw === "yes";
+
+  if (!projectId || !PROJECT_ID_RE.test(projectId)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid projectId" }));
+    return;
+  }
+  if (!YMD_RE.test(dateFrom) || !YMD_RE.test(dateTo)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "dateFrom and dateTo are required (YYYY-MM-DD)" }));
+    return;
+  }
+  if (dateFrom > dateTo) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "dateFrom must be <= dateTo" }));
+    return;
+  }
+  if (groupByRaw !== "flow" && groupByRaw !== "hypothesis") {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "groupBy must be flow or hypothesis" }));
+    return;
+  }
+
+  const result = await getProjectAnalyticsDailySeries(
+    client,
+    projectId,
+    dateFrom,
+    dateTo,
+    groupBy,
+    entityIds,
+    { perEntity }
+  );
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      groupBy,
+      entityIds,
+      dateFrom,
+      dateTo,
+      perEntity,
+      series: result.data,
+      ...(result.byEntity != null && result.byEntity.length > 0 ? { byEntity: result.byEntity } : {}),
+      warnings: result.warnings,
     })
   );
 }
@@ -2395,6 +2599,49 @@ export async function handleGetConversationsList(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+/**
+ * Aggregated country-level metrics for a project's most recent LinkedIn
+ * conversations. Used by the Geo insights tab to render a world map,
+ * top-countries bar, and flow→country→reply sankey.
+ */
+export async function handleProjectConversationGeo(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim() ?? "";
+  if (!projectId || !PROJECT_ID_RE.test(projectId)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid projectId" }));
+    return;
+  }
+  const limit = Math.min(
+    Math.max(parseInt(params.get("limit") ?? "500", 10) || 500, 1),
+    2000
+  );
+  const result = await getProjectConversationGeoAggregates(client, projectId, { limit });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify(result));
 }
 
 export async function handleGetContactPipelineStages(

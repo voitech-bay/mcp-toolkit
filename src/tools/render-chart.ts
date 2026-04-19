@@ -7,7 +7,7 @@ const RENDER_CHART_INSTRUCTIONS = `
 Generic ECharts renderer for ad-hoc bar/line/pie/scatter charts from arbitrary data.
 
 DO NOT USE for LinkedIn outreach funnels by flow or hypothesis — use \`render_funnel_chart\` instead.
-That tool fetches AnalyticsSnapshots and builds the funnel (Sent → Accepted → Inbox → Positive) correctly.
+That tool fetches AnalyticsSnapshots and builds the funnel (Connection sent → Connection accepted → Inbox reply → Inbox positive) correctly.
 Only fall back to \`render_chart\` for funnels if the user explicitly supplies custom data / stages
 that don't come from analytics.
 

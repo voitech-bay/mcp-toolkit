@@ -18,6 +18,8 @@ import {
   handleAnalyticsCollectedDays,
   handleProjectDashboard,
   handleFlowFunnel,
+  handleProjectAnalytics,
+  handleProjectAnalyticsDaily,
   handleAnalyticsSync,
   handleConversation,
   handleGetCompanyContext,
@@ -45,6 +47,7 @@ import {
   handleBuildContext,
   handleGetContextSnapshots,
   handleGetConversationsList,
+  handleProjectConversationGeo,
   handleGetContactPipelineStages,
   handleGetCompanyHypotheses,
   handleGetContactsByCompany,
@@ -405,6 +408,22 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/project-analytics":
+        if (req.method === "GET") {
+          await handleProjectAnalytics(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/project-analytics-daily":
+        if (req.method === "GET") {
+          await handleProjectAnalyticsDaily(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/analytics-collected-days":
         if (req.method === "GET") {
           await handleAnalyticsCollectedDays(req, res);
@@ -433,6 +452,14 @@ const server = createServer(async (req, res) => {
       case "/api/conversations":
         if (req.method === "GET") {
           await handleGetConversationsList(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/project-conversation-geo":
+        if (req.method === "GET") {
+          await handleProjectConversationGeo(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -811,11 +838,16 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  POST /api/supabase-sync-cancel");
   console.log("  GET  /api/project-dashboard?projectId=<id>");
   console.log("  GET  /api/flow-funnel?projectId=<id>&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD");
+  console.log(
+    "  GET  /api/project-analytics?projectId=<id>&dateFrom=...&dateTo=...&groupBy=flow|hypothesis",
+    "  GET  /api/project-analytics-daily?projectId=&dateFrom=&dateTo=&groupBy=flow|hypothesis&entityIds=uuid,uuid"
+  );
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");
   console.log("  POST /api/analytics-sync");
   console.log("  POST /api/webhooks/fireflies");
   console.log("  GET  /api/supabase-table-query");
   console.log("  GET  /api/conversation");
+  console.log("  GET  /api/project-conversation-geo?projectId=<id>&limit=<n>");
   console.log("  GET  /api/company-context");
   console.log("  POST /api/company-context");
   console.log("  GET  /api/company-context-counts?company_ids=...");

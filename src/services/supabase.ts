@@ -1474,6 +1474,11 @@ export async function getSenders(
 
 // --- Contacts (table: Contacts) ---
 
+/** Escape `\`, `%`, `_` for safe use inside PostgREST `ilike` patterns (callers wrap with `%…%`). */
+export function escapeIlikeMetacharacters(raw: string): string {
+  return raw.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
 export interface GetContactsParams {
   uuid?: string;
   teamId?: number;
@@ -1631,6 +1636,57 @@ export async function getContacts(
   const { data, error } = await query;
   if (error) return { data: [], error: error.message };
   return { data: data ?? [], error: null };
+}
+
+/**
+ * Find contacts in a project. Non-empty filters are combined with AND.
+ * Supply at least one of `nameLike`, `contactUuids`, or `companyNameLike`.
+ */
+export async function findContactsForProject(
+  client: SupabaseClient,
+  params: {
+    projectId: string;
+    nameLike?: string | null;
+    contactUuids?: string[] | null;
+    companyNameLike?: string | null;
+    limit?: number;
+  }
+): Promise<{ data: Array<Record<string, unknown>>; error: string | null }> {
+  const nameLike = params.nameLike?.trim() ?? "";
+  const companyNameLike = params.companyNameLike?.trim() ?? "";
+  const contactUuids = [...new Set((params.contactUuids ?? []).filter(Boolean))];
+  if (nameLike.length === 0 && contactUuids.length === 0 && companyNameLike.length === 0) {
+    return {
+      data: [],
+      error: "Provide at least one of: nameLike, contactUuids, or companyNameLike.",
+    };
+  }
+
+  const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
+
+  let query = client
+    .from(CONTACTS_TABLE)
+    .select(
+      "uuid, name, first_name, last_name, company_name, company_uuid, position, linkedin, work_email, project_id, created_at"
+    )
+    .eq("project_id", params.projectId);
+
+  if (contactUuids.length > 0) {
+    query = query.in("uuid", contactUuids);
+  }
+  if (nameLike.length > 0) {
+    const pattern = `%${escapeIlikeMetacharacters(nameLike)}%`;
+    query = query.or(`name.ilike.${pattern},first_name.ilike.${pattern},last_name.ilike.${pattern}`);
+  }
+  if (companyNameLike.length > 0) {
+    query = query.ilike("company_name", `%${escapeIlikeMetacharacters(companyNameLike)}%`);
+  }
+
+  query = query.order("created_at", { ascending: false }).limit(limit);
+
+  const { data, error } = await query;
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as Array<Record<string, unknown>>, error: null };
 }
 
 // --- Table counts (for /api/supabase-state) ---
@@ -1904,6 +1960,8 @@ export async function getAutomationFlowFunnelByFlow(
 /** Home / overview: sync time, analytics coverage, entity and conversation totals. */
 export interface ProjectDashboardSnapshot {
   lastSyncFinishedAt: string | null;
+  /** Earliest calendar day with analytics snapshot rows (YYYY-MM-DD). */
+  firstAnalyticsDate: string | null;
   lastAnalyticsDate: string | null;
   totalAnalyticsDays: number;
   counts: TableCounts;
@@ -1947,6 +2005,7 @@ export async function getProjectDashboardSnapshot(
     return {
       snapshot: {
         lastSyncFinishedAt: null,
+        firstAnalyticsDate: null,
         lastAnalyticsDate: null,
         totalAnalyticsDays: 0,
         counts: { ...ZERO_COUNTS },
@@ -1964,6 +2023,8 @@ export async function getProjectDashboardSnapshot(
   if (hypRes.error) warnings.push(`Hypotheses count: ${hypRes.error.message}`);
 
   const analyticsDates = analyticsResult.error ? [] : analyticsResult.dates;
+  const firstAnalyticsDate =
+    analyticsDates.length > 0 ? analyticsDates[0]! : null;
   const lastAnalyticsDate =
     analyticsDates.length > 0 ? analyticsDates[analyticsDates.length - 1]! : null;
 
@@ -1988,6 +2049,7 @@ export async function getProjectDashboardSnapshot(
   return {
     snapshot: {
       lastSyncFinishedAt,
+      firstAnalyticsDate,
       lastAnalyticsDate,
       totalAnalyticsDays: analyticsDates.length,
       counts: countsResult.counts,
@@ -2240,6 +2302,107 @@ export async function addCompaniesToProject(
 export const PROJECT_COMPANIES_TABLE = "project_companies";
 export const HYPOTHESES_TABLE = "hypotheses";
 export const HYPOTHESIS_TARGETS_TABLE = "hypothesis_targets";
+
+/** Row returned by {@link findCompanies}. */
+export interface FindCompanyRow {
+  id: string;
+  name: string | null;
+  domain: string | null;
+  linkedin: string | null;
+  created_at: string | null;
+  /** Set when `projectId` was passed (link id in `project_companies`). */
+  project_company_id: string | null;
+}
+
+/**
+ * Find companies by exact id list and/or case-insensitive name/domain substring match.
+ * When `projectId` is set, only companies linked to that project (`project_companies`) are considered.
+ * Non-empty filters are combined with AND.
+ */
+export async function findCompanies(
+  client: SupabaseClient,
+  params: {
+    projectId?: string | null;
+    nameLike?: string | null;
+    companyIds?: string[] | null;
+    limit?: number;
+  }
+): Promise<{ data: FindCompanyRow[]; error: string | null }> {
+  const nameLike = params.nameLike?.trim() ?? "";
+  const companyIds = [...new Set((params.companyIds ?? []).filter(Boolean))];
+  if (nameLike.length === 0 && companyIds.length === 0) {
+    return { data: [], error: "Provide at least one of: nameLike or companyIds." };
+  }
+
+  const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
+  const projectId = params.projectId?.trim() ?? "";
+
+  if (projectId.length > 0) {
+    let q = client
+      .from(PROJECT_COMPANIES_TABLE)
+      .select("id, company_id, companies!inner(id, name, domain, linkedin, created_at)")
+      .eq("project_id", projectId);
+
+    if (companyIds.length > 0) {
+      q = q.in("company_id", companyIds);
+    }
+    if (nameLike.length > 0) {
+      const pattern = `%${escapeIlikeMetacharacters(nameLike)}%`;
+      q = q.or(`name.ilike.${pattern},domain.ilike.${pattern}`, {
+        referencedTable: "companies",
+      });
+    }
+
+    q = q.order("created_at", { ascending: false }).limit(limit);
+
+    const { data, error } = await q;
+    if (error) return { data: [], error: error.message };
+
+    const rows: FindCompanyRow[] = [];
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const c = row.companies as Record<string, unknown> | null;
+      if (!c || typeof c.id !== "string") continue;
+      rows.push({
+        id: c.id as string,
+        name: (c.name as string) ?? null,
+        domain: (c.domain as string) ?? null,
+        linkedin: (c.linkedin as string) ?? null,
+        created_at: (c.created_at as string) ?? null,
+        project_company_id: row.id as string,
+      });
+    }
+    return { data: rows, error: null };
+  }
+
+  let q2 = client
+    .from(COMPANIES_TABLE)
+    .select("id, name, domain, linkedin, created_at")
+    .order("name", { ascending: true })
+    .limit(limit);
+
+  if (companyIds.length > 0) {
+    q2 = q2.in("id", companyIds);
+  }
+  if (nameLike.length > 0) {
+    const pattern = `%${escapeIlikeMetacharacters(nameLike)}%`;
+    q2 = q2.or(`name.ilike.${pattern},domain.ilike.${pattern}`);
+  }
+
+  const { data: data2, error: error2 } = await q2;
+  if (error2) return { data: [], error: error2.message };
+
+  return {
+    data: ((data2 ?? []) as Array<Record<string, unknown>>).map((r) => ({
+      id: r.id as string,
+      name: (r.name as string) ?? null,
+      domain: (r.domain as string) ?? null,
+      linkedin: (r.linkedin as string) ?? null,
+      created_at: (r.created_at as string) ?? null,
+      project_company_id: null,
+    })),
+    error: null,
+  };
+}
 
 export interface ProjectCompanyContact {
   first_name: string | null;

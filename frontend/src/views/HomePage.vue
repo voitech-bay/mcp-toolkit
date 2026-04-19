@@ -21,6 +21,7 @@ const projectStore = useProjectStore();
 
 interface DashboardPayload {
   lastSyncFinishedAt: string | null;
+  firstAnalyticsDate: string | null;
   lastAnalyticsDate: string | null;
   totalAnalyticsDays: number;
   counts: TableCounts;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, provide, ref } from "vue";
+import { computed, h, provide, ref, watch } from "vue";
 import { useDark, useNow } from "@vueuse/core";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -54,7 +54,9 @@ const route = useRoute();
 const router = useRouter();
 
 const isHome = computed(() => route.path === "/");
-const isFlowDashboard = computed(() => route.path === "/flow-dashboard");
+const isFlowDashboard = computed(
+  () => route.path === "/flow-dashboard" || route.path === "/analytics"
+);
 
 /** Grouped routes — highlight parent when any child is active. */
 const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
@@ -197,6 +199,80 @@ function toggleTheme() {
 }
 
 projectStore.loadProjects();
+
+/** Header chips: last sync + analytics day range (same payload as home overview). */
+interface HeaderDashboardPayload {
+  lastSyncFinishedAt: string | null;
+  firstAnalyticsDate: string | null;
+  lastAnalyticsDate: string | null;
+}
+
+const headerDashboard = ref<HeaderDashboardPayload | null>(null);
+const headerDashboardLoading = ref(false);
+
+async function loadHeaderDashboard() {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId) {
+    headerDashboard.value = null;
+    return;
+  }
+  headerDashboardLoading.value = true;
+  try {
+    const r = await fetch(`/api/project-dashboard?projectId=${encodeURIComponent(projectId)}`);
+    const data = (await r.json()) as HeaderDashboardPayload & { error?: string };
+    if (!r.ok) {
+      headerDashboard.value = null;
+      return;
+    }
+    headerDashboard.value = {
+      lastSyncFinishedAt: data.lastSyncFinishedAt ?? null,
+      firstAnalyticsDate: data.firstAnalyticsDate ?? null,
+      lastAnalyticsDate: data.lastAnalyticsDate ?? null,
+    };
+  } catch {
+    headerDashboard.value = null;
+  } finally {
+    headerDashboardLoading.value = false;
+  }
+}
+
+watch(
+  () => projectStore.selectedProjectId,
+  () => {
+    void loadHeaderDashboard();
+  },
+  { immediate: true }
+);
+
+function formatHeaderDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString(undefined, {
+      dateStyle: "medium",
+      timeStyle: "short",
+    });
+  } catch {
+    return iso;
+  }
+}
+
+function formatHeaderYmd(ymd: string | null): string {
+  if (!ymd) return "—";
+  try {
+    return new Date(`${ymd}T12:00:00`).toLocaleDateString(undefined, {
+      dateStyle: "medium",
+    });
+  } catch {
+    return ymd;
+  }
+}
+
+function formatHeaderAnalyticsRange(first: string | null, last: string | null): string {
+  if (!first && !last) return "—";
+  if (!first || !last) return formatHeaderYmd(first ?? last);
+  if (first === last) return formatHeaderYmd(first);
+  return `${formatHeaderYmd(first)} – ${formatHeaderYmd(last)}`;
+}
 
 const { workers, loading: workersLoading, error: workersError } = useWorkers();
 
@@ -455,6 +531,43 @@ function renderWorkerLabel(option: DropdownOption) {
               <NSelect v-model:value="selectedProjectId" :options="projectOptions" :loading="projectStore.loading"
                 :render-label="renderProjectLabel" placeholder="Select project…" clearable size="small"
                 style="width: 220px" />
+              <NSpace
+                v-if="selectedProjectId"
+                size="small"
+                align="center"
+                wrap
+                class="header-dash-btns"
+              >
+                <NButton
+                  quaternary
+                  size="small"
+                  class="header-dash-btn"
+                  title="When the last pipeline sync finished — open Sync"
+                  @click="router.push('/sync')"
+                >
+                  <span class="header-dash-btn__k">Latest data sync</span>
+                  <span class="header-dash-btn__v">{{
+                    headerDashboardLoading ? "…" : formatHeaderDateTime(headerDashboard?.lastSyncFinishedAt ?? null)
+                  }}</span>
+                </NButton>
+                <NButton
+                  quaternary
+                  size="small"
+                  class="header-dash-btn"
+                  title="Calendar days covered by stored analytics snapshots — open Analytics"
+                  @click="router.push('/analytics')"
+                >
+                  <span class="header-dash-btn__k">Analytics range synced</span>
+                  <span class="header-dash-btn__v">{{
+                    headerDashboardLoading
+                      ? "…"
+                      : formatHeaderAnalyticsRange(
+                          headerDashboard?.firstAnalyticsDate ?? null,
+                          headerDashboard?.lastAnalyticsDate ?? null
+                        )
+                  }}</span>
+                </NButton>
+              </NSpace>
               <NDropdown
                 trigger="click"
                 :renderLabel="renderWorkerLabel"
@@ -499,10 +612,10 @@ function renderWorkerLabel(option: DropdownOption) {
                   quaternary
                   :type="isFlowDashboard ? 'primary' : undefined"
                   size="small"
-                  @click="router.push('/flow-dashboard')"
+                  @click="router.push('/analytics')"
                 >
                   <BarChart3Icon :size="14" style="margin-right: 4px" />
-                  Flow analytics
+                  Analytics
                 </NButton>
 
                 <NDropdown trigger="hover" placement="bottom-start" :options="dataMenuOptions" :show-arrow="true"
@@ -693,6 +806,47 @@ function renderWorkerLabel(option: DropdownOption) {
   display: flex;
   align-items: center;
   gap: 0.5rem;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.header-dash-btns {
+  min-width: 0;
+}
+
+.header-dash-btn {
+  max-width: min(100%, 260px);
+  height: auto !important;
+  min-height: auto !important;
+  padding: 5px 10px !important;
+  border-radius: 8px;
+  font-weight: inherit;
+
+  :deep(.n-button__content) {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    line-height: 1.25;
+    text-align: left;
+    white-space: normal;
+  }
+}
+
+.header-dash-btn__k {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+.header-dash-btn__v {
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+  color: var(--n-text-color);
 }
 
 .workers-trigger {

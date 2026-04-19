@@ -1,0 +1,1 @@
+async function e(a,n){const c=new URLSearchParams({batchId:n.trim(),projectId:a.trim()}),r=await fetch(`/api/enrichment/batch?${c}`),t=await r.json();if(!r.ok)throw new Error(t.error??`HTTP ${r.status}`);if(!t.batch||!t.runs)throw new Error("Invalid batch response");return{batch:t.batch,runs:t.runs}}export{e as f};
