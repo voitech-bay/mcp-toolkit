@@ -245,6 +245,12 @@ export interface ProjectAnalyticsDashboardFlow {
   }>;
 }
 
+export interface ProjectAnalyticsPipelineStage {
+  stageUuid: string;
+  stageName: string;
+  stageOrder: number | null;
+}
+
 /** Project-wide totals (sum of all flow-level snapshot metrics in range). */
 export interface ProjectAnalyticsDashboardTotals {
   messagesSent: number;
@@ -304,8 +310,6 @@ type FlowStageBreakdown = {
 async function getFlowPipelineStageBreakdown(
   client: SupabaseClient,
   projectId: string,
-  dateFrom: string,
-  dateTo: string,
   flowUuids: string[]
 ): Promise<{ data: Map<string, FlowStageBreakdown[]>; error: string | null }> {
   const out = new Map<string, FlowStageBreakdown[]>();
@@ -322,8 +326,6 @@ async function getFlowPipelineStageBreakdown(
           .select("flow_uuid, lead_uuid")
           .eq("project_id", projectId)
           .in("flow_uuid", chunk)
-          .gte("created_at", `${dateFrom}T00:00:00Z`)
-          .lte("created_at", `${dateTo}T23:59:59Z`)
           .range(offset, offset + pageSize - 1);
         if (error) return { data: out, error: error.message };
         const rows = (data ?? []) as Array<Record<string, unknown>>;
@@ -360,7 +362,8 @@ async function getFlowPipelineStageBreakdown(
     const { data: stageRows, error: stageErr } = await client
       .from(PIPELINE_STAGES_TABLE)
       .select("uuid, name, stage_order")
-      .eq("project_id", projectId);
+      .eq("project_id", projectId)
+      .eq("entity_object", "lead");
     if (stageErr) return { data: out, error: stageErr.message };
 
     const stageMeta = new Map<string, { name: string; order: number | null }>();
@@ -470,27 +473,70 @@ export async function getProjectAnalyticsDashboard(
   groupBy: "flow" | "hypothesis"
 ): Promise<{
   flows: ProjectAnalyticsDashboardFlow[];
+  pipelineStages: ProjectAnalyticsPipelineStage[];
   projectTotals: ProjectAnalyticsDashboardTotals;
   warnings: string[];
   error: string | null;
 }> {
   const agg = await aggregateMetricsByFlow(client, projectId, dateFrom, dateTo);
   if (agg.error) {
-    return { flows: [], projectTotals: emptyDashboardTotals(), warnings: [], error: agg.error };
+    return {
+      flows: [],
+      pipelineStages: [],
+      projectTotals: emptyDashboardTotals(),
+      warnings: [],
+      error: agg.error,
+    };
   }
   const metricsByFlow = agg.data;
   const flowNames = await getFlowNameMap(client, projectId);
   if (flowNames.error) {
-    return { flows: [], projectTotals: emptyDashboardTotals(), warnings: [], error: flowNames.error };
+    return {
+      flows: [],
+      pipelineStages: [],
+      projectTotals: emptyDashboardTotals(),
+      warnings: [],
+      error: flowNames.error,
+    };
   }
   const flowNameByUuid = flowNames.data;
 
   const projectTotals = totalsFromFunnelMetrics(sumAllFlowMetrics(metricsByFlow));
   const warnings: string[] = [];
+  const pipelineStages: ProjectAnalyticsPipelineStage[] = [];
+  const { data: stageRows, error: stageErr } = await client
+    .from(PIPELINE_STAGES_TABLE)
+    .select("uuid, name, stage_order")
+    .eq("project_id", projectId)
+    .eq("entity_object", "lead");
+  if (stageErr) {
+    warnings.push(`Pipeline stages list: ${stageErr.message}`);
+  } else {
+    const seen = new Set<string>();
+    for (const row of (stageRows ?? []) as Array<Record<string, unknown>>) {
+      const stageUuid = typeof row.uuid === "string" ? row.uuid : "";
+      const stageName = typeof row.name === "string" ? row.name.trim() : "";
+      const orderRaw = row.stage_order;
+      const stageOrder =
+        typeof orderRaw === "number"
+          ? Math.trunc(orderRaw)
+          : typeof orderRaw === "string" && /^\d+$/.test(orderRaw)
+            ? parseInt(orderRaw, 10)
+            : null;
+      if (!stageUuid || !stageName || seen.has(stageUuid)) continue;
+      seen.add(stageUuid);
+      pipelineStages.push({ stageUuid, stageName, stageOrder });
+    }
+    pipelineStages.sort((a, b) => {
+      const ao = a.stageOrder ?? Number.MAX_SAFE_INTEGER;
+      const bo = b.stageOrder ?? Number.MAX_SAFE_INTEGER;
+      return ao - bo || a.stageName.localeCompare(b.stageName);
+    });
+  }
 
   if (groupBy === "flow") {
     const flowIds = [...new Set<string>([...metricsByFlow.keys(), ...flowNameByUuid.keys()])];
-    const stageRes = await getFlowPipelineStageBreakdown(client, projectId, dateFrom, dateTo, flowIds);
+    const stageRes = await getFlowPipelineStageBreakdown(client, projectId, flowIds);
     // Keep funnel payload clean if optional pipeline enrichment fails.
     const flows = flowIds.map((id) => {
       const m = finalizeRates({ ...(metricsByFlow.get(id) ?? emptyMetrics()) });
@@ -507,20 +553,18 @@ export async function getProjectAnalyticsDashboard(
         b.connectionSent - a.connectionSent ||
         a.flowName.localeCompare(b.flowName, undefined, { sensitivity: "base" })
     );
-    return { flows, projectTotals, warnings, error: null };
+    return { flows, pipelineStages, projectTotals, warnings, error: null };
   }
 
   const hypsRes = await resolveHypothesisFlows(client, projectId);
   if (hypsRes.error) {
-    return { flows: [], projectTotals, warnings: [], error: hypsRes.error };
+    return { flows: [], pipelineStages, projectTotals, warnings: [], error: hypsRes.error };
   }
 
   const allHypFlowUuids = [...new Set(hypsRes.data.flatMap((h) => h.flow_uuids))];
   const stageRes = await getFlowPipelineStageBreakdown(
     client,
     projectId,
-    dateFrom,
-    dateTo,
     allHypFlowUuids
   );
   // Keep funnel payload clean if optional pipeline enrichment fails.
@@ -578,7 +622,7 @@ export async function getProjectAnalyticsDashboard(
       b.connectionSent - a.connectionSent ||
       a.flowName.localeCompare(b.flowName, undefined, { sensitivity: "base" })
   );
-  return { flows, projectTotals, warnings, error: null };
+  return { flows, pipelineStages, projectTotals, warnings, error: null };
 }
 
 const YMD_DAILY_RE = /^\d{4}-\d{2}-\d{2}$/;

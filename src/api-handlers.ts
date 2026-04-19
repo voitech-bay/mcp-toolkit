@@ -631,6 +631,7 @@ export async function handleProjectAnalytics(
     JSON.stringify({
       groupBy,
       flows: dash.flows,
+      pipelineStages: dash.pipelineStages,
       dateFrom,
       dateTo,
       warnings: mergedWarnings,

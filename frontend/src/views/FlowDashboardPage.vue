@@ -394,6 +394,68 @@ function flowAlluviumColor(index: number, dark: boolean, isOther: boolean): stri
 type FunnelSankeyMode = "absolute" | "conversion" | "downstream" | "reach";
 
 const funnelSankeyMode = ref<FunnelSankeyMode>("absolute");
+type PipelineStageOptionLite = { stageUuid: string; stageName: string; stageOrder: number | null };
+const availablePipelineStages = ref<PipelineStageOptionLite[]>([]);
+const selectedPipelineStageUuids = ref<string[]>([]);
+const pipelineStagePositions = ref<Record<string, number>>({});
+const pipelineStageNameByUuid = computed(() => {
+  const out: Record<string, string> = {};
+  for (const s of availablePipelineStages.value) out[s.stageUuid] = s.stageName;
+  return out;
+});
+const pipelineStageOptions = computed((): SelectOption[] =>
+  availablePipelineStages.value.map((s) => ({ label: s.stageName, value: s.stageUuid }))
+);
+const selectedPipelineStageConfigs = computed(() =>
+  selectedPipelineStageUuids.value
+    .map((id) => {
+      const row = availablePipelineStages.value.find((s) => s.stageUuid === id);
+      if (!row) return null;
+      return {
+        stageUuid: row.stageUuid,
+        stageName: row.stageName,
+        position: Math.max(1, Math.trunc(pipelineStagePositions.value[row.stageUuid] ?? 1)),
+      };
+    })
+    .filter((x): x is { stageUuid: string; stageName: string; position: number } => x != null)
+);
+
+watch(
+  availablePipelineStages,
+  (list) => {
+    const allowed = new Set(list.map((s) => s.stageUuid));
+    const kept = selectedPipelineStageUuids.value.filter((id) => allowed.has(id));
+    if (kept.length === 0 && list.length > 0) {
+      const preferred = list
+        .filter((s) => {
+          const n = s.stageName.trim().toLowerCase();
+          return n === "handraiser" || n === "opportunity" || n === "active opportunity";
+        })
+        .map((s) => s.stageUuid);
+      selectedPipelineStageUuids.value = preferred.length > 0 ? preferred : list.slice(0, 2).map((s) => s.stageUuid);
+    } else {
+      selectedPipelineStageUuids.value = kept;
+    }
+    const nextPos: Record<string, number> = {};
+    const selectedSet = new Set(selectedPipelineStageUuids.value);
+    const ordered = [...selectedPipelineStageUuids.value].sort((a, b) => {
+      const ao = pipelineStagePositions.value[a] ?? Number.MAX_SAFE_INTEGER;
+      const bo = pipelineStagePositions.value[b] ?? Number.MAX_SAFE_INTEGER;
+      if (ao !== bo) return ao - bo;
+      const an = pipelineStageNameByUuid.value[a] ?? a;
+      const bn = pipelineStageNameByUuid.value[b] ?? b;
+      return an.localeCompare(bn);
+    });
+    let idx = 1;
+    for (const id of ordered) {
+      if (!selectedSet.has(id)) continue;
+      nextPos[id] = Math.max(1, Math.trunc(pipelineStagePositions.value[id] ?? idx));
+      idx += 1;
+    }
+    pipelineStagePositions.value = nextPos;
+  },
+  { deep: true, immediate: true }
+);
 
 const reachModeAvailable = computed(
   () =>
@@ -1267,7 +1329,8 @@ function stageColorByMode(mode: FunnelSankeyMode, stageIndex: number, dark: bool
 function buildNormalizedAlluvial(
   buckets: FunnelBucket[],
   mode: FunnelSankeyMode,
-  dark: boolean
+  dark: boolean,
+  selectedPipelineStages: Array<{ stageUuid: string; stageName: string; position: number }>
 ): AlluvialModel | null {
   const flowMeta = buckets.map((b, idx) => ({
     bucket: b,
@@ -1329,190 +1392,109 @@ function buildNormalizedAlluvial(
 
   const sumSent = buckets.reduce((s, b) => s + b.sent, 0);
   const sumAcc = buckets.reduce((s, b) => s + b.accepted, 0);
-  const hasPipelineStageData = buckets.some((b) => (b.pipelineStageBreakdown?.length ?? 0) > 0);
+  const hasPipelineStageData =
+    selectedPipelineStages.length > 0 &&
+    buckets.some((b) => (b.pipelineStageBreakdown?.length ?? 0) > 0);
   if (mode !== "downstream" && sumSent <= 0) return null;
   if (mode === "downstream" && sumAcc <= 0) return null;
+  const pipeStageId = (uuid: string) => `pipe:${uuid}`;
+  const selectedPipelineSorted = [...selectedPipelineStages]
+    .filter((s) => s.stageUuid && s.stageName.trim().length > 0)
+    .sort((a, b) => a.position - b.position || a.stageName.localeCompare(b.stageName));
+  const insertPipelineStages = (base: string[]): string[] => {
+    if (!hasPipelineStageData || selectedPipelineSorted.length === 0) return base;
+    const out = [...base];
+    for (const s of selectedPipelineSorted) {
+      const id = pipeStageId(s.stageUuid);
+      if (out.includes(id)) continue;
+      const at = Math.max(0, Math.min(out.length, Math.trunc(s.position) - 1));
+      out.splice(at, 0, id);
+    }
+    return out;
+  };
+  const stageLabel = (stageId: string): string => {
+    if (stageId === "total") return "Total";
+    if (stageId === "byFlow") return "By flow";
+    if (stageId === "byReach") return "By reach";
+    if (stageId === "sent") return "Sent";
+    if (stageId === "accepted") return "Accepted";
+    if (stageId === "inbox") return "Inbox";
+    if (stageId === "positive") return "Positive";
+    if (stageId.startsWith("pipe:")) {
+      const uuid = stageId.slice("pipe:".length);
+      return selectedPipelineSorted.find((s) => s.stageUuid === uuid)?.stageName ?? "Pipeline";
+    }
+    return stageId;
+  };
+  const countPipelineStage = (b: FunnelBucket, stageUuid: string): number =>
+    (b.pipelineStageBreakdown ?? [])
+      .filter((x) => x.stageUuid === stageUuid)
+      .reduce((sum, x) => sum + Math.max(0, x.contactsCount | 0), 0);
 
+  let baseStageSeq: string[] = [];
+  let totalStageId: string | null = null;
+  let totalNodeId = "";
+  let totalNodeLabel = "";
+  const reachBasis = flowMeta.map(({ bucket: b }) => Math.max(Math.max(0, b.reach ?? 0), b.sent));
+  const reachBasisSum = reachBasis.reduce((s, n) => s + n, 0);
   if (mode === "conversion") {
-    const stageIds = [
-      "total",
-      "byFlow",
-      "accepted",
-      "inbox",
-      "positive",
-      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
-    ] as const;
-    stageIds.forEach((sid, i) => {
-      const label =
-        sid === "total"
-          ? "Total"
-          : sid === "byFlow"
-            ? "By flow"
-            : sid === "accepted"
-              ? "Accepted"
-              : sid === "inbox"
-                ? "Inbox"
-                : sid === "positive"
-                  ? "Positive"
-                  : "Pipeline";
-      addStage(sid, label, stageColorByMode(mode, i, dark));
-    });
-    addEntry("total", "total:all", "All connections", sumSent, -1, stageColorByMode(mode, 0, dark));
-
-    flowMeta.forEach(({ bucket: b, flowId, rank, color }) => {
-      addEntry("byFlow", flowId, b.label, b.sent, rank, color);
-      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
-      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
-      addEntry("positive", flowId, b.label, b.positive, rank, color);
-
-      addRibbon("total", "byFlow", "total:all", flowId, b.sent, color, 0.38, "All connections", b.label);
-      addRibbon("byFlow", "accepted", flowId, flowId, b.accepted, color, 0.54, b.label, b.label);
-      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
-      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
-      if (hasPipelineStageData) {
-        const rows = b.pipelineStageBreakdown ?? [];
-        for (const ps of rows) {
-          const stageName = ps.stageName?.trim();
-          if (!stageName) continue;
-          const count = Math.max(0, ps.contactsCount | 0);
-          if (count <= 0) continue;
-          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
-          const stageId = `pstage:${ps.stageUuid || stageName}`;
-          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
-          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
-        }
-      }
-    });
-  } else if (mode === "downstream") {
-    const stageIds = [
-      "accepted",
-      "inbox",
-      "positive",
-      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
-    ] as const;
-    stageIds.forEach((sid, i) => {
-      const label =
-        sid === "accepted" ? "Accepted" : sid === "inbox" ? "Inbox" : sid === "positive" ? "Positive" : "Pipeline";
-      addStage(sid, label, stageColorByMode(mode, i, dark));
-    });
-    flowMeta.forEach(({ bucket: b, flowId, rank, color }) => {
-      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
-      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
-      addEntry("positive", flowId, b.label, b.positive, rank, color);
-
-      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
-      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
-      if (hasPipelineStageData) {
-        const rows = b.pipelineStageBreakdown ?? [];
-        for (const ps of rows) {
-          const stageName = ps.stageName?.trim();
-          if (!stageName) continue;
-          const count = Math.max(0, ps.contactsCount | 0);
-          if (count <= 0) continue;
-          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
-          const stageId = `pstage:${ps.stageUuid || stageName}`;
-          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
-          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
-        }
-      }
-    });
+    baseStageSeq = ["total", "byFlow", "accepted", "inbox", "positive"];
+    totalStageId = "total";
+    totalNodeId = "total:all";
+    totalNodeLabel = "All connections";
   } else if (mode === "reach") {
-    const stageIds = [
-      "total",
-      "byReach",
-      "sent",
-      "accepted",
-      "inbox",
-      "positive",
-      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
-    ] as const;
-    stageIds.forEach((sid, i) => {
-      const label =
-        sid === "total"
-          ? "Total"
-          : sid === "byReach"
-            ? "By reach"
-            : sid === "sent"
-              ? "Sent"
-              : sid === "accepted"
-                ? "Accepted"
-                : sid === "inbox"
-                  ? "Inbox"
-                  : sid === "positive"
-                    ? "Positive"
-                    : "Pipeline";
-      addStage(sid, label, stageColorByMode(mode, i, dark));
-    });
-    const basis = flowMeta.map(({ bucket: b }) => Math.max(Math.max(0, b.reach ?? 0), b.sent));
-    const basisSum = basis.reduce((s, n) => s + n, 0);
-    if (basisSum <= 0) return null;
-    addEntry("total", "total:reach", "Tagged reach (all)", basisSum, -1, stageColorByMode(mode, 0, dark));
-
-    flowMeta.forEach(({ bucket: b, flowId, rank, color }, i) => {
-      const bi = basis[i] ?? 0;
-      const reachLabel = b.label;
-      addEntry("byReach", flowId, reachLabel, bi, rank, color);
-      addEntry("sent", flowId, b.label, b.sent, rank, color);
-      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
-      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
-      addEntry("positive", flowId, b.label, b.positive, rank, color);
-
-      addRibbon("total", "byReach", "total:reach", flowId, bi, color, 0.38, "Tagged reach (all)", reachLabel);
-      addRibbon("byReach", "sent", flowId, flowId, b.sent, color, 0.48, b.label, b.label);
-      addRibbon("sent", "accepted", flowId, flowId, b.accepted, color, 0.54, b.label, b.label);
-      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
-      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
-      if (hasPipelineStageData) {
-        const rows = b.pipelineStageBreakdown ?? [];
-        for (const ps of rows) {
-          const stageName = ps.stageName?.trim();
-          if (!stageName) continue;
-          const count = Math.max(0, ps.contactsCount | 0);
-          if (count <= 0) continue;
-          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
-          const stageId = `pstage:${ps.stageUuid || stageName}`;
-          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
-          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
-        }
-      }
-    });
+    if (reachBasisSum <= 0) return null;
+    baseStageSeq = ["total", "byReach", "sent", "accepted", "inbox", "positive"];
+    totalStageId = "total";
+    totalNodeId = "total:reach";
+    totalNodeLabel = "Tagged reach (all)";
+  } else if (mode === "downstream") {
+    baseStageSeq = ["accepted", "inbox", "positive"];
   } else {
-    const stageIds = [
-      "sent",
-      "accepted",
-      "inbox",
-      "positive",
-      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
-    ] as const;
-    stageIds.forEach((sid, i) => {
-      const label =
-        sid === "sent" ? "Sent" : sid === "accepted" ? "Accepted" : sid === "inbox" ? "Inbox" : sid === "positive" ? "Positive" : "Pipeline";
-      addStage(sid, label, stageColorByMode(mode, i, dark));
-    });
-    flowMeta.forEach(({ bucket: b, flowId, rank, color }) => {
-      addEntry("sent", flowId, b.label, b.sent, rank, color);
-      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
-      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
-      addEntry("positive", flowId, b.label, b.positive, rank, color);
-
-      addRibbon("sent", "accepted", flowId, flowId, b.accepted, color, 0.54, b.label, b.label);
-      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
-      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
-      if (hasPipelineStageData) {
-        const rows = b.pipelineStageBreakdown ?? [];
-        for (const ps of rows) {
-          const stageName = ps.stageName?.trim();
-          if (!stageName) continue;
-          const count = Math.max(0, ps.contactsCount | 0);
-          if (count <= 0) continue;
-          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
-          const stageId = `pstage:${ps.stageUuid || stageName}`;
-          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
-          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
-        }
-      }
-    });
+    baseStageSeq = ["sent", "accepted", "inbox", "positive"];
   }
+  const stageSeq = insertPipelineStages(baseStageSeq);
+  stageSeq.forEach((sid, i) => addStage(sid, stageLabel(sid), stageColorByMode(mode, i, dark)));
+
+  if (totalStageId) {
+    const totalValue = mode === "reach" ? reachBasisSum : sumSent;
+    addEntry(totalStageId, totalNodeId, totalNodeLabel, totalValue, -1, stageColorByMode(mode, 0, dark));
+  }
+
+  const flowStageValue = (b: FunnelBucket, stageId: string, flowIndex: number): number => {
+    if (stageId === "byFlow") return b.sent;
+    if (stageId === "byReach") return reachBasis[flowIndex] ?? 0;
+    if (stageId === "sent") return b.sent;
+    if (stageId === "accepted") return b.accepted;
+    if (stageId === "inbox") return b.inbox;
+    if (stageId === "positive") return b.positive;
+    if (stageId.startsWith("pipe:")) return countPipelineStage(b, stageId.slice("pipe:".length));
+    return 0;
+  };
+
+  flowMeta.forEach(({ bucket: b, flowId, rank, color }, i) => {
+    for (const sid of stageSeq) {
+      if (sid === totalStageId) continue;
+      addEntry(sid, flowId, b.label, flowStageValue(b, sid, i), rank, color);
+    }
+    for (let si = 0; si < stageSeq.length - 1; si += 1) {
+      const src = stageSeq[si]!;
+      const tgt = stageSeq[si + 1]!;
+      const raw = flowStageValue(b, tgt, i);
+      if (raw <= 0) continue;
+      addRibbon(
+        src,
+        tgt,
+        src === totalStageId ? totalNodeId : flowId,
+        flowId,
+        raw,
+        color,
+        Math.min(0.66, 0.38 + si * 0.04),
+        src === totalStageId ? totalNodeLabel : b.label,
+        b.label
+      );
+    }
+  });
 
   const slotsByStage: AlluvialSlot[][] = stageOrder.map((s, stageIndex) => {
     const stage = stageMap.get(s.id);
@@ -1630,20 +1612,25 @@ const funnelSankeyOption = computed((): EChartsOption => {
 
   if (buckets.length === 0) return { animation: false, series: [] };
 
-  const model = buildNormalizedAlluvial(buckets, mode, dark);
+  const model = buildNormalizedAlluvial(
+    buckets,
+    mode,
+    dark,
+    selectedPipelineStageConfigs.value
+  );
   if (!model) return { animation: false, series: [] };
 
   const stageLabels = model.stageLabels.map((s) => s.label);
-  const hasPipelineColumn = stageLabels.includes("Pipeline");
+  const hasPipelineColumn = selectedPipelineStageConfigs.value.length > 0;
   const topN = Math.min(buckets.length, FUNNEL_SANKEY_FLOW_LIMIT);
   const subtext =
     mode === "conversion"
-      ? `Conversion (100% per stage) · each column is normalized independently; strata show stage share by ${groupEntitySingular.value}.${hasPipelineColumn ? " Final stage uses contact pipeline stages (Opportunity, Handraiser, etc.)." : ""} Top ${topN} ${groupEntityPlural.value}.`
+      ? `Conversion (100% per stage) · each column is normalized independently; strata show stage share by ${groupEntitySingular.value}.${hasPipelineColumn ? " Selected pipeline stages are inserted by configured positions." : ""} Top ${topN} ${groupEntityPlural.value}.`
       : mode === "downstream"
-        ? `Downstream (100% per stage) · Accepted → Inbox → Positive by ${groupEntitySingular.value}.${hasPipelineColumn ? " Final stage uses contact pipeline stages." : ""} Top ${topN} ${groupEntityPlural.value}.`
+        ? `Downstream (100% per stage) · Accepted → Inbox → Positive by ${groupEntitySingular.value}.${hasPipelineColumn ? " Selected pipeline stages are inserted by configured positions." : ""} Top ${topN} ${groupEntityPlural.value}.`
         : mode === "reach"
-          ? `Reach alluvial (100% per stage) · Reach basis = max(tagged reach, sent), reach capped at ${FUNNEL_REACH_DISPLAY_CAP.toLocaleString()}.${hasPipelineColumn ? " Final stage uses contact pipeline stages." : ""}`
-          : `Absolute alluvial (100% per stage) · Sent → Accepted → Inbox → Positive by ${groupEntitySingular.value}.${hasPipelineColumn ? " Final stage uses contact pipeline stages." : ""}`;
+          ? `Reach alluvial (100% per stage) · Reach basis = max(tagged reach, sent), reach capped at ${FUNNEL_REACH_DISPLAY_CAP.toLocaleString()}.${hasPipelineColumn ? " Selected pipeline stages are inserted by configured positions." : ""}`
+          : `Absolute alluvial (100% per stage) · Sent → Accepted → Inbox → Positive by ${groupEntitySingular.value}.${hasPipelineColumn ? " Selected pipeline stages are inserted by configured positions." : ""}`;
 
   const axisHeaderTop = 52;
   const axisHeaders = model.stageLabels.map((stage, i) => {
@@ -1672,20 +1659,14 @@ const funnelSankeyOption = computed((): EChartsOption => {
   const convPctForSlot = (slot: AlluvialSlot): number | null => {
     if (mode !== "conversion") return null;
     if (slot.stageId === "total") return 100;
-    if (slot.stageId === "byFlow") {
-      const total = model.slotsByStage[0]?.[0]?.raw ?? 0;
+    if (slot.stageIndex === 0) return 100;
+    const prevStage = model.stageLabels[slot.stageIndex - 1];
+    if (!prevStage) return null;
+    if (slot.stageId === "byFlow" && prevStage.id === "total") {
+      const total = model.slotsByStage[slot.stageIndex - 1]?.[0]?.raw ?? 0;
       return total > 0 ? (100 * slot.raw) / total : 0;
     }
-    const prevStageId =
-      slot.stageId === "accepted"
-        ? "byFlow"
-        : slot.stageId === "inbox"
-          ? "accepted"
-          : slot.stageId === "positive"
-            ? "inbox"
-            : "";
-    if (!prevStageId) return null;
-    const prev = slotByStageAndId.get(`${prevStageId}::${slot.id}`)?.raw ?? 0;
+    const prev = slotByStageAndId.get(`${prevStage.id}::${slot.id}`)?.raw ?? 0;
     return prev > 0 ? (100 * slot.raw) / prev : 0;
   };
   const ribbonItems = model.ribbons.map((r, i) => ({
@@ -2471,6 +2452,9 @@ watch(
 );
 
 function normalizeFlowRow(raw: Record<string, unknown>): FlowFunnelRow {
+  const ps = Array.isArray(raw.pipelineStageBreakdown)
+    ? (raw.pipelineStageBreakdown as Array<Record<string, unknown>>)
+    : [];
   return {
     flowUuid: String(raw.flowUuid ?? ""),
     flowName: String(raw.flowName ?? ""),
@@ -2489,6 +2473,19 @@ function normalizeFlowRow(raw: Record<string, unknown>): FlowFunnelRow {
       raw.linkedContactsCount == null ? undefined : Number(raw.linkedContactsCount) || 0,
     linkedFlowsCount:
       raw.linkedFlowsCount == null ? undefined : Number(raw.linkedFlowsCount) || 0,
+    pipelineStageBreakdown: ps
+      .map((x) => ({
+        stageUuid: String(x.stageUuid ?? ""),
+        stageName: String(x.stageName ?? "").trim(),
+        stageOrder:
+          x.stageOrder == null || x.stageOrder === ""
+            ? null
+            : Number.isFinite(Number(x.stageOrder))
+              ? Math.trunc(Number(x.stageOrder))
+              : null,
+        contactsCount: Math.max(0, Number(x.contactsCount ?? 0) || 0),
+      }))
+      .filter((x) => x.stageUuid.length > 0 && x.stageName.length > 0 && x.contactsCount > 0),
   };
 }
 
@@ -2535,6 +2532,7 @@ async function loadAnalytics(projectId: string, from: string, to: string) {
     const r = await fetch(`/api/project-analytics?${q.toString()}`);
     const data = (await r.json()) as {
       flows?: Record<string, unknown>[];
+      pipelineStages?: Record<string, unknown>[];
       warnings?: string[];
       error?: string;
       projectTotals?: FlowFunnelProjectTotalsPayload;
@@ -2543,17 +2541,36 @@ async function loadAnalytics(projectId: string, from: string, to: string) {
     if (!r.ok) {
       loadError.value = data.error ?? "Failed to load analytics";
       flows.value = [];
+      availablePipelineStages.value = [];
       funnelProjectTotals.value = null;
       funnelComparison.value = null;
       return;
     }
     flows.value = (data.flows ?? []).map((row) => normalizeFlowRow(row));
+    availablePipelineStages.value = (data.pipelineStages ?? [])
+      .map((row) => ({
+        stageUuid: String(row.stageUuid ?? ""),
+        stageName: String(row.stageName ?? "").trim(),
+        stageOrder:
+          row.stageOrder == null || row.stageOrder === ""
+            ? null
+            : Number.isFinite(Number(row.stageOrder))
+              ? Math.trunc(Number(row.stageOrder))
+              : null,
+      }))
+      .filter((x) => x.stageUuid.length > 0 && x.stageName.length > 0)
+      .sort((a, b) => {
+        const ao = a.stageOrder ?? Number.MAX_SAFE_INTEGER;
+        const bo = b.stageOrder ?? Number.MAX_SAFE_INTEGER;
+        return ao - bo || a.stageName.localeCompare(b.stageName);
+      });
     warnings.value = data.warnings ?? [];
     funnelProjectTotals.value = data.projectTotals ?? null;
     funnelComparison.value = data.comparison ?? null;
   } catch (e) {
     loadError.value = e instanceof Error ? e.message : "Failed to load analytics";
     flows.value = [];
+    availablePipelineStages.value = [];
     funnelProjectTotals.value = null;
     funnelComparison.value = null;
   } finally {
@@ -2567,6 +2584,9 @@ watch(
     loadError.value = "";
     warnings.value = [];
     flows.value = [];
+    availablePipelineStages.value = [];
+    selectedPipelineStageUuids.value = [];
+    pipelineStagePositions.value = {};
     selectedFlowUuids.value = [];
     dateRange.value = null;
     analyticsDatesAsc.value = [];
@@ -2764,8 +2784,12 @@ watch(statsWindowDays, (wd) => {
               />
               <FlowAnalyticsFunnelSection
                 v-model:funnel-sankey-mode="funnelSankeyMode"
+                v-model:selected-pipeline-stage-uuids="selectedPipelineStageUuids"
+                v-model:pipeline-stage-positions="pipelineStagePositions"
                 :funnel-sankey-mode-options="funnelSankeyModeOptions"
                 :funnel-sankey-option="funnelSankeyOption"
+                :pipeline-stage-options="pipelineStageOptions"
+                :pipeline-stage-name-by-uuid="pipelineStageNameByUuid"
                 :group-entity-plural="groupEntityPlural"
                 :group-entity-singular="groupEntitySingular"
                 :flows-length="flows.length"
