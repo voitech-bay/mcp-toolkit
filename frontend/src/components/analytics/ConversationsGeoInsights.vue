@@ -43,7 +43,13 @@ use([
   ToolboxComponent,
 ]);
 
-const props = defineProps<{ projectId: string | null }>();
+const props = defineProps<{
+  projectId: string | null;
+  /** When true, hide the built-in limit input and use `conversationLimit` from the parent. */
+  hideLimitControl?: boolean;
+  /** Recent-conversation scan cap (1–2000). Used when `hideLimitControl` is true. */
+  conversationLimit?: number | null;
+}>();
 
 type ReplyTag = "no_response" | "waiting_for_response" | "got_response";
 
@@ -86,7 +92,16 @@ const isDark = useDark();
 const loading = ref(false);
 const error = ref("");
 const data = ref<GeoPayload | null>(null);
-const limit = ref<number>(500);
+const limitSelf = ref<number>(500);
+
+function clampScanLimit(n: unknown): number {
+  const v = Math.floor(Number(n) || 500);
+  return Math.max(1, Math.min(2000, v));
+}
+
+const scanLimit = computed(() =>
+  props.hideLimitControl ? clampScanLimit(props.conversationLimit) : clampScanLimit(limitSelf.value)
+);
 
 /** Tracks the world GeoJSON load state. Fetched once per session, shared across component instances. */
 const mapState = ref<"idle" | "loading" | "ready" | "missing">("idle");
@@ -119,7 +134,7 @@ async function loadData(): Promise<void> {
   error.value = "";
   try {
     const url = `/api/project-conversation-geo?projectId=${encodeURIComponent(pid)}&limit=${encodeURIComponent(
-      String(Math.max(1, Math.min(2000, Math.floor(Number(limit.value) || 500))))
+      String(scanLimit.value)
     )}`;
     const r = await fetch(url);
     const body = (await r.json()) as GeoPayload & { error?: string };
@@ -142,7 +157,10 @@ onMounted(() => {
   void loadData();
 });
 
-watch(() => props.projectId, () => void loadData());
+watch(
+  () => [props.projectId, scanLimit.value] as const,
+  () => void loadData()
+);
 
 const mappedRows = computed((): GeoCountryRow[] =>
   (data.value?.byCountry ?? []).filter((r) => r.country !== "Unknown")
@@ -443,10 +461,10 @@ const mapCoverageText = computed(() => {
     <template v-else>
       <NCard size="small" title="Conversation coverage" class="cg-insights__card">
         <template #header-extra>
-          <div class="cg-insights__limit">
+          <div v-if="!hideLimitControl" class="cg-insights__limit">
             <NText depth="3" class="cg-insights__limit-label">Scan recent</NText>
             <NInputNumber
-              v-model:value="limit"
+              v-model:value="limitSelf"
               size="small"
               :min="50"
               :max="2000"

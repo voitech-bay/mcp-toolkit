@@ -14,9 +14,6 @@ import {
   NTabPane,
   NRadioGroup,
   NRadioButton,
-  NGrid,
-  NGi,
-  NDataTable,
 } from "naive-ui";
 import type { SelectOption, DataTableColumns } from "naive-ui";
 import { useDark } from "@vueuse/core";
@@ -30,11 +27,36 @@ import {
   TitleComponent,
   ToolboxComponent,
   GraphicComponent,
+  VisualMapComponent,
 } from "echarts/components";
 import type { EChartsOption } from "echarts";
-import VChart from "vue-echarts";
-import AnalyticsMetricMatrix from "../components/analytics/AnalyticsMetricMatrix.vue";
-import ConversationsGeoInsights from "../components/analytics/ConversationsGeoInsights.vue";
+import FlowAnalyticsRankingsPanel from "../components/analytics/FlowAnalyticsRankingsPanel.vue";
+import FlowAnalyticsTotalsSection from "../components/analytics/FlowAnalyticsTotalsSection.vue";
+import FlowAnalyticsFunnelSection from "../components/analytics/FlowAnalyticsFunnelSection.vue";
+import FlowAnalyticsDailySection from "../components/analytics/FlowAnalyticsDailySection.vue";
+import FlowAnalyticsGeoPanel from "../components/analytics/FlowAnalyticsGeoPanel.vue";
+import type {
+  FlowFunnelRow,
+  FlowFunnelProjectTotalsPayload,
+  FlowFunnelComparisonPayload,
+  DailyMetricPoint,
+  DailyWowRow,
+} from "../components/analytics/flow-analytics-types.js";
+import { FUNNEL_SANKEY_FLOW_LIMIT, FUNNEL_REACH_DISPLAY_CAP } from "../components/analytics/flow-analytics-constants.js";
+import {
+  funnelStageColor,
+  chartSurfaceBg,
+  chartTextColor,
+  splitLineColor,
+} from "../components/analytics/flowAnalyticsChartTheme.js";
+import {
+  mondayUtcYmd,
+  makeDailyFunnelChartOption,
+  makeRollingDailyFunnelChartOption,
+  makeDailyEntityHeatmapOption,
+  makeDailyMergedHeatmapOption,
+  type DailyHeatmapMetricId,
+} from "../components/analytics/flowAnalyticsDailyCharts.js";
 import { useProjectStore } from "../stores/project";
 
 use([
@@ -47,6 +69,7 @@ use([
   TitleComponent,
   ToolboxComponent,
   GraphicComponent,
+  VisualMapComponent,
 ]);
 
 /** Avoid merge stacking + layout feedback with autoresize (see ECharts setOption). */
@@ -55,46 +78,10 @@ const chartUpdateOptions = { notMerge: true as const };
 const projectStore = useProjectStore();
 const isDark = useDark();
 
-const dashboardTab = ref<"rankings" | "totals" | "funnels" | "daily" | "geo">("rankings");
+const analyticsMainTab = ref<"rankings" | "funnelsDaily" | "geo">("rankings");
 
 /** `groupBy` = flow uses flow uuid+name; hypothesis uses hypothesis id+name (same fields for charts). */
 const analyticsGroupBy = ref<"flow" | "hypothesis">("flow");
-
-interface FlowFunnelRow {
-  flowUuid: string;
-  flowName: string;
-  messagesSent: number;
-  connectionSent: number;
-  connectionAccepted: number;
-  inbox: number;
-  positiveReplies: number;
-  acceptedRatePct?: number | null;
-  inboxRatePct?: number | null;
-  positiveRatePct?: number | null;
-  connectionRequestRatePct?: number | null;
-  /** Hypothesis groupBy: tag-linked contacts (from `/api/project-analytics`). */
-  linkedContactsCount?: number;
-  /** Hypothesis groupBy: distinct flows in the rollup. */
-  linkedFlowsCount?: number;
-}
-
-interface FlowFunnelProjectTotalsPayload {
-  messagesSent: number;
-  connectionSent: number;
-  connectionAccepted: number;
-  inbox: number;
-  positiveReplies: number;
-  connectionRequestRatePct: number | null;
-  acceptedRatePct: number | null;
-  inboxRatePct: number | null;
-  positiveRatePct: number | null;
-}
-
-interface FlowFunnelComparisonPayload {
-  previousDateFrom: string;
-  previousDateTo: string;
-  totals: FlowFunnelProjectTotalsPayload;
-}
 
 const EMPTY_FUNNEL_TOTALS: FlowFunnelProjectTotalsPayload = {
   messagesSent: 0,
@@ -124,14 +111,6 @@ const FLOW_TAG_EMOJIS = [
   "🚀",
   "💬",
   "🔔",
-] as const;
-
-/** Funnel stages: same four steps as GetSales snapshots / `render_funnel_chart` (colors reused per stage). */
-const STAGE_LABELS = [
-  "Connection sent",
-  "Connection accepted",
-  "Inbox reply",
-  "Inbox positive",
 ] as const;
 
 const collectingDays = ref(false);
@@ -380,15 +359,6 @@ function defaultRangeForWindow(
   return [start, end];
 }
 
-/** Same stage → same color across all flows/hypotheses (aligned with server funnel chart palette). */
-const FUNNEL_STAGE_COLORS_LIGHT = ["#5470c6", "#91cc75", "#fac858", "#ee6666"] as const;
-const FUNNEL_STAGE_COLORS_DARK = ["#6b8bd9", "#7fd67f", "#ffd666", "#f08080"] as const;
-
-function funnelStageColor(stageIndex: number, dark: boolean): string {
-  const palette = dark ? FUNNEL_STAGE_COLORS_DARK : FUNNEL_STAGE_COLORS_LIGHT;
-  return palette[stageIndex % 4]!;
-}
-
 /**
  * Stable per-alluvium (per-flow) color palette. Used by the conversion Sankey
  * so every stratum of a given flow shares the same hue across all 4 axes,
@@ -413,46 +383,37 @@ function flowAlluviumColor(index: number, dark: boolean, isOther: boolean): stri
   return palette[index % palette.length]!;
 }
 
-function chartSurfaceBg(dark: boolean): string {
-  return dark ? "rgba(28, 28, 32, 0.96)" : "rgba(248, 249, 252, 0.98)";
-}
-
-function chartTextColor(dark: boolean): string {
-  return dark ? "rgba(255, 255, 255, 0.78)" : "rgba(0, 0, 0, 0.72)";
-}
-
-function splitLineColor(dark: boolean): string {
-  return dark ? "rgba(255, 255, 255, 0.08)" : "rgba(0, 0, 0, 0.06)";
-}
-
 /**
  * Cascaded funnel Sankey: per-flow attribution preserved through every stage.
  *
- * Two modes:
- * - `absolute`: classic funnel Sankey with drop-off sinks at each transition.
- *   All columns share the same total height (= total sent); lost volume fans
- *   into shared grey sinks. Reads like: "where does the pipeline leak".
- *
- * - `conversion`: normalized Total → by-flow shares of connection sent; each
- *   flow keeps that strip width along its path but Inbox / Positive nodes exist
- *   only when that flow’s count is > 0 (ribbon ends at Accepted or Inbox
- *   otherwise). If only one flow reaches Inbox or Positive, that node’s value
- *   is scaled to `BASE` so the column matches earlier column height. No
- *   drop-off sinks. Labels/tooltips show counts and % per stage.
- *
- * Caps at the top 8 selected flows by `connectionSent`; the tail rolls into a
- * synthetic "Other" bucket so totals still tie out against `displayFunnelTotals`.
+ * Modes: `absolute`, `conversion`, `downstream` (accepted-anchored), `reach`
+ * (hypotheses only: first split by tagged reach vs sent, then funnel counts).
+ * Caps use `FUNNEL_SANKEY_FLOW_LIMIT` / `FUNNEL_REACH_DISPLAY_CAP` from `flow-analytics-constants`.
  */
-const FUNNEL_SANKEY_FLOW_LIMIT = 8;
-
-type FunnelSankeyMode = "absolute" | "conversion";
+type FunnelSankeyMode = "absolute" | "conversion" | "downstream" | "reach";
 
 const funnelSankeyMode = ref<FunnelSankeyMode>("absolute");
 
-const funnelSankeyModeOptions: SelectOption[] = [
-  { label: "Absolute volumes (with drop-off)", value: "absolute" },
-  { label: "Conversion (equal-height % columns)", value: "conversion" },
-];
+const reachModeAvailable = computed(
+  () =>
+    analyticsGroupBy.value === "hypothesis" &&
+    filteredFlows.value.some((f) => (f.linkedContactsCount ?? 0) > 0)
+);
+
+const funnelSankeyModeOptions = computed((): SelectOption[] => {
+  const opts: SelectOption[] = [
+    { label: "Absolute volumes (with drop-off)", value: "absolute" },
+    { label: "Conversion (equal-height % columns)", value: "conversion" },
+    { label: "Downstream (after accept only)", value: "downstream" },
+  ];
+  if (reachModeAvailable.value) {
+    opts.push({
+      label: "Hypothesis reach → funnel",
+      value: "reach",
+    });
+  }
+  return opts;
+});
 
 function stripSankeyPrefix(raw: string): string {
   const idx = raw.indexOf(":");
@@ -466,6 +427,8 @@ type FunnelBucket = {
   accepted: number;
   inbox: number;
   positive: number;
+  /** Hypothesis mode: tag-linked contacts (`linkedContactsCount`); used only in reach Sankey. */
+  reach?: number;
 };
 
 const funnelSankeyBuckets = computed((): FunnelBucket[] => {
@@ -480,6 +443,10 @@ const funnelSankeyBuckets = computed((): FunnelBucket[] => {
     accepted: Math.max(0, f.connectionAccepted | 0),
     inbox: Math.max(0, f.inbox | 0),
     positive: Math.max(0, f.positiveReplies | 0),
+    reach:
+      analyticsGroupBy.value === "hypothesis"
+        ? Math.min(Math.max(0, f.linkedContactsCount ?? 0), FUNNEL_REACH_DISPLAY_CAP)
+        : undefined,
   }));
   if (tail.length > 0) {
     buckets.push(
@@ -491,6 +458,11 @@ const funnelSankeyBuckets = computed((): FunnelBucket[] => {
           accepted: acc.accepted + Math.max(0, f.connectionAccepted | 0),
           inbox: acc.inbox + Math.max(0, f.inbox | 0),
           positive: acc.positive + Math.max(0, f.positiveReplies | 0),
+          reach:
+            acc.reach != null && analyticsGroupBy.value === "hypothesis"
+              ? acc.reach +
+                Math.min(Math.max(0, f.linkedContactsCount ?? 0), FUNNEL_REACH_DISPLAY_CAP)
+              : acc.reach,
         }),
         {
           key: "__other__",
@@ -499,6 +471,7 @@ const funnelSankeyBuckets = computed((): FunnelBucket[] => {
           accepted: 0,
           inbox: 0,
           positive: 0,
+          reach: analyticsGroupBy.value === "hypothesis" ? 0 : undefined,
         }
       )
     );
@@ -583,12 +556,12 @@ function buildAbsoluteSankey(
 }
 
 /**
- * Conversion mode: five columns when data exists. After “Total”, each flow uses
- * the same strip width (share of connection sent) along its path. Inbox and
- * Positive nodes/links exist only when that flow has inbox > 0 or positive > 0
- * respectively; otherwise the ribbon ends at Accepted (or at Inbox if
- * positive is 0). When exactly one flow reaches Inbox (or Positive), that
- * node’s `value` is `BASE` so that column matches the total column height.
+ * Conversion mode: Total → split → accepted for every flow; Inbox / Positive
+ * only when that flow’s count is > 0. Widths use `wStrip` except when exactly
+ * one flow has inbox (or positive): that stage’s nodes **and** the links into /
+ * through it use `BASE` so ribbons match full column height. ECharts scales all
+ * columns with one global `ky` (see sankey `initializeNodeDepth`), so the chart
+ * still fits; accepted nodes use `max(in, out)` from edges.
  */
 function buildConversionSankey(
   buckets: FunnelBucket[],
@@ -632,6 +605,11 @@ function buildConversionSankey(
 
   const wStrip = buckets.map((b) => (BASE * b.sent) / totalSent);
 
+  const inboxAliveIdx = buckets.map((b, i) => (b.inbox > 0 ? i : -1)).filter((i): i is number => i >= 0);
+  const soleInb = inboxAliveIdx.length === 1;
+  const posAliveIdx = buckets.map((b, i) => (b.positive > 0 ? i : -1)).filter((i): i is number => i >= 0);
+  const solePos = posAliveIdx.length === 1;
+
   buckets.forEach((b, idx) => {
     const ws = wStrip[idx]!;
     const isOther = b.key === "__other__";
@@ -662,6 +640,10 @@ function buildConversionSankey(
     const flowColor = flowAlluviumColor(idx, dark, isOther);
     const nSplit = `split:${b.label}`;
     const nAcc = `accepted:${b.label}`;
+    const nInb = `inbox:${b.label}`;
+    const nPos = `positive:${b.label}`;
+    const showInb = b.inbox > 0;
+    const showPos = b.positive > 0;
 
     pushNode({
       name: nAcc,
@@ -679,19 +661,8 @@ function buildConversionSankey(
       _raw: b.accepted,
       lineStyle: { color: flowColor, opacity: 0.55 },
     });
-  });
 
-  const inboxIdx = buckets.map((b, i) => (b.inbox > 0 ? i : -1)).filter((i): i is number => i >= 0);
-
-  if (inboxIdx.length > 0) {
-    const soleInb = inboxIdx.length === 1;
-    inboxIdx.forEach((i) => {
-      const b = buckets[i]!;
-      const ws = wStrip[i]!;
-      const flowColor = flowAlluviumColor(i, dark, b.key === "__other__");
-      const nAcc = `accepted:${b.label}`;
-      const nInb = `inbox:${b.label}`;
-
+    if (showInb) {
       pushNode({
         name: nInb,
         depth: 3,
@@ -699,8 +670,14 @@ function buildConversionSankey(
         _raw: b.inbox,
         itemStyle: { color: flowColor, borderColor: cInbox, borderWidth: 1 },
         label: { color: tc },
-        __rank: i,
+        __rank: idx,
       });
+      console.log('soleInb', soleInb);
+      console.log('ws', ws);
+      console.log('BASE', BASE);
+      console.log('nInb', nInb);
+      console.log('nAcc', nAcc);
+      console.log('b.inbox', b.inbox);
       pushLink({
         source: nAcc,
         target: nInb,
@@ -708,22 +685,9 @@ function buildConversionSankey(
         _raw: b.inbox,
         lineStyle: { color: flowColor, opacity: 0.55 },
       });
-    });
-  }
+    }
 
-  const posIdx = buckets.map((b, i) => (b.positive > 0 ? i : -1)).filter((i): i is number => i >= 0);
-
-  if (posIdx.length > 0) {
-    const solePos = posIdx.length === 1;
-    posIdx.forEach((i) => {
-      const b = buckets[i]!;
-      const ws = wStrip[i]!;
-      const flowColor = flowAlluviumColor(i, dark, b.key === "__other__");
-      const nAcc = `accepted:${b.label}`;
-      const nInb = `inbox:${b.label}`;
-      const nPos = `positive:${b.label}`;
-      const src = b.inbox > 0 ? nInb : nAcc;
-
+    if (showPos) {
       pushNode({
         name: nPos,
         depth: 4,
@@ -731,20 +695,362 @@ function buildConversionSankey(
         _raw: b.positive,
         itemStyle: { color: flowColor, borderColor: cPositive, borderWidth: 1 },
         label: { color: tc },
-        __rank: i,
+        __rank: idx,
+      });
+      pushLink({
+        source: showInb ? nInb : nAcc,
+        target: nPos,
+        value: solePos ? BASE : ws,
+        _raw: b.positive,
+        lineStyle: { color: flowColor, opacity: 0.58 },
+      });
+    }
+  });
+
+  return { nodes, links };
+}
+
+/** After-accept funnel: ribbon width = accepted count; same drop-offs as absolute from Accepted onward. */
+function buildDownstreamSankey(
+  buckets: FunnelBucket[],
+  dark: boolean,
+  tc: string
+): { nodes: SankeyNodeLite[]; links: SankeyLinkLite[] } {
+  const list = buckets.filter((b) => b.accepted > 0);
+  if (list.length === 0) return { nodes: [], links: [] };
+
+  const cAccepted = funnelStageColor(1, dark);
+  const cInbox = funnelStageColor(2, dark);
+  const cPositive = funnelStageColor(3, dark);
+  const cDrop = dark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.18)";
+
+  const nodes: SankeyNodeLite[] = [];
+  const links: SankeyLinkLite[] = [];
+  const nodeSeen = new Set<string>();
+  const pushNode = (n: SankeyNodeLite): void => {
+    if (nodeSeen.has(n.name)) return;
+    nodeSeen.add(n.name);
+    nodes.push(n);
+  };
+  const pushLink = (link: SankeyLinkLite): void => {
+    if (link.value <= 0) return;
+    links.push(link);
+  };
+
+  const nodeDropInbox = "sink:Accepted · no reply (downstream)";
+  const nodePositive = "sink:Positive replies (downstream)";
+  const nodeNonPositive = "sink:Inbox · non-positive (downstream)";
+
+  list.forEach((b, idx) => {
+    const isOther = b.key === "__other__";
+    const flowColor = flowAlluviumColor(idx, dark, isOther);
+    const nAcc = `dacc:${b.label}`;
+    const nInb = `dinb:${b.label}`;
+
+    pushNode({
+      name: nAcc,
+      depth: 0,
+      value: b.accepted,
+      _raw: b.accepted,
+      itemStyle: { color: flowColor, borderColor: cAccepted, borderWidth: 1 },
+      label: { color: tc, fontWeight: "bold" },
+      __rank: idx,
+    });
+    pushNode({
+      name: nInb,
+      depth: 1,
+      itemStyle: { color: flowColor, borderColor: cInbox, borderWidth: 1 },
+      label: { color: tc },
+      __rank: idx,
+    });
+
+    pushLink({
+      source: nAcc,
+      target: nInb,
+      value: b.inbox,
+      _raw: b.inbox,
+      lineStyle: { color: flowColor, opacity: 0.6 },
+    });
+    pushLink({
+      source: nAcc,
+      target: nodeDropInbox,
+      value: Math.max(0, b.accepted - b.inbox),
+      _raw: Math.max(0, b.accepted - b.inbox),
+      lineStyle: { color: cDrop, opacity: 0.35 },
+    });
+
+    pushLink({
+      source: nInb,
+      target: nodePositive,
+      value: b.positive,
+      _raw: b.positive,
+      lineStyle: { color: cPositive, opacity: 0.7 },
+    });
+    pushLink({
+      source: nInb,
+      target: nodeNonPositive,
+      value: Math.max(0, b.inbox - b.positive),
+      _raw: Math.max(0, b.inbox - b.positive),
+      lineStyle: { color: cDrop, opacity: 0.35 },
+    });
+  });
+
+  pushNode({
+    name: nodeDropInbox,
+    depth: 1,
+    itemStyle: { color: cDrop, borderColor: cDrop },
+    label: { color: tc },
+    __rank: 9001,
+  });
+  pushNode({
+    name: nodePositive,
+    depth: 2,
+    itemStyle: { color: cPositive, borderColor: cPositive },
+    label: { color: tc, fontWeight: "bold" },
+    __rank: 9002,
+  });
+  pushNode({
+    name: nodeNonPositive,
+    depth: 2,
+    itemStyle: { color: cDrop, borderColor: cDrop },
+    label: { color: tc },
+    __rank: 9003,
+  });
+
+  return { nodes, links };
+}
+
+/**
+ * Hypothesis reach: first split width ∝ max(capped reach, sent); then Sent → Accepted → Inbox → Positive
+ * with one scale so Sankey conserves. Tooltips use `_raw` funnel counts; split shows tagged reach.
+ */
+function buildReachFunnelSankey(
+  buckets: FunnelBucket[],
+  dark: boolean,
+  tc: string
+): { nodes: SankeyNodeLite[]; links: SankeyLinkLite[] } {
+  const BASE = 10_000;
+  const cSent = funnelStageColor(0, dark);
+  const cAccepted = funnelStageColor(1, dark);
+  const cInbox = funnelStageColor(2, dark);
+  const cPositive = funnelStageColor(3, dark);
+  const cDrop = dark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.18)";
+
+  const basis = buckets.map((b) => {
+    const r = Math.max(0, b.reach ?? 0);
+    const s = Math.max(0, b.sent);
+    return Math.max(r, s);
+  });
+  const denom = basis.reduce((a, x) => a + x, 0);
+  if (denom <= 0) return { nodes: [], links: [] };
+
+  const sc = (raw: number) => (BASE * raw) / denom;
+
+  const nodes: SankeyNodeLite[] = [];
+  const links: SankeyLinkLite[] = [];
+  const nodeSeen = new Set<string>();
+  const pushNode = (n: SankeyNodeLite): void => {
+    if (nodeSeen.has(n.name)) return;
+    if (typeof n.value === "number" && n.value <= 0) return;
+    nodeSeen.add(n.name);
+    nodes.push(n);
+  };
+  const pushLink = (link: SankeyLinkLite): void => {
+    if (link.value <= 1e-9) return;
+    links.push(link);
+  };
+
+  const nodeTotal = "total:Tagged reach (all)";
+  const nodeSink = "sinkreach:Drop-offs";
+
+  pushNode({
+    name: nodeTotal,
+    depth: 0,
+    value: BASE,
+    _raw: denom,
+    itemStyle: { color: cSent, borderColor: cSent },
+    label: { color: tc, fontWeight: "bold" },
+    __rank: -1,
+  });
+
+  pushNode({
+    name: nodeSink,
+    depth: 2,
+    itemStyle: { color: cDrop, borderColor: cDrop },
+    label: { color: tc },
+    __rank: 9000,
+  });
+
+  buckets.forEach((b, idx) => {
+    const isOther = b.key === "__other__";
+    const flowColor = flowAlluviumColor(idx, dark, isOther);
+    const basis_i = basis[idx]!;
+    const nSplit = `rsplit:${b.label}`;
+    const nSent = `rsent:${b.label}`;
+    const nAcc = `racc:${b.label}`;
+    const nInb = `rinb:${b.label}`;
+    const nPos = `rpos:${b.label}`;
+    const showInb = b.inbox > 0;
+    const showPos = b.positive > 0;
+    const reachRaw = Math.max(0, b.reach ?? 0);
+    const taggedNoSend = Math.max(0, basis_i - b.sent);
+
+    const wSplit = sc(basis_i);
+    pushNode({
+      name: nSplit,
+      depth: 1,
+      value: wSplit,
+      _raw: reachRaw,
+      itemStyle: { color: flowColor, borderColor: cSent, borderWidth: 1 },
+      label: { color: tc, fontWeight: "bold" },
+      __rank: idx,
+    });
+    pushLink({
+      source: nodeTotal,
+      target: nSplit,
+      value: wSplit,
+      _raw: reachRaw,
+      lineStyle: { color: flowColor, opacity: 0.38 },
+    });
+
+    const wSent = sc(b.sent);
+    pushNode({
+      name: nSent,
+      depth: 2,
+      value: wSent,
+      _raw: b.sent,
+      itemStyle: { color: flowColor, borderColor: cSent, borderWidth: 1 },
+      label: { color: tc },
+      __rank: idx,
+    });
+    pushLink({
+      source: nSplit,
+      target: nSent,
+      value: wSent,
+      _raw: b.sent,
+      lineStyle: { color: flowColor, opacity: 0.5 },
+    });
+    if (taggedNoSend > 0) {
+      pushLink({
+        source: nSplit,
+        target: nodeSink,
+        value: sc(taggedNoSend),
+        _raw: taggedNoSend,
+        lineStyle: { color: cDrop, opacity: 0.32 },
+      });
+    }
+
+    const wAcc = sc(b.accepted);
+    pushNode({
+      name: nAcc,
+      depth: 3,
+      value: wAcc,
+      _raw: b.accepted,
+      itemStyle: { color: flowColor, borderColor: cAccepted, borderWidth: 1 },
+      label: { color: tc },
+      __rank: idx,
+    });
+    pushLink({
+      source: nSent,
+      target: nAcc,
+      value: wAcc,
+      _raw: b.accepted,
+      lineStyle: { color: flowColor, opacity: 0.55 },
+    });
+    pushLink({
+      source: nSent,
+      target: nodeSink,
+      value: sc(Math.max(0, b.sent - b.accepted)),
+      _raw: Math.max(0, b.sent - b.accepted),
+      lineStyle: { color: cDrop, opacity: 0.32 },
+    });
+
+    if (showInb) {
+      const wInb = sc(b.inbox);
+      pushNode({
+        name: nInb,
+        depth: 4,
+        value: wInb,
+        _raw: b.inbox,
+        itemStyle: { color: flowColor, borderColor: cInbox, borderWidth: 1 },
+        label: { color: tc },
+        __rank: idx,
+      });
+      pushLink({
+        source: nAcc,
+        target: nInb,
+        value: wInb,
+        _raw: b.inbox,
+        lineStyle: { color: flowColor, opacity: 0.55 },
+      });
+      pushLink({
+        source: nAcc,
+        target: nodeSink,
+        value: sc(Math.max(0, b.accepted - b.inbox)),
+        _raw: Math.max(0, b.accepted - b.inbox),
+        lineStyle: { color: cDrop, opacity: 0.3 },
+      });
+    } else if (!showPos) {
+      pushLink({
+        source: nAcc,
+        target: nodeSink,
+        value: wAcc,
+        _raw: b.accepted,
+        lineStyle: { color: cDrop, opacity: 0.28 },
+      });
+    }
+
+    if (showPos) {
+      const wPos = sc(b.positive);
+      const src = showInb ? nInb : nAcc;
+      pushNode({
+        name: nPos,
+        depth: 5,
+        value: wPos,
+        _raw: b.positive,
+        itemStyle: { color: flowColor, borderColor: cPositive, borderWidth: 1 },
+        label: { color: tc },
+        __rank: idx,
       });
       pushLink({
         source: src,
         target: nPos,
-        value: ws,
+        value: wPos,
         _raw: b.positive,
         lineStyle: { color: flowColor, opacity: 0.58 },
       });
-    });
-  }
+      pushLink({
+        source: src,
+        target: nodeSink,
+        value: sc(showInb ? Math.max(0, b.inbox - b.positive) : Math.max(0, b.accepted - b.positive)),
+        _raw: showInb ? Math.max(0, b.inbox - b.positive) : Math.max(0, b.accepted - b.positive),
+        lineStyle: { color: cDrop, opacity: 0.3 },
+      });
+    } else if (showInb) {
+      pushLink({
+        source: nInb,
+        target: nodeSink,
+        value: sc(Math.max(0, b.inbox - b.positive)),
+        _raw: Math.max(0, b.inbox - b.positive),
+        lineStyle: { color: cDrop, opacity: 0.3 },
+      });
+    }
+  });
 
   return { nodes, links };
 }
+
+watch(analyticsGroupBy, (g) => {
+  if (g !== "hypothesis" && funnelSankeyMode.value === "reach") {
+    funnelSankeyMode.value = "absolute";
+  }
+});
+
+watch(reachModeAvailable, (ok) => {
+  if (!ok && funnelSankeyMode.value === "reach") {
+    funnelSankeyMode.value = "absolute";
+  }
+});
 
 const funnelSankeyOption = computed((): EChartsOption => {
   const buckets = funnelSankeyBuckets.value;
@@ -756,10 +1062,17 @@ const funnelSankeyOption = computed((): EChartsOption => {
     return { animation: false, series: [] };
   }
 
-  const { nodes, links } =
-    mode === "conversion"
-      ? buildConversionSankey(buckets, dark, tc)
-      : buildAbsoluteSankey(buckets, dark, tc);
+  let nodes: SankeyNodeLite[] = [];
+  let links: SankeyLinkLite[] = [];
+  if (mode === "conversion") {
+    ({ nodes, links } = buildConversionSankey(buckets, dark, tc));
+  } else if (mode === "downstream") {
+    ({ nodes, links } = buildDownstreamSankey(buckets, dark, tc));
+  } else if (mode === "reach") {
+    ({ nodes, links } = buildReachFunnelSankey(buckets, dark, tc));
+  } else {
+    ({ nodes, links } = buildAbsoluteSankey(buckets, dark, tc));
+  }
 
   if (links.length === 0) {
     return { animation: false, series: [] };
@@ -768,13 +1081,21 @@ const funnelSankeyOption = computed((): EChartsOption => {
   const topN = Math.min(buckets.length, FUNNEL_SANKEY_FLOW_LIMIT);
   const subtext =
     mode === "conversion"
-      ? `Conversion · ribbon width = share of connection sent; path ends early when inbox/positive is 0; a sole survivor at Inbox or Positive fills that column height. Top ${topN} ${groupEntityPlural.value}.`
-      : `Absolute · Flow → Accepted → Inbox → Positive · top ${topN} ${groupEntityPlural.value}`;
+      ? `Conversion · sent-share width through Total → By flow → Accepted; Inbox / Positive only when that flow has volume (no zero ribbons). Top ${topN} ${groupEntityPlural.value}.`
+      : mode === "downstream"
+        ? `Downstream · widths = accepted counts (not connection sent). Accepted → Inbox / no reply → Positive / non-positive. Top ${topN} ${groupEntityPlural.value} with accept > 0.`
+        : mode === "reach"
+          ? `Reach → funnel · first split width ∝ max(tagged reach, sent) per hypothesis (reach capped at ${FUNNEL_REACH_DISPLAY_CAP.toLocaleString()}); links & later nodes use funnel counts (see tooltips).`
+          : `Absolute · Flow → Accepted → Inbox → Positive · top ${topN} ${groupEntityPlural.value}`;
 
-  const stageLabels =
+  const stageLabels: readonly string[] =
     mode === "conversion"
-      ? (["Total", "By flow", "Accepted", "Inbox", "Positive"] as const)
-      : (["Sent", "Accepted", "Inbox", "Positive"] as const);
+      ? ["Total", "By flow", "Accepted", "Inbox", "Positive"]
+      : mode === "downstream"
+        ? ["Accepted", "Inbox", "Positive"]
+        : mode === "reach"
+          ? ["Total", "By reach", "Sent", "Accepted", "Inbox", "Positive"]
+          : ["Sent", "Accepted", "Inbox", "Positive"];
   const axisHeaderTop = 52;
   const sankeyTop = 76;
   const sankeyLeft = 12;
@@ -788,6 +1109,10 @@ const funnelSankeyOption = computed((): EChartsOption => {
   const sumAccConv = buckets.reduce((s, b) => s + b.accepted, 0);
   const sumInbConv = buckets.reduce((s, b) => s + b.inbox, 0);
   const sumPosConv = buckets.reduce((s, b) => s + b.positive, 0);
+  const reachBasisSum = buckets.reduce(
+    (s, b) => s + Math.max(Math.max(0, b.reach ?? 0), b.sent),
+    0
+  );
 
   const axisHeaders = stageLabels.map((txt, i) => {
     const color =
@@ -795,7 +1120,14 @@ const funnelSankeyOption = computed((): EChartsOption => {
         ? i === 0 || i === 1
           ? funnelStageColor(0, dark)
           : funnelStageColor(i - 1, dark)
-        : funnelStageColor(i, dark);
+        : mode === "reach"
+          ? i === 0 || i === 1
+            ? funnelStageColor(0, dark)
+            : funnelStageColor(i - 2, dark)
+          : funnelStageColor(
+              mode === "downstream" ? Math.min(i + 1, 3) : i,
+              dark
+            );
     const baseStyle = {
       text: txt,
       fill: color,
@@ -819,8 +1151,10 @@ const funnelSankeyOption = computed((): EChartsOption => {
         style: { ...baseStyle, textAlign: "right" as const },
       };
     }
-    const spread = mode === "conversion" ? 58 : 62;
-    const start = mode === "conversion" ? 16 : 18;
+    const spread =
+      mode === "reach" ? 48 : mode === "conversion" ? 58 : mode === "downstream" ? 64 : 62;
+    const start =
+      mode === "reach" ? 12 : mode === "conversion" ? 16 : mode === "downstream" ? 22 : 18;
     const leftPct = `${start + (spread * i) / last}%`;
     return {
       type: "text" as const,
@@ -885,6 +1219,40 @@ const funnelSankeyOption = computed((): EChartsOption => {
             return `${name}<br/><strong>${b.positive.toLocaleString()}</strong> (${pct}% of positive)`;
           }
         }
+        if (mode === "reach") {
+          const b = buckets.find((x) => x.label === name);
+          const reachN = Math.max(0, b?.reach ?? 0);
+          if (fullName.startsWith("total:")) {
+            return `Σ max(tagged reach, sent)<br/><strong>${reachBasisSum.toLocaleString()}</strong> (layout basis)`;
+          }
+          if (fullName.startsWith("rsplit:") && b) {
+            return `${name}<br/>Tagged: <strong>${reachN.toLocaleString()}</strong> · Sent: <strong>${b.sent.toLocaleString()}</strong>`;
+          }
+          if (fullName.startsWith("rsent:") && b) {
+            return `${name}<br/><strong>${b.sent.toLocaleString()}</strong> connection sent`;
+          }
+          if (fullName.startsWith("racc:") && b) {
+            return `${name}<br/><strong>${b.accepted.toLocaleString()}</strong> accepted`;
+          }
+          if (fullName.startsWith("rinb:") && b) {
+            return `${name}<br/><strong>${b.inbox.toLocaleString()}</strong> inbox`;
+          }
+          if (fullName.startsWith("rpos:") && b) {
+            return `${name}<br/><strong>${b.positive.toLocaleString()}</strong> positive`;
+          }
+          if (fullName.startsWith("sinkreach:")) {
+            return `Drop-offs (tagged unused, not accepted, no reply, etc.)<br/><em>Layout only — see edge tooltips for counts.</em>`;
+          }
+        }
+        if (mode === "downstream") {
+          const b = buckets.find((x) => x.label === name);
+          if (fullName.startsWith("dacc:") && b) {
+            return `${name}<br/><strong>${b.accepted.toLocaleString()}</strong> accepted`;
+          }
+          if (fullName.startsWith("dinb:") && b) {
+            return `${name}<br/><strong>${b.inbox.toLocaleString()}</strong> inbox`;
+          }
+        }
         return `${name}<br/><strong>${v.toLocaleString()}</strong>`;
       },
     },
@@ -902,31 +1270,64 @@ const funnelSankeyOption = computed((): EChartsOption => {
         nodeAlign: "justify",
         layoutIterations: 0,
         draggable: false,
-        emphasis: { focus: mode === "conversion" ? "trajectory" : "adjacency" },
+        emphasis: {
+          focus: mode === "conversion" || mode === "reach" ? "trajectory" : "adjacency",
+        },
         label: {
           color: tc,
           fontSize: 12,
           formatter: (p: unknown) => {
             const full = String((p as { name?: string } | undefined)?.name ?? "");
             const name = stripSankeyPrefix(full);
-            if (mode !== "conversion") return truncateLabel(name);
-            if (full.startsWith("sink:") || full.startsWith("total:")) return "";
+            if (mode !== "conversion" && mode !== "reach") return truncateLabel(name);
+            if (
+              full.startsWith("sink:") ||
+              full.startsWith("total:") ||
+              full.startsWith("sinkreach:")
+            ) {
+              return "";
+            }
             const b = buckets.find((x) => x.label === name);
-            if (full.startsWith("split:") && b && totalSentConv > 0) {
-              const pct = Math.round((100 * b.sent) / totalSentConv);
-              return truncateLabel(`${name} (${pct}%)`);
+            if (mode === "conversion") {
+              if (full.startsWith("split:") && b && totalSentConv > 0) {
+                const pct = Math.round((100 * b.sent) / totalSentConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
+              if (full.startsWith("accepted:") && b && sumAccConv > 0) {
+                const pct = Math.round((100 * b.accepted) / sumAccConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
+              if (full.startsWith("inbox:") && b && sumInbConv > 0) {
+                const pct = Math.round((100 * b.inbox) / sumInbConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
+              if (full.startsWith("positive:") && b && sumPosConv > 0) {
+                const pct = Math.round((100 * b.positive) / sumPosConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
             }
-            if (full.startsWith("accepted:") && b && sumAccConv > 0) {
-              const pct = Math.round((100 * b.accepted) / sumAccConv);
-              return truncateLabel(`${name} (${pct}%)`);
-            }
-            if (full.startsWith("inbox:") && b && sumInbConv > 0) {
-              const pct = Math.round((100 * b.inbox) / sumInbConv);
-              return truncateLabel(`${name} (${pct}%)`);
-            }
-            if (full.startsWith("positive:") && b && sumPosConv > 0) {
-              const pct = Math.round((100 * b.positive) / sumPosConv);
-              return truncateLabel(`${name} (${pct}%)`);
+            if (mode === "reach" && b && reachBasisSum > 0) {
+              const bi = Math.max(Math.max(0, b.reach ?? 0), b.sent);
+              if (full.startsWith("rsplit:")) {
+                const pct = Math.round((100 * bi) / reachBasisSum);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
+              if (full.startsWith("rsent:") && totalSentConv > 0) {
+                const pct = Math.round((100 * b.sent) / totalSentConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
+              if (full.startsWith("racc:") && sumAccConv > 0) {
+                const pct = Math.round((100 * b.accepted) / sumAccConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
+              if (full.startsWith("rinb:") && sumInbConv > 0) {
+                const pct = Math.round((100 * b.inbox) / sumInbConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
+              if (full.startsWith("rpos:") && sumPosConv > 0) {
+                const pct = Math.round((100 * b.positive) / sumPosConv);
+                return truncateLabel(`${name} (${pct}%)`);
+              }
             }
             return truncateLabel(name);
           },
@@ -944,16 +1345,6 @@ const funnelSankeyOption = computed((): EChartsOption => {
   };
 });
 
-/** One row per calendar day from `/api/project-analytics-daily`. */
-interface DailyMetricPoint {
-  date: string;
-  messagesSent: number;
-  connectionSent: number;
-  connectionAccepted: number;
-  inbox: number;
-  positiveReplies: number;
-}
-
 const dailySeries = ref<DailyMetricPoint[]>([]);
 const dailyByEntity = ref<Array<{ entityId: string; entityName: string; series: DailyMetricPoint[] }>>([]);
 const dailyLoading = ref(false);
@@ -961,9 +1352,13 @@ const dailyError = ref("");
 const dailyWarnings = ref<string[]>([]);
 /** Combined funnel chart: lines vs stacked area. */
 const dailyFunnelDisplay = ref<"lines" | "stacked">("lines");
+/** 7-day rolling funnel chart: lines vs stacked (independent of primary funnel chart). */
+const dailyRolling7Display = ref<"lines" | "stacked">("lines");
+/** Shared metric for daily heatmaps (merged + 1–2 entity views). */
+const dailyHeatmapMetric = ref<DailyHeatmapMetricId>("connectionSent");
 
 async function loadDailyMetrics() {
-  if (dashboardTab.value !== "daily") return;
+  if (analyticsMainTab.value !== "funnelsDaily") return;
   const pid = projectStore.selectedProjectId;
   const dr = dateRange.value;
   if (!pid || !dr || dr.length !== 2) {
@@ -1011,115 +1406,6 @@ async function loadDailyMetrics() {
   }
 }
 
-function mondayUtcYmd(dateYmd: string): string {
-  const d = new Date(`${dateYmd}T12:00:00Z`);
-  const dow = d.getUTCDay();
-  const delta = (dow + 6) % 7;
-  d.setUTCDate(d.getUTCDate() - delta);
-  return d.toISOString().slice(0, 10);
-}
-
-function rollingMean(values: number[], index: number, window: number): number {
-  const start = Math.max(0, index - window + 1);
-  const slice = values.slice(start, index + 1);
-  if (slice.length === 0) return 0;
-  return slice.reduce((a, b) => a + b, 0) / slice.length;
-}
-
-function makeDailyFunnelChartOption(
-  rows: DailyMetricPoint[],
-  title: string,
-  mode: "lines" | "stacked",
-  dark: boolean
-): EChartsOption {
-  const tc = chartTextColor(dark);
-  const sl = splitLineColor(dark);
-  const bg = chartSurfaceBg(dark);
-  if (rows.length === 0) {
-    return { animation: false, backgroundColor: bg, series: [] };
-  }
-  const axLabels = rows.map((r) => r.date.slice(5));
-  const rotate = rows.length > 16 ? 40 : rows.length > 10 ? 28 : 0;
-  const showSym = rows.length <= 24;
-  const vals = [
-    rows.map((r) => r.connectionSent),
-    rows.map((r) => r.connectionAccepted),
-    rows.map((r) => r.inbox),
-    rows.map((r) => r.positiveReplies),
-  ] as const;
-  const mkSeries = (i: number, data: number[]) => {
-    const base = {
-      name: STAGE_LABELS[i],
-      type: "line" as const,
-      data,
-      smooth: 0.15,
-      showSymbol: showSym,
-      symbolSize: 5,
-      itemStyle: { color: funnelStageColor(i, dark) },
-    };
-    if (mode === "stacked") {
-      return {
-        ...base,
-        stack: "funnel",
-        areaStyle: { opacity: dark ? 0.34 : 0.42 },
-        lineStyle: { width: 1 },
-      };
-    }
-    return {
-      ...base,
-      lineStyle: { width: 2 },
-    };
-  };
-  return {
-    animation: false,
-    backgroundColor: bg,
-    textStyle: { color: tc },
-    title: {
-      text: title,
-      left: "center",
-      top: 4,
-      textStyle: { color: tc, fontSize: 14 },
-    },
-    tooltip: {
-      trigger: "axis",
-      axisPointer: { type: "line" },
-      formatter(params: unknown) {
-        const arr = Array.isArray(params) ? params : [params];
-        const first = arr[0] as { dataIndex?: number };
-        const idx = first?.dataIndex ?? 0;
-        const d = rows[idx]?.date ?? "";
-        const lines = [`<strong>${d}</strong>`];
-        for (const p of arr) {
-          const pr = p as { seriesName?: string; value?: number | string };
-          const v = pr.value;
-          const n = typeof v === "number" ? v.toLocaleString() : String(v ?? "—");
-          lines.push(`${pr.seriesName ?? ""}: ${n}`);
-        }
-        return lines.join("<br/>");
-      },
-    },
-    legend: { type: "scroll", bottom: 0, textStyle: { color: tc, fontSize: 11 } },
-    grid: { left: 52, right: 10, top: 44, bottom: 64, containLabel: false },
-    xAxis: {
-      type: "category",
-      data: axLabels,
-      axisLabel: { color: tc, fontSize: 10, rotate, interval: 0 },
-      axisLine: { lineStyle: { color: sl } },
-    },
-    yAxis: {
-      type: "value",
-      axisLabel: { color: tc, fontSize: 11 },
-      splitLine: { lineStyle: { color: sl } },
-    },
-    series: [
-      mkSeries(0, [...vals[0]]),
-      mkSeries(1, [...vals[1]]),
-      mkSeries(2, [...vals[2]]),
-      mkSeries(3, [...vals[3]]),
-    ],
-  };
-}
-
 const dailyFunnelPrimaryOption = computed((): EChartsOption => {
   const rows = dailySeries.value;
   const mode = dailyFunnelDisplay.value;
@@ -1130,101 +1416,9 @@ const dailyFunnelPrimaryOption = computed((): EChartsOption => {
   return makeDailyFunnelChartOption(rows, title, mode, isDark.value);
 });
 
-const dailyRolling7Option = computed((): EChartsOption => {
-  const rows = dailySeries.value;
-  const dark = isDark.value;
-  const tc = chartTextColor(dark);
-  const sl = splitLineColor(dark);
-  const bg = chartSurfaceBg(dark);
-  const win = 7;
-  if (rows.length === 0) return { animation: false, backgroundColor: bg, series: [] };
-  const sent = rows.map((r) => r.connectionSent);
-  const acc = rows.map((r) => r.connectionAccepted);
-  const ib = rows.map((r) => r.inbox);
-  const pr = rows.map((r) => r.positiveReplies);
-  const roll = (arr: number[]) => arr.map((_, i) => rollingMean(arr, i, win));
-  const axLabels = rows.map((r) => r.date.slice(5));
-  const rotate = rows.length > 16 ? 40 : rows.length > 10 ? 28 : 0;
-  return {
-    animation: false,
-    backgroundColor: bg,
-    textStyle: { color: tc },
-    title: {
-      text: `${win}-day rolling average (funnel counts)`,
-      left: "center",
-      top: 4,
-      textStyle: { color: tc, fontSize: 14 },
-    },
-    tooltip: {
-      trigger: "axis",
-      formatter(params: unknown) {
-        const arr = Array.isArray(params) ? params : [params];
-        const first = arr[0] as { dataIndex?: number };
-        const idx = first?.dataIndex ?? 0;
-        const d = rows[idx]?.date ?? "";
-        const lines = [`<strong>${d}</strong>`];
-        for (const p of arr) {
-          const pr = p as { seriesName?: string; value?: number | string };
-          const v = pr.value;
-          const n = typeof v === "number" ? Number(v.toFixed(2)).toLocaleString() : String(v ?? "—");
-          lines.push(`${pr.seriesName ?? ""}: ${n}`);
-        }
-        return lines.join("<br/>");
-      },
-    },
-    legend: { type: "scroll", bottom: 0, textStyle: { color: tc, fontSize: 11 } },
-    grid: { left: 52, right: 10, top: 44, bottom: 64 },
-    xAxis: {
-      type: "category",
-      data: axLabels,
-      axisLabel: { color: tc, fontSize: 10, rotate, interval: 0 },
-      axisLine: { lineStyle: { color: sl } },
-    },
-    yAxis: {
-      type: "value",
-      axisLabel: { color: tc, fontSize: 11 },
-      splitLine: { lineStyle: { color: sl } },
-    },
-    series: [
-      {
-        name: `${STAGE_LABELS[0]} (${win}d avg)`,
-        type: "line",
-        data: roll(sent),
-        smooth: 0.12,
-        showSymbol: false,
-        lineStyle: { width: 2 },
-        itemStyle: { color: funnelStageColor(0, dark) },
-      },
-      {
-        name: `${STAGE_LABELS[1]} (${win}d avg)`,
-        type: "line",
-        data: roll(acc),
-        smooth: 0.12,
-        showSymbol: false,
-        lineStyle: { width: 2 },
-        itemStyle: { color: funnelStageColor(1, dark) },
-      },
-      {
-        name: `${STAGE_LABELS[2]} (${win}d avg)`,
-        type: "line",
-        data: roll(ib),
-        smooth: 0.12,
-        showSymbol: false,
-        lineStyle: { width: 2 },
-        itemStyle: { color: funnelStageColor(2, dark) },
-      },
-      {
-        name: `${STAGE_LABELS[3]} (${win}d avg)`,
-        type: "line",
-        data: roll(pr),
-        smooth: 0.12,
-        showSymbol: false,
-        lineStyle: { width: 2 },
-        itemStyle: { color: funnelStageColor(3, dark) },
-      },
-    ],
-  };
-});
+const dailyRolling7Option = computed((): EChartsOption =>
+  makeRollingDailyFunnelChartOption(dailySeries.value, dailyRolling7Display.value, isDark.value, 7)
+);
 
 const dailyRatesOption = computed((): EChartsOption => {
   const rows = dailySeries.value;
@@ -1304,16 +1498,6 @@ const dailyRatesOption = computed((): EChartsOption => {
     ],
   };
 });
-
-interface DailyWowRow {
-  weekStart: string;
-  connectionSent: number;
-  connectionAccepted: number;
-  inbox: number;
-  positiveReplies: number;
-  prevWeekSent: number | null;
-  sentWowPct: number | null;
-}
 
 const dailyWeekOverWeekRows = computed((): DailyWowRow[] => {
   const rows = dailySeries.value;
@@ -1403,6 +1587,217 @@ const dailyWeekWowColumns = computed(
   ]
 );
 
+const WEEKLY_FUNNEL_SANKEY_MAX = 8;
+
+/** One disconnected funnel chain per calendar week (Mon UTC), last N weeks. */
+function buildWeeklyFunnelBlocksSankey(
+  weekRows: DailyWowRow[],
+  dark: boolean,
+  tc: string
+): { nodes: SankeyNodeLite[]; links: SankeyLinkLite[] } {
+  if (weekRows.length === 0) return { nodes: [], links: [] };
+  const take = weekRows.slice(-WEEKLY_FUNNEL_SANKEY_MAX);
+  const nodes: SankeyNodeLite[] = [];
+  const links: SankeyLinkLite[] = [];
+  const nodeSeen = new Set<string>();
+  const pushNode = (n: SankeyNodeLite): void => {
+    if (nodeSeen.has(n.name)) return;
+    nodeSeen.add(n.name);
+    nodes.push(n);
+  };
+  const pushLink = (link: SankeyLinkLite): void => {
+    if (link.value <= 0) return;
+    links.push(link);
+  };
+  const cDrop = dark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.18)";
+
+  take.forEach((w, wi) => {
+    const db = wi * 4;
+    const tag = w.weekStart;
+    const short = tag.slice(5);
+    const rank = wi * 20;
+    const nS = `${short}·Sent`;
+    const nA = `${short}·Acc`;
+    const nI = `${short}·Inbox`;
+    const nP = `${short}·Pos`;
+    const d1 = `${short}·Not acc`;
+    const d2 = `${short}·No inbox`;
+    const d3 = `${short}·Non+`;
+
+    const sent = w.connectionSent;
+    const acc = w.connectionAccepted;
+    const ib = w.inbox;
+    const pr = w.positiveReplies;
+    if (sent <= 0) return;
+
+    pushNode({
+      name: nS,
+      depth: db,
+      value: sent,
+      _raw: sent,
+      itemStyle: { color: funnelStageColor(0, dark), borderColor: funnelStageColor(0, dark) },
+      label: { color: tc, fontWeight: "bold" },
+      __rank: rank,
+    });
+    pushNode({
+      name: nA,
+      depth: db + 1,
+      value: acc,
+      _raw: acc,
+      itemStyle: { color: funnelStageColor(1, dark), borderColor: funnelStageColor(1, dark) },
+      label: { color: tc },
+      __rank: rank + 1,
+    });
+    pushNode({
+      name: nI,
+      depth: db + 2,
+      value: ib,
+      _raw: ib,
+      itemStyle: { color: funnelStageColor(2, dark), borderColor: funnelStageColor(2, dark) },
+      label: { color: tc },
+      __rank: rank + 2,
+    });
+    pushNode({
+      name: nP,
+      depth: db + 3,
+      value: pr,
+      _raw: pr,
+      itemStyle: { color: funnelStageColor(3, dark), borderColor: funnelStageColor(3, dark) },
+      label: { color: tc, fontWeight: "bold" },
+      __rank: rank + 3,
+    });
+    pushNode({
+      name: d1,
+      depth: db + 1,
+      itemStyle: { color: cDrop, borderColor: cDrop },
+      label: { color: tc },
+      __rank: rank + 10,
+    });
+    pushNode({
+      name: d2,
+      depth: db + 2,
+      itemStyle: { color: cDrop, borderColor: cDrop },
+      label: { color: tc },
+      __rank: rank + 11,
+    });
+    pushNode({
+      name: d3,
+      depth: db + 3,
+      itemStyle: { color: cDrop, borderColor: cDrop },
+      label: { color: tc },
+      __rank: rank + 12,
+    });
+
+    pushLink({
+      source: nS,
+      target: nA,
+      value: acc,
+      _raw: acc,
+      lineStyle: { color: funnelStageColor(1, dark), opacity: 0.55 },
+    });
+    pushLink({
+      source: nS,
+      target: d1,
+      value: Math.max(0, sent - acc),
+      _raw: Math.max(0, sent - acc),
+      lineStyle: { color: cDrop, opacity: 0.35 },
+    });
+    pushLink({
+      source: nA,
+      target: nI,
+      value: ib,
+      _raw: ib,
+      lineStyle: { color: funnelStageColor(2, dark), opacity: 0.58 },
+    });
+    pushLink({
+      source: nA,
+      target: d2,
+      value: Math.max(0, acc - ib),
+      _raw: Math.max(0, acc - ib),
+      lineStyle: { color: cDrop, opacity: 0.35 },
+    });
+    pushLink({
+      source: nI,
+      target: nP,
+      value: pr,
+      _raw: pr,
+      lineStyle: { color: funnelStageColor(3, dark), opacity: 0.65 },
+    });
+    pushLink({
+      source: nI,
+      target: d3,
+      value: Math.max(0, ib - pr),
+      _raw: Math.max(0, ib - pr),
+      lineStyle: { color: cDrop, opacity: 0.35 },
+    });
+  });
+
+  return { nodes, links };
+}
+
+const weeklyFunnelSankeyOption = computed((): EChartsOption => {
+  const rows = dailyWeekOverWeekRows.value;
+  const dark = isDark.value;
+  const tc = chartTextColor(dark);
+  const bg = chartSurfaceBg(dark);
+  const sl = splitLineColor(dark);
+  if (rows.length === 0) return { animation: false, backgroundColor: bg, series: [] };
+  const { nodes, links } = buildWeeklyFunnelBlocksSankey(rows, dark, tc);
+  if (links.length === 0) return { animation: false, backgroundColor: bg, series: [] };
+  const nWeeks = Math.min(rows.length, WEEKLY_FUNNEL_SANKEY_MAX);
+  return {
+    animation: false,
+    backgroundColor: bg,
+    textStyle: { color: tc },
+    title: {
+      text: "Weekly funnel (parallel)",
+      subtext: `${nWeeks} week(s), up to ${WEEKLY_FUNNEL_SANKEY_MAX} most recent Mon–Sun buckets (UTC). Each block: Sent → Accepted → Inbox → Positive with drop-offs.`,
+      left: "center",
+      top: 4,
+      textStyle: { color: tc, fontSize: 15, fontWeight: "bold" },
+      subtextStyle: { color: tc, opacity: 0.72, fontSize: 11 },
+    },
+    tooltip: {
+      trigger: "item",
+      backgroundColor: dark ? "rgba(40, 40, 44, 0.94)" : "rgba(255, 255, 255, 0.96)",
+      borderColor: sl,
+      textStyle: { fontSize: 13, color: tc },
+    },
+    series: [
+      {
+        type: "sankey",
+        left: 12,
+        right: 24,
+        top: 56,
+        bottom: 12,
+        nodeWidth: 12,
+        nodeGap: 6,
+        nodeAlign: "justify",
+        layoutIterations: 0,
+        draggable: false,
+        emphasis: { focus: "adjacency" },
+        label: { color: tc, fontSize: 11 },
+        lineStyle: { curveness: 0.45 },
+        data: nodes,
+        links,
+      },
+    ] as EChartsOption["series"],
+  };
+});
+
+const dailyEntityHeatmapOption = computed((): EChartsOption =>
+  makeDailyEntityHeatmapOption(dailyByEntity.value, dailyHeatmapMetric.value, isDark.value)
+);
+
+const dailyMergedHeatmapOption = computed((): EChartsOption =>
+  makeDailyMergedHeatmapOption(
+    dailySeries.value,
+    dailyHeatmapMetric.value,
+    isDark.value,
+    `${groupEntityTitle.value} (merged)`
+  )
+);
+
 const dailyMessagesSentOption = computed((): EChartsOption => {
   const rows = dailySeries.value;
   const dark = isDark.value;
@@ -1467,7 +1862,7 @@ const dailyMessagesSentOption = computed((): EChartsOption => {
 
 watch(
   () => [
-    dashboardTab.value,
+    analyticsMainTab.value,
     projectStore.selectedProjectId,
     dateRange.value?.[0],
     dateRange.value?.[1],
@@ -1475,7 +1870,7 @@ watch(
     analyticsGroupBy.value,
   ],
   () => {
-    if (dashboardTab.value === "daily") void loadDailyMetrics();
+    if (analyticsMainTab.value === "funnelsDaily") void loadDailyMetrics();
   }
 );
 
@@ -1661,370 +2056,155 @@ watch(statsWindowDays, (wd) => {
           </ul>
         </NAlert>
 
-        <NCard title="Filters" size="small" class="flow-dash__card flow-dash__card--spaced flow-dash__filters-card"
-          :bordered="true">
-          <div class="flow-dash__filters-block">
-            <div class="flow-dash__filters-block-head">
-              <span class="flow-dash__filters-title">Group by</span>
-              <span class="flow-dash__filters-sub">Flow vs hypothesis grouping for charts and tables</span>
-            </div>
-            <div class="flow-dash__filters-block-body">
-              <NRadioGroup v-model:value="analyticsGroupBy" size="small" :disabled="collectingDays || loading">
-                <NRadioButton value="flow">Flows</NRadioButton>
-                <NRadioButton value="hypothesis">Hypotheses</NRadioButton>
-              </NRadioGroup>
-            </div>
-          </div>
-
-          <div class="flow-dash__filters-block flow-dash__filters-block--ruled">
-            <div class="flow-dash__filters-block-head">
-              <span class="flow-dash__filters-title">Date range</span>
-              <span class="flow-dash__filters-sub">Window for snapshots; preset adjusts the range</span>
-            </div>
-            <div class="flow-dash__filters-block-body flow-dash__filters-block-body--grow">
-              <NDatePicker v-model:value="dateRange" type="daterange" size="small" clearable class="flow-dash__filters-dp"
-                :disabled="collectingDays || loading" />
-              <NSelect v-model:value="statsWindowDays" size="small" :options="statsWindowOptions" placeholder="Period"
-                class="flow-dash__filters-period" :disabled="collectingDays || loading" :consistent-menu-width="false" />
-              <NText v-if="flows.length === 0 && (collectingDays || loading)" depth="3" class="flow-dash__filters-status">
-                Loading…
-              </NText>
-              <NText v-else-if="flows.length === 0" depth="3" class="flow-dash__filters-status">No data in range</NText>
-            </div>
-          </div>
-
-          <div v-if="flows.length > 0" class="flow-dash__filters-block flow-dash__filters-block--ruled">
-            <div class="flow-dash__filters-section-head">
-              <span class="flow-dash__filters-title">{{ groupEntityTitle }} (charts & matrix)</span>
-              <div class="flow-dash__flow-tag-actions">
-                <NButton
-                  v-if="flowPickerHasOverflow"
-                  size="tiny"
-                  quaternary
-                  :disabled="loading"
-                  @click="flowPickerExpanded = !flowPickerExpanded"
-                >
-                  {{ flowPickerExpanded ? "Show less" : `Show all (${flowsPickerRows.length})` }}
-                </NButton>
-                <NButton size="tiny" quaternary :disabled="loading" @click="selectAllPickerFlows">All</NButton>
-                <NButton size="tiny" quaternary :disabled="loading" @click="clearPickerFlows">Clear</NButton>
-              </div>
-            </div>
-            <div class="flow-dash__flow-tags">
-              <NTooltip v-for="{ flow: f, idx } in flowsPickerRowsShown" :key="`flow-tag-${f.flowUuid}`" placement="top">
-                <template #trigger>
-                  <NTag size="small" :type="isFlowUuidSelected(f.flowUuid) ? 'primary' : 'default'"
-                    :bordered="isFlowUuidSelected(f.flowUuid)" round :class="[
-                      'flow-dash__flow-tag',
-                      { 'flow-dash__flow-tag--active': isFlowUuidSelected(f.flowUuid) },
-                    ]" :disabled="loading" @click="toggleFlowSelection(f.flowUuid)">
-                    <span class="flow-dash__flow-tag-name">{{ flowPickerEmoji(idx) }} {{ f.flowName }}</span><span
-                      class="flow-dash__flow-tag-counts"
-                    >{{ flowPickerTagCountsSuffix(f) }}</span>
-                  </NTag>
-                </template>
-                {{ flowPickerTagTooltip(f, isFlowUuidSelected(f.flowUuid)) }}
-              </NTooltip>
-            </div>
-          </div>
-        </NCard>
-
-        <template v-if="!loadError && flows.length === 0 && !loading && !collectingDays">
-          <NAlert type="info" :title="`No ${groupEntityPlural}`" class="flow-dash__alert">
-            <span v-if="analyticsGroupBy === 'flow'">This project has no rows in <code>Flows</code>, or nothing in range.</span>
-            <span v-else>No hypotheses for this project, or none linked to flows via tag contacts.</span>
-          </NAlert>
-        </template>
-
-        <NTabs v-model:value="dashboardTab" type="line" size="small" class="flow-dash__tabs">
-          <NTabPane name="rankings" tab="Top & least" display-directive="show">
-            <NText v-if="flows.length > 0" depth="3" class="flow-dash__rank-tab-hint">
-              Date range and <strong>Group by</strong> from <strong>Filters</strong> above.
-            </NText>
-            <template v-if="flows.length > 0">
-              <AnalyticsMetricMatrix
-                section="rankings"
-                :flows="flows"
-                :selected-flow-uuids="selectedFlowUuids"
-                :group-entity-title="groupEntityTitle"
-                :group-entity-plural="groupEntityPlural"
-                :group-entity-singular="groupEntitySingular"
-              />
-            </template>
-            <template v-else-if="!loadError && !loading && !collectingDays">
-              <NAlert type="info" :title="`No ${groupEntityPlural}`" class="flow-dash__alert">
-                Nothing in this range. Adjust <strong>Filters</strong> above.
-              </NAlert>
-            </template>
+        <NTabs v-model:value="analyticsMainTab" type="segment" size="medium" class="flow-dash__main-tabs">
+          <NTabPane name="rankings" tab="Top & least">
+            <FlowAnalyticsRankingsPanel
+              v-model:date-range="dateRange"
+              v-model:stats-window-days="statsWindowDays"
+              :stats-window-options="statsWindowOptions"
+              :flows="flows"
+              :group-entity-title="groupEntityTitle"
+              :group-entity-plural="groupEntityPlural"
+              :group-entity-singular="groupEntitySingular"
+              :loading="loading"
+              :collecting-days="collectingDays"
+              :load-error="loadError"
+            />
           </NTabPane>
 
-          <NTabPane name="totals" tab="Totals & compare" display-directive="show">
-            <NText v-if="flows.length > 0" depth="3" class="flow-dash__rank-tab-hint">
-              Project-wide totals (always all flows in range) and selected {{ groupEntityPlural }} matrix. Toggle tags
-              in <strong>Filters</strong> above.
-            </NText>
-            <template v-if="flows.length > 0">
-              <NCard :title="projectTotalsCardTitle" size="small"
-                class="flow-dash__card flow-dash__card--spaced flow-dash__stats-card">
-                <NText v-if="funnelComparison" depth="3" class="flow-dash__stats-sub">
-                  vs prior window {{ funnelComparison.previousDateFrom }} →
-                  {{ funnelComparison.previousDateTo }} (same length)
-                </NText>
-                <div class="flow-dash__stats-cols">
-                  <div class="flow-dash__stat-col">
-                    <NText depth="3" class="flow-dash__stat-col-label">Connection sent</NText>
-                    <div class="flow-dash__stat-col-value">
-                      <span class="flow-dash__stat-col-num">{{
-                        formatInt(displayFunnelTotals.connectionSent)
-                      }}</span>
-                      <NTag v-if="deltaSent" size="small" :bordered="false" :type="deltaSent.type">
-                        {{ deltaSent.text }}
-                      </NTag>
-                    </div>
-                  </div>
-                  <div class="flow-dash__stat-col">
-                    <NText depth="3" class="flow-dash__stat-col-label">Connection accepted</NText>
-                    <div class="flow-dash__stat-col-value">
-                      <span class="flow-dash__stat-col-num">{{
-                        formatInt(displayFunnelTotals.connectionAccepted)
-                      }}</span>
-                      <NTag v-if="deltaAccepted" size="small" :bordered="false" :type="deltaAccepted.type">
-                        {{ deltaAccepted.text }}
-                      </NTag>
-                    </div>
-                  </div>
-                  <div class="flow-dash__stat-col">
-                    <NText depth="3" class="flow-dash__stat-col-label">Inbox reply</NText>
-                    <div class="flow-dash__stat-col-value">
-                      <span class="flow-dash__stat-col-num">{{
-                        formatInt(displayFunnelTotals.inbox)
-                      }}</span>
-                      <NTag v-if="deltaInbox" size="small" :bordered="false" :type="deltaInbox.type">
-                        {{ deltaInbox.text }}
-                      </NTag>
-                    </div>
-                  </div>
-                  <div class="flow-dash__stat-col">
-                    <NText depth="3" class="flow-dash__stat-col-label">Inbox positive</NText>
-                    <div class="flow-dash__stat-col-value">
-                      <span class="flow-dash__stat-col-num">{{
-                        formatInt(displayFunnelTotals.positiveReplies)
-                      }}</span>
-                      <NTag v-if="deltaPositive" size="small" :bordered="false" :type="deltaPositive.type">
-                        {{ deltaPositive.text }}
-                      </NTag>
-                    </div>
-                  </div>
-                  <div class="flow-dash__stat-col">
-                    <NText depth="3" class="flow-dash__stat-col-label">Accepted rate (÷ sent)</NText>
-                    <div class="flow-dash__stat-col-value">
-                      <span class="flow-dash__stat-col-num">{{
-                        displayFunnelTotals.acceptedRatePct == null
-                          ? "—"
-                          : `${displayFunnelTotals.acceptedRatePct.toFixed(1)}%`
-                      }}</span>
-                      <NTag v-if="deltaAccRate" size="small" :bordered="false" :type="deltaAccRate.type">
-                        {{ deltaAccRate.text }}
-                      </NTag>
-                    </div>
-                  </div>
-                  <div class="flow-dash__stat-col">
-                    <NText depth="3" class="flow-dash__stat-col-label">Inbox rate (÷ sent)</NText>
-                    <div class="flow-dash__stat-col-value">
-                      <span class="flow-dash__stat-col-num">{{
-                        displayFunnelTotals.inboxRatePct == null
-                          ? "—"
-                          : `${displayFunnelTotals.inboxRatePct.toFixed(1)}%`
-                      }}</span>
-                      <NTag v-if="deltaInboxRate" size="small" :bordered="false" :type="deltaInboxRate.type">
-                        {{ deltaInboxRate.text }}
-                      </NTag>
-                    </div>
-                  </div>
-                  <div class="flow-dash__stat-col">
-                    <NText depth="3" class="flow-dash__stat-col-label">Positive rate (÷ sent)</NText>
-                    <div class="flow-dash__stat-col-value">
-                      <span class="flow-dash__stat-col-num">{{
-                        displayFunnelTotals.positiveRatePct == null
-                          ? "—"
-                          : `${displayFunnelTotals.positiveRatePct.toFixed(1)}%`
-                      }}</span>
-                      <NTag v-if="deltaPositiveRate" size="small" :bordered="false" :type="deltaPositiveRate.type">
-                        {{ deltaPositiveRate.text }}
-                      </NTag>
-                    </div>
+          <NTabPane name="funnelsDaily" tab="Funnel & daily">
+            <NCard title="Filters" size="small" class="flow-dash__card flow-dash__card--spaced flow-dash__filters-card"
+              :bordered="true">
+              <div class="flow-dash__filters-block">
+                <div class="flow-dash__filters-block-head">
+                  <span class="flow-dash__filters-title">Group by</span>
+                  <span class="flow-dash__filters-sub">Flow vs hypothesis grouping for charts and tables</span>
+                </div>
+                <div class="flow-dash__filters-block-body">
+                  <NRadioGroup v-model:value="analyticsGroupBy" size="small" :disabled="collectingDays || loading">
+                    <NRadioButton value="flow">Flows</NRadioButton>
+                    <NRadioButton value="hypothesis">Hypotheses</NRadioButton>
+                  </NRadioGroup>
+                </div>
+              </div>
+
+              <div class="flow-dash__filters-block flow-dash__filters-block--ruled">
+                <div class="flow-dash__filters-block-head">
+                  <span class="flow-dash__filters-title">Date range</span>
+                  <span class="flow-dash__filters-sub">Window for snapshots; preset adjusts the range</span>
+                </div>
+                <div class="flow-dash__filters-block-body flow-dash__filters-block-body--grow">
+                  <NDatePicker v-model:value="dateRange" type="daterange" size="small" clearable class="flow-dash__filters-dp"
+                    :disabled="collectingDays || loading" />
+                  <NSelect v-model:value="statsWindowDays" size="small" :options="statsWindowOptions" placeholder="Period"
+                    class="flow-dash__filters-period" :disabled="collectingDays || loading" :consistent-menu-width="false" />
+                  <NText v-if="flows.length === 0 && (collectingDays || loading)" depth="3" class="flow-dash__filters-status">
+                    Loading…
+                  </NText>
+                  <NText v-else-if="flows.length === 0" depth="3" class="flow-dash__filters-status">No data in range</NText>
+                </div>
+              </div>
+
+              <div v-if="flows.length > 0" class="flow-dash__filters-block flow-dash__filters-block--ruled">
+                <div class="flow-dash__filters-section-head">
+                  <span class="flow-dash__filters-title">{{ groupEntityTitle }} (charts & matrix)</span>
+                  <div class="flow-dash__flow-tag-actions">
+                    <NButton
+                      v-if="flowPickerHasOverflow"
+                      size="tiny"
+                      quaternary
+                      :disabled="loading"
+                      @click="flowPickerExpanded = !flowPickerExpanded"
+                    >
+                      {{ flowPickerExpanded ? "Show less" : `Show all (${flowsPickerRows.length})` }}
+                    </NButton>
+                    <NButton size="tiny" quaternary :disabled="loading" @click="selectAllPickerFlows">All</NButton>
+                    <NButton size="tiny" quaternary :disabled="loading" @click="clearPickerFlows">Clear</NButton>
                   </div>
                 </div>
-              </NCard>
+                <div class="flow-dash__flow-tags">
+                  <NTooltip v-for="{ flow: f, idx } in flowsPickerRowsShown" :key="`flow-tag-${f.flowUuid}`" placement="top">
+                    <template #trigger>
+                      <NTag size="small" :type="isFlowUuidSelected(f.flowUuid) ? 'primary' : 'default'"
+                        :bordered="isFlowUuidSelected(f.flowUuid)" round :class="[
+                          'flow-dash__flow-tag',
+                          { 'flow-dash__flow-tag--active': isFlowUuidSelected(f.flowUuid) },
+                        ]" :disabled="loading" @click="toggleFlowSelection(f.flowUuid)">
+                        <span class="flow-dash__flow-tag-name">{{ flowPickerEmoji(idx) }} {{ f.flowName }}</span><span
+                          class="flow-dash__flow-tag-counts"
+                        >{{ flowPickerTagCountsSuffix(f) }}</span>
+                      </NTag>
+                    </template>
+                    {{ flowPickerTagTooltip(f, isFlowUuidSelected(f.flowUuid)) }}
+                  </NTooltip>
+                </div>
+              </div>
+            </NCard>
 
-              <AnalyticsMetricMatrix
-                section="performance"
+            <template v-if="!loadError && flows.length === 0 && !loading && !collectingDays">
+              <NAlert type="info" :title="`No ${groupEntityPlural}`" class="flow-dash__alert">
+                <span v-if="analyticsGroupBy === 'flow'">This project has no rows in <code>Flows</code>, or nothing in range.</span>
+                <span v-else>No hypotheses for this project, or none linked to flows via tag contacts.</span>
+              </NAlert>
+            </template>
+
+            <template v-else-if="flows.length > 0">
+              <FlowAnalyticsTotalsSection
+                :group-entity-plural="groupEntityPlural"
+                :group-entity-title="groupEntityTitle"
+                :group-entity-singular="groupEntitySingular"
+                :project-totals-card-title="projectTotalsCardTitle"
+                :display-funnel-totals="displayFunnelTotals"
+                :funnel-comparison="funnelComparison"
+                :delta-sent="deltaSent"
+                :delta-accepted="deltaAccepted"
+                :delta-inbox="deltaInbox"
+                :delta-positive="deltaPositive"
+                :delta-acc-rate="deltaAccRate"
+                :delta-inbox-rate="deltaInboxRate"
+                :delta-positive-rate="deltaPositiveRate"
                 :flows="flows"
                 :selected-flow-uuids="selectedFlowUuids"
-                :group-entity-title="groupEntityTitle"
+              />
+              <FlowAnalyticsFunnelSection
+                v-model:funnel-sankey-mode="funnelSankeyMode"
+                :funnel-sankey-mode-options="funnelSankeyModeOptions"
+                :funnel-sankey-option="funnelSankeyOption"
                 :group-entity-plural="groupEntityPlural"
                 :group-entity-singular="groupEntitySingular"
+                :flows-length="flows.length"
+                :selected-count="selectedFlowUuids.length"
+                :chart-update-options="chartUpdateOptions"
+              />
+              <FlowAnalyticsDailySection
+                v-model:daily-funnel-display="dailyFunnelDisplay"
+                v-model:daily-rolling7-display="dailyRolling7Display"
+                v-model:daily-heatmap-metric="dailyHeatmapMetric"
+                :daily-error="dailyError"
+                :daily-warnings="dailyWarnings"
+                :daily-loading="dailyLoading"
+                :daily-funnel-primary-option="dailyFunnelPrimaryOption"
+                :daily-messages-sent-option="dailyMessagesSentOption"
+                :daily-rates-option="dailyRatesOption"
+                :daily-rolling7-option="dailyRolling7Option"
+                :weekly-funnel-sankey-option="weeklyFunnelSankeyOption"
+                :daily-entity-heatmap-option="dailyEntityHeatmapOption"
+                :daily-merged-heatmap-option="dailyMergedHeatmapOption"
+                :daily-week-wow-columns="dailyWeekWowColumns"
+                :daily-week-over-week-rows="dailyWeekOverWeekRows"
+                :daily-series="dailySeries"
+                :daily-by-entity="dailyByEntity"
+                :group-entity-plural="groupEntityPlural"
+                :group-entity-singular="groupEntitySingular"
+                :flows-length="flows.length"
+                :selected-count="selectedFlowUuids.length"
+                :chart-update-options="chartUpdateOptions"
               />
             </template>
-            <template v-else-if="!loadError && !loading && !collectingDays">
-              <NAlert type="info" :title="`No ${groupEntityPlural}`" class="flow-dash__alert">
-                Nothing in this range. Adjust <strong>Filters</strong> above.
-              </NAlert>
-            </template>
           </NTabPane>
 
-          <NTabPane name="funnels" tab="Funnels" display-directive="show">
-            <NText v-if="flows.length > 0" depth="3" class="flow-dash__rank-tab-hint">
-              Pick {{ groupEntityPlural }} under <strong>{{ groupEntityTitle }} (charts & matrix)</strong> in Filters.
-              Funnels match <code>render_funnel_chart</code>: connection sent → accepted → inbox reply → inbox positive
-              (<code>sort: none</code>).
-            </NText>
-            <template v-if="flows.length > 0">
-              <NAlert v-if="selectedFlowUuids.length === 0" type="info" :title="`No ${groupEntityPlural} selected`"
-                class="flow-dash__alert">
-                Select at least one tag under <strong>Filters</strong> to render charts.
-              </NAlert>
-              <template v-else>
-                <NCard title="Funnel Sankey" size="small" class="flow-dash__card flow-dash__card--spaced">
-                  <div class="flow-dash__sankey-toolbar">
-                    <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-                      Per-{{ groupEntitySingular }} attribution through every stage:
-                      <strong>Sent → Accepted → Inbox → Positive</strong>.
-                      Top {{ FUNNEL_SANKEY_FLOW_LIMIT }} selected {{ groupEntityPlural }} by connection sent; remainder rolled into "Other".
-                      In <strong>Conversion</strong> mode: total connection sent, then each flow’s share of that total as strip width; the same width continues only through stages that have volume (inbox and positive omit a flow when that count is 0). If only one flow reaches inbox or positive, that column’s block is scaled to the same full height as the total column. Labels and tooltips show counts and % where the node exists.
-                    </NText>
-                    <NSelect v-model:value="funnelSankeyMode" :options="funnelSankeyModeOptions" size="small"
-                      class="flow-dash__sankey-mode-select" />
-                  </div>
-                  <div class="flow-dash__compare-host flow-dash__chart-tall">
-                    <VChart class="flow-dash__echart-compare flow-dash__echart-fill" :option="funnelSankeyOption"
-                      :update-options="chartUpdateOptions" :autoresize="{ throttle: 200 }" />
-                  </div>
-                </NCard>
-              </template>
-            </template>
-            <template v-else-if="!loadError && !loading && !collectingDays">
-              <NAlert type="info" :title="`No ${groupEntityPlural}`" class="flow-dash__alert">
-                Nothing in this range. Adjust <strong>Filters</strong> above.
-              </NAlert>
-            </template>
-          </NTabPane>
-
-          <NTabPane name="daily" tab="Daily metrics" display-directive="show">
-            <NText v-if="flows.length > 0" depth="3" class="flow-dash__rank-tab-hint">
-              X = calendar day in the <strong>Date range</strong> filter. Y = summed snapshot metrics for the
-              <strong>{{ groupEntityPlural }}</strong> you selected (hypothesis mode uses the union of underlying flows
-              once per day, so overlaps are not double-counted). Values are deltas stored per snapshot day, not
-              cumulative pipeline totals.
-            </NText>
-            <NAlert v-if="dailyError" type="error" class="flow-dash__alert" :title="dailyError" />
-            <NAlert v-if="dailyWarnings.length > 0" type="warning" class="flow-dash__alert" title="Notice">
-              <ul class="flow-dash__warn-list">
-                <li v-for="(w, i) in dailyWarnings" :key="`dw-${i}`">{{ w }}</li>
-              </ul>
-            </NAlert>
-            <template v-if="flows.length > 0">
-              <NAlert v-if="selectedFlowUuids.length === 0" type="info" :title="`No ${groupEntityPlural} selected`"
-                class="flow-dash__alert">
-                Select at least one tag under <strong>Filters</strong> to load daily series.
-              </NAlert>
-              <NSpin v-else :show="dailyLoading">
-                <NCard title="Funnel counts by day" size="small" class="flow-dash__card flow-dash__card--spaced">
-                  <div class="flow-dash__daily-toolbar">
-                    <NText depth="3" class="flow-dash__daily-toolbar-label">Funnel chart</NText>
-                    <NRadioGroup v-model:value="dailyFunnelDisplay" size="small">
-                      <NRadioButton value="lines">Lines</NRadioButton>
-                      <NRadioButton value="stacked">Stacked area</NRadioButton>
-                    </NRadioGroup>
-                  </div>
-                  <div class="flow-dash__daily-chart-host">
-                    <VChart class="flow-dash__echart-daily" :option="dailyFunnelPrimaryOption"
-                      :update-options="chartUpdateOptions" :autoresize="{ throttle: 200 }" />
-                  </div>
-                </NCard>
-                <NCard title="Messages sent by day" size="small" class="flow-dash__card flow-dash__card--spaced">
-                  <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-                    LinkedIn messages sent (<code>linkedin_sent_count</code>) — often larger than connection requests;
-                    useful volume trend alongside the funnel chart.
-                  </NText>
-                  <div class="flow-dash__daily-chart-host">
-                    <VChart class="flow-dash__echart-daily" :option="dailyMessagesSentOption"
-                      :update-options="chartUpdateOptions" :autoresize="{ throttle: 200 }" />
-                  </div>
-                </NCard>
-                <NCard title="Rates by day" size="small" class="flow-dash__card flow-dash__card--spaced">
-                  <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-                    Accepted, inbox reply, and inbox positive as a percentage of <strong>that day’s</strong> connection
-                    sent (combined selection). Gaps when sent = 0.
-                  </NText>
-                  <div class="flow-dash__daily-chart-host">
-                    <VChart class="flow-dash__echart-daily" :option="dailyRatesOption"
-                      :update-options="chartUpdateOptions" :autoresize="{ throttle: 200 }" />
-                  </div>
-                </NCard>
-                <NCard title="7-day rolling average" size="small" class="flow-dash__card flow-dash__card--spaced">
-                  <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-                    Same four funnel counts, smoothed with a trailing 7-day mean (shorter windows at the start of the
-                    range use fewer days).
-                  </NText>
-                  <div class="flow-dash__daily-chart-host">
-                    <VChart class="flow-dash__echart-daily" :option="dailyRolling7Option"
-                      :update-options="chartUpdateOptions" :autoresize="{ throttle: 200 }" />
-                  </div>
-                </NCard>
-                <NCard title="Week over week" size="small" class="flow-dash__card flow-dash__card--spaced">
-                  <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-                    Weeks start Monday (UTC). Totals sum daily snapshot deltas in each week. “Sent Δ” compares this
-                    week’s connection sent to the previous week’s total.
-                  </NText>
-                  <NDataTable
-                    size="small"
-                    :bordered="true"
-                    :single-line="false"
-                    :columns="dailyWeekWowColumns"
-                    :data="dailyWeekOverWeekRows"
-                    :pagination="false"
-                    class="flow-dash__daily-wow-table"
-                  />
-                </NCard>
-                <NCard
-                  v-if="dailyByEntity.length > 0"
-                  :title="`By ${groupEntitySingular} (1–2 selected)`"
-                  size="small"
-                  class="flow-dash__card flow-dash__card--spaced"
-                >
-                  <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-                    Same funnel lines as the first chart, but each {{ groupEntitySingular }} separately (not merged).
-                  </NText>
-                  <NGrid cols="24" responsive="screen" :x-gap="16" :y-gap="16">
-                    <NGi v-for="ent in dailyByEntity" :key="ent.entityId" span="24 m:12">
-                      <div class="flow-dash__daily-entity-chart">
-                        <VChart
-                          class="flow-dash__echart-daily flow-dash__echart-daily--compact"
-                          :option="makeDailyFunnelChartOption(ent.series, ent.entityName, 'lines', isDark)"
-                          :update-options="chartUpdateOptions"
-                          :autoresize="{ throttle: 200 }"
-                        />
-                      </div>
-                    </NGi>
-                  </NGrid>
-                </NCard>
-              </NSpin>
-            </template>
-            <template v-else-if="!loadError && !loading && !collectingDays">
-              <NAlert type="info" :title="`No ${groupEntityPlural}`" class="flow-dash__alert">
-                Nothing in this range. Adjust <strong>Filters</strong> above.
-              </NAlert>
-            </template>
-          </NTabPane>
-
-          <NTabPane name="geo" tab="Geo insights" display-directive="show">
-            <NText depth="3" class="flow-dash__rank-tab-hint">
-              Country distribution of the most recent LinkedIn conversations for this project. Country is derived
-              from the free-text <code>Contacts.location</code>, so an <strong>Unknown</strong> bucket is expected.
-              Use the charts to spot geographical concentration and which flows reach which regions.
-            </NText>
-            <ConversationsGeoInsights :project-id="projectStore.selectedProjectId" />
+          <NTabPane name="geo" tab="Geo">
+            <FlowAnalyticsGeoPanel :project-id="projectStore.selectedProjectId" />
           </NTabPane>
         </NTabs>
       </NSpin>
@@ -2043,19 +2223,22 @@ watch(statsWindowDays, (wd) => {
   margin: 0 auto;
   box-sizing: border-box;
 }
+</style>
 
-.flow-dash__header {
+<style>
+/* Layout utilities: unscoped under .flow-dash so child panels (funnel/daily/rankings) get chart heights. */
+.flow-dash .flow-dash__header {
   text-align: center;
   margin-bottom: 1.75rem;
 }
 
-.flow-dash__title {
+.flow-dash .flow-dash__title {
   font-size: 2rem;
   font-weight: 600;
   margin-bottom: 0.45rem;
 }
 
-.flow-dash__subtitle {
+.flow-dash .flow-dash__subtitle {
   font-weight: 400;
   font-size: 1.05rem;
   margin: 0;
@@ -2065,90 +2248,90 @@ watch(statsWindowDays, (wd) => {
   margin-right: auto;
 }
 
-.flow-dash__subtitle code {
+.flow-dash .flow-dash__subtitle code {
   font-size: 0.88em;
 }
 
-.flow-dash__spin {
+.flow-dash .flow-dash__spin {
   margin-top: 1.25rem;
 }
 
-.flow-dash__tabs {
-  margin-top: 0.35rem;
+.flow-dash .flow-dash__main-tabs {
+  margin-top: 0.5rem;
 }
 
-.flow-dash__tabs :deep(.n-tabs-nav) {
-  margin-bottom: 0.5rem;
+.flow-dash .flow-dash__main-tabs .n-tabs-nav {
+  margin-bottom: 0.75rem;
 }
 
-.flow-dash__rank-tab-hint {
+.flow-dash .flow-dash__rank-tab-hint {
   display: block;
   font-size: 0.8125rem;
   margin: 0 0 0.65rem;
   line-height: 1.35;
 }
 
-.flow-dash__stats-card :deep(.n-card__content) {
+.flow-dash .flow-dash__stats-card .n-card__content {
   padding-top: 0.75rem;
   padding-bottom: 0.85rem;
 }
 
-.flow-dash__stats-sub {
+.flow-dash .flow-dash__stats-sub {
   display: block;
   font-size: 0.75rem;
   margin: 0 0 0.65rem;
   line-height: 1.35;
 }
 
-.flow-dash__stats-cols {
+.flow-dash .flow-dash__stats-cols {
   display: flex;
   flex-wrap: wrap;
   gap: 1rem 1.35rem;
   align-items: flex-start;
 }
 
-.flow-dash__stat-col {
+.flow-dash .flow-dash__stat-col {
   flex: 1 1 140px;
   min-width: 118px;
 }
 
-.flow-dash__stat-col-label {
+.flow-dash .flow-dash__stat-col-label {
   display: block;
   font-size: 0.75rem;
   margin-bottom: 0.28rem;
 }
 
-.flow-dash__stat-col-value {
+.flow-dash .flow-dash__stat-col-value {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.35rem 0.55rem;
 }
 
-.flow-dash__stat-col-num {
+.flow-dash .flow-dash__stat-col-num {
   font-size: 1.2rem;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
 }
 
-.flow-dash__filters-card :deep(.n-card__content) {
+.flow-dash .flow-dash__filters-card .n-card__content {
   padding-top: 0.65rem;
   padding-bottom: 0.65rem;
 }
 
-.flow-dash__filters-block {
+.flow-dash .flow-dash__filters-block {
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
 }
 
-.flow-dash__filters-block--ruled {
+.flow-dash .flow-dash__filters-block--ruled {
   margin-top: 0.85rem;
   padding-top: 0.85rem;
   border-top: 1px solid var(--n-border-color);
 }
 
-.flow-dash__filters-block-head {
+.flow-dash .flow-dash__filters-block-head {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
@@ -2156,14 +2339,14 @@ watch(statsWindowDays, (wd) => {
   min-width: 0;
 }
 
-.flow-dash__filters-block-body {
+.flow-dash .flow-dash__filters-block-body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem 0.85rem;
 }
 
-.flow-dash__filters-title {
+.flow-dash .flow-dash__filters-title {
   font-size: 11px;
   opacity: 0.72;
   font-weight: 600;
@@ -2172,7 +2355,7 @@ watch(statsWindowDays, (wd) => {
   line-height: 1.35;
 }
 
-.flow-dash__filters-sub {
+.flow-dash .flow-dash__filters-sub {
   font-size: 0.8125rem;
   line-height: 1.35;
   color: var(--n-text-color-3);
@@ -2180,13 +2363,13 @@ watch(statsWindowDays, (wd) => {
   max-width: 42rem;
 }
 
-.flow-dash__filters-status {
+.flow-dash .flow-dash__filters-status {
   font-size: 0.8125rem;
   margin: 0;
   flex: 0 0 auto;
 }
 
-.flow-dash__filters-section-head {
+.flow-dash .flow-dash__filters-section-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2195,35 +2378,35 @@ watch(statsWindowDays, (wd) => {
   margin-bottom: 0.35rem;
 }
 
-.flow-dash__flow-tag-actions {
+.flow-dash .flow-dash__flow-tag-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.15rem;
 }
 
-.flow-dash__flow-tags {
+.flow-dash .flow-dash__flow-tags {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
 
-.flow-dash__flow-tag {
+.flow-dash .flow-dash__flow-tag {
   cursor: pointer;
   user-select: none;
   max-width: 100%;
 }
 
-.flow-dash__flow-tag:not(.flow-dash__flow-tag--active) {
+.flow-dash .flow-dash__flow-tag:not(.flow-dash__flow-tag--active) {
   opacity: 0.78;
 }
 
-.flow-dash__flow-tag--active {
+.flow-dash .flow-dash__flow-tag--active {
   opacity: 1;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22) inset;
 }
 
-.flow-dash__flow-tag :deep(.n-tag__content) {
+.flow-dash .flow-dash__flow-tag .n-tag__content {
   overflow: hidden;
   text-overflow: ellipsis;
   max-width: 100%;
@@ -2233,13 +2416,13 @@ watch(statsWindowDays, (wd) => {
   gap: 0 0.15em;
 }
 
-.flow-dash__flow-tag-name {
+.flow-dash .flow-dash__flow-tag-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.flow-dash__flow-tag-counts {
+.flow-dash .flow-dash__flow-tag-counts {
   flex: 0 0 auto;
   font-size: 0.7rem;
   font-weight: 600;
@@ -2248,51 +2431,51 @@ watch(statsWindowDays, (wd) => {
   white-space: nowrap;
 }
 
-.flow-dash__filters-dp {
+.flow-dash .flow-dash__filters-dp {
   flex: 0 1 260px;
   min-width: 200px;
 }
 
-.flow-dash__filters-period {
+.flow-dash .flow-dash__filters-period {
   flex: 0 1 158px;
   min-width: 132px;
 }
 
-.flow-dash__filters-placeholder {
+.flow-dash .flow-dash__filters-placeholder {
   font-size: 0.8125rem;
 }
 
-.flow-dash__alert {
+.flow-dash .flow-dash__alert {
   margin-bottom: 1rem;
 }
 
-.flow-dash__warn-list {
+.flow-dash .flow-dash__warn-list {
   margin: 0.25rem 0 0 1.1rem;
   padding: 0;
 }
 
-.flow-dash__card {
+.flow-dash .flow-dash__card {
   margin-bottom: 0;
 }
 
-.flow-dash__card--spaced {
+.flow-dash .flow-dash__card--spaced {
   margin-top: 1.75rem;
 }
 
-.flow-dash__hint {
+.flow-dash .flow-dash__hint {
   display: block;
   margin-bottom: 0.9rem;
   font-size: 0.95rem;
   line-height: 1.45;
 }
 
-.flow-dash__hint--tight {
+.flow-dash .flow-dash__hint--tight {
   margin-bottom: 0.55rem;
   font-size: 0.8125rem;
   line-height: 1.35;
 }
 
-.flow-dash__sankey-toolbar {
+.flow-dash .flow-dash__sankey-toolbar {
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -2300,25 +2483,25 @@ watch(statsWindowDays, (wd) => {
   margin-bottom: 0.55rem;
 }
 
-.flow-dash__sankey-toolbar > :first-child {
+.flow-dash .flow-dash__sankey-toolbar > :first-child {
   margin-bottom: 0;
 }
 
-.flow-dash__sankey-mode-select {
+.flow-dash .flow-dash__sankey-mode-select {
   max-width: 340px;
 }
 
-.flow-dash__chart-wrap {
+.flow-dash .flow-dash__chart-wrap {
   position: relative;
   width: 100%;
 }
 
-.flow-dash__chart-tall {
+.flow-dash .flow-dash__chart-tall {
   min-height: 80vh;
   height: 80vh;
 }
 
-.flow-dash__compare-host {
+.flow-dash .flow-dash__compare-host {
   width: 100%;
   position: relative;
   overflow: hidden;
@@ -2327,7 +2510,7 @@ watch(statsWindowDays, (wd) => {
   box-sizing: border-box;
 }
 
-.flow-dash__daily-toolbar {
+.flow-dash .flow-dash__daily-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -2335,12 +2518,12 @@ watch(statsWindowDays, (wd) => {
   margin-bottom: 0.5rem;
 }
 
-.flow-dash__daily-toolbar-label {
+.flow-dash .flow-dash__daily-toolbar-label {
   font-size: 0.8125rem;
   margin: 0;
 }
 
-.flow-dash__daily-chart-host {
+.flow-dash .flow-dash__daily-chart-host {
   width: 100%;
   min-height: 300px;
   height: min(380px, 46vh);
@@ -2348,7 +2531,17 @@ watch(statsWindowDays, (wd) => {
   box-sizing: border-box;
 }
 
-.flow-dash__daily-entity-chart {
+.flow-dash .flow-dash__weekly-sankey-host {
+  min-height: 360px;
+  height: min(500px, 54vh);
+}
+
+.flow-dash .flow-dash__heatmap-host {
+  min-height: 300px;
+  height: min(400px, 48vh);
+}
+
+.flow-dash .flow-dash__daily-entity-chart {
   width: 100%;
   min-height: 260px;
   height: min(320px, 38vh);
@@ -2356,45 +2549,45 @@ watch(statsWindowDays, (wd) => {
   box-sizing: border-box;
 }
 
-.flow-dash__echart-daily {
+.flow-dash .flow-dash__echart-daily {
   width: 100%;
   height: 100%;
   min-height: 280px;
   display: block;
 }
 
-.flow-dash__echart-daily--compact {
+.flow-dash .flow-dash__echart-daily--compact {
   min-height: 240px;
 }
 
-.flow-dash__daily-wow-table {
+.flow-dash .flow-dash__daily-wow-table {
   margin-top: 0.35rem;
 }
 
-.flow-dash__echart-compare {
+.flow-dash .flow-dash__echart-compare {
   width: 100%;
   display: block;
 }
 
-.flow-dash__echart-fill {
+.flow-dash .flow-dash__echart-fill {
   height: 100%;
   min-height: 80vh;
 }
 
-.flow-dash__hint a {
+.flow-dash .flow-dash__hint a {
   color: var(--n-primary-color);
   text-decoration: none;
 }
 
-.flow-dash__hint a:hover {
+.flow-dash .flow-dash__hint a:hover {
   text-decoration: underline;
 }
 
-.flow-dash :deep(.n-card-header) {
+.flow-dash .n-card-header {
   font-size: 1.05rem;
 }
 
-.flow-dash :deep(.n-card-header__main) {
+.flow-dash .n-card-header__main {
   font-size: 1.05rem;
   font-weight: 600;
 }

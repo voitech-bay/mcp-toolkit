@@ -1,0 +1,2 @@
+export const FUNNEL_SANKEY_FLOW_LIMIT = 8;
+export const FUNNEL_REACH_DISPLAY_CAP = 100_000;
