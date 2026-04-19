@@ -19,7 +19,7 @@ import type { SelectOption, DataTableColumns } from "naive-ui";
 import { useDark } from "@vueuse/core";
 import { use } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
-import { LineChart, SankeyChart } from "echarts/charts";
+import { LineChart, SankeyChart, CustomChart } from "echarts/charts";
 import {
   GridComponent,
   TooltipComponent,
@@ -63,6 +63,7 @@ use([
   CanvasRenderer,
   LineChart,
   SankeyChart,
+  CustomChart,
   GridComponent,
   TooltipComponent,
   LegendComponent,
@@ -427,6 +428,12 @@ type FunnelBucket = {
   accepted: number;
   inbox: number;
   positive: number;
+  pipelineStageBreakdown?: Array<{
+    stageUuid: string;
+    stageName: string;
+    stageOrder: number | null;
+    contactsCount: number;
+  }>;
   /** Hypothesis mode: tag-linked contacts (`linkedContactsCount`); used only in reach Sankey. */
   reach?: number;
 };
@@ -443,6 +450,14 @@ const funnelSankeyBuckets = computed((): FunnelBucket[] => {
     accepted: Math.max(0, f.connectionAccepted | 0),
     inbox: Math.max(0, f.inbox | 0),
     positive: Math.max(0, f.positiveReplies | 0),
+    pipelineStageBreakdown: (f.pipelineStageBreakdown ?? [])
+      .filter((s) => s.contactsCount > 0 && s.stageName.trim().length > 0)
+      .map((s) => ({
+        stageUuid: s.stageUuid,
+        stageName: s.stageName,
+        stageOrder: s.stageOrder ?? null,
+        contactsCount: Math.max(0, s.contactsCount | 0),
+      })),
     reach:
       analyticsGroupBy.value === "hypothesis"
         ? Math.min(Math.max(0, f.linkedContactsCount ?? 0), FUNNEL_REACH_DISPLAY_CAP)
@@ -458,6 +473,32 @@ const funnelSankeyBuckets = computed((): FunnelBucket[] => {
           accepted: acc.accepted + Math.max(0, f.connectionAccepted | 0),
           inbox: acc.inbox + Math.max(0, f.inbox | 0),
           positive: acc.positive + Math.max(0, f.positiveReplies | 0),
+          pipelineStageBreakdown: (() => {
+            const next = new Map<
+              string,
+              { stageUuid: string; stageName: string; stageOrder: number | null; contactsCount: number }
+            >();
+            for (const row of acc.pipelineStageBreakdown ?? []) {
+              const key = row.stageUuid || row.stageName;
+              next.set(key, { ...row });
+            }
+            for (const row of f.pipelineStageBreakdown ?? []) {
+              if (!row.stageName?.trim()) continue;
+              const key = row.stageUuid || row.stageName;
+              const prev = next.get(key);
+              if (prev) {
+                prev.contactsCount += Math.max(0, row.contactsCount | 0);
+              } else {
+                next.set(key, {
+                  stageUuid: row.stageUuid,
+                  stageName: row.stageName,
+                  stageOrder: row.stageOrder ?? null,
+                  contactsCount: Math.max(0, row.contactsCount | 0),
+                });
+              }
+            }
+            return [...next.values()];
+          })(),
           reach:
             acc.reach != null && analyticsGroupBy.value === "hypothesis"
               ? acc.reach +
@@ -471,6 +512,7 @@ const funnelSankeyBuckets = computed((): FunnelBucket[] => {
           accepted: 0,
           inbox: 0,
           positive: 0,
+          pipelineStageBreakdown: [],
           reach: analyticsGroupBy.value === "hypothesis" ? 0 : undefined,
         }
       )
@@ -556,12 +598,9 @@ function buildAbsoluteSankey(
 }
 
 /**
- * Conversion mode: Total → split → accepted for every flow; Inbox / Positive
- * only when that flow’s count is > 0. Widths use `wStrip` except when exactly
- * one flow has inbox (or positive): that stage’s nodes **and** the links into /
- * through it use `BASE` so ribbons match full column height. ECharts scales all
- * columns with one global `ky` (see sankey `initializeNodeDepth`), so the chart
- * still fits; accepted nodes use `max(in, out)` from edges.
+ * Conversion mode: every link width uses the same scale `BASE * count / totalSent`
+ * so mass is conserved from Total through drop sinks. Within each stage, bar
+ * heights match shares of that stage’s totals (e.g. positive_i / Σ positive).
  */
 function buildConversionSankey(
   buckets: FunnelBucket[],
@@ -573,9 +612,12 @@ function buildConversionSankey(
   const cAccepted = funnelStageColor(1, dark);
   const cInbox = funnelStageColor(2, dark);
   const cPositive = funnelStageColor(3, dark);
+  const cDrop = dark ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.18)";
 
   const totalSent = buckets.reduce((s, b) => s + b.sent, 0);
   if (totalSent <= 0) return { nodes: [], links: [] };
+
+  const w = (n: number): number => (BASE * n) / totalSent;
 
   const nodes: SankeyNodeLite[] = [];
   const links: SankeyLinkLite[] = [];
@@ -592,6 +634,9 @@ function buildConversionSankey(
   };
 
   const nodeTotal = "total:All connections";
+  const sinkNotAcc = "sink:Not accepted";
+  const sinkNoInb = "sink:Accepted · no reply";
+  const sinkNonPos = "sink:Inbox · non-positive";
 
   pushNode({
     name: nodeTotal,
@@ -603,15 +648,8 @@ function buildConversionSankey(
     __rank: -1,
   });
 
-  const wStrip = buckets.map((b) => (BASE * b.sent) / totalSent);
-
-  const inboxAliveIdx = buckets.map((b, i) => (b.inbox > 0 ? i : -1)).filter((i): i is number => i >= 0);
-  const soleInb = inboxAliveIdx.length === 1;
-  const posAliveIdx = buckets.map((b, i) => (b.positive > 0 ? i : -1)).filter((i): i is number => i >= 0);
-  const solePos = posAliveIdx.length === 1;
-
   buckets.forEach((b, idx) => {
-    const ws = wStrip[idx]!;
+    const ws = w(b.sent);
     const isOther = b.key === "__other__";
     const flowColor = flowAlluviumColor(idx, dark, isOther);
     const nSplit = `split:${b.label}`;
@@ -635,7 +673,6 @@ function buildConversionSankey(
   });
 
   buckets.forEach((b, idx) => {
-    const ws = wStrip[idx]!;
     const isOther = b.key === "__other__";
     const flowColor = flowAlluviumColor(idx, dark, isOther);
     const nSplit = `split:${b.label}`;
@@ -645,66 +682,156 @@ function buildConversionSankey(
     const showInb = b.inbox > 0;
     const showPos = b.positive > 0;
 
+    const wa = w(b.accepted);
+    const dropSentAcc = Math.max(0, b.sent - b.accepted);
+
     pushNode({
       name: nAcc,
       depth: 2,
-      value: ws,
+      value: wa,
       _raw: b.accepted,
       itemStyle: { color: flowColor, borderColor: cAccepted, borderWidth: 1 },
       label: { color: tc },
       __rank: idx,
     });
+
     pushLink({
       source: nSplit,
       target: nAcc,
-      value: ws,
+      value: wa,
       _raw: b.accepted,
       lineStyle: { color: flowColor, opacity: 0.55 },
     });
+    pushLink({
+      source: nSplit,
+      target: sinkNotAcc,
+      value: w(dropSentAcc),
+      _raw: dropSentAcc,
+      lineStyle: { color: cDrop, opacity: 0.32 },
+    });
 
-    if (showInb) {
+    if (showInb && wa > 1e-9) {
+      const wi = w(b.inbox);
+      const dropAccInb = Math.max(0, b.accepted - b.inbox);
+
       pushNode({
         name: nInb,
         depth: 3,
-        value: soleInb ? BASE : ws,
+        value: wi,
         _raw: b.inbox,
         itemStyle: { color: flowColor, borderColor: cInbox, borderWidth: 1 },
         label: { color: tc },
         __rank: idx,
       });
-      console.log('soleInb', soleInb);
-      console.log('ws', ws);
-      console.log('BASE', BASE);
-      console.log('nInb', nInb);
-      console.log('nAcc', nAcc);
-      console.log('b.inbox', b.inbox);
       pushLink({
         source: nAcc,
         target: nInb,
-        value: ws,
+        value: wi,
         _raw: b.inbox,
         lineStyle: { color: flowColor, opacity: 0.55 },
       });
-    }
+      pushLink({
+        source: nAcc,
+        target: sinkNoInb,
+        value: w(dropAccInb),
+        _raw: dropAccInb,
+        lineStyle: { color: cDrop, opacity: 0.32 },
+      });
 
-    if (showPos) {
+      if (showPos) {
+        const wp = w(b.positive);
+        const dropInbPos = Math.max(0, b.inbox - b.positive);
+
+        pushNode({
+          name: nPos,
+          depth: 4,
+          value: wp,
+          _raw: b.positive,
+          itemStyle: { color: flowColor, borderColor: cPositive, borderWidth: 1 },
+          label: { color: tc },
+          __rank: idx,
+        });
+        pushLink({
+          source: nInb,
+          target: nPos,
+          value: wp,
+          _raw: b.positive,
+          lineStyle: { color: flowColor, opacity: 0.58 },
+        });
+        pushLink({
+          source: nInb,
+          target: sinkNonPos,
+          value: w(dropInbPos),
+          _raw: dropInbPos,
+          lineStyle: { color: cDrop, opacity: 0.32 },
+        });
+      } else {
+        pushLink({
+          source: nInb,
+          target: sinkNonPos,
+          value: wi,
+          _raw: b.inbox,
+          lineStyle: { color: cDrop, opacity: 0.32 },
+        });
+      }
+    } else if (showPos && wa > 1e-9) {
+      const wp = w(b.positive);
+      const dropAccPos = Math.max(0, b.accepted - b.positive);
+
       pushNode({
         name: nPos,
         depth: 4,
-        value: solePos ? BASE : ws,
+        value: wp,
         _raw: b.positive,
         itemStyle: { color: flowColor, borderColor: cPositive, borderWidth: 1 },
         label: { color: tc },
         __rank: idx,
       });
       pushLink({
-        source: showInb ? nInb : nAcc,
+        source: nAcc,
         target: nPos,
-        value: solePos ? BASE : ws,
+        value: wp,
         _raw: b.positive,
         lineStyle: { color: flowColor, opacity: 0.58 },
       });
+      pushLink({
+        source: nAcc,
+        target: sinkNoInb,
+        value: w(dropAccPos),
+        _raw: dropAccPos,
+        lineStyle: { color: cDrop, opacity: 0.32 },
+      });
+    } else if (b.accepted > 0) {
+      pushLink({
+        source: nAcc,
+        target: sinkNoInb,
+        value: wa,
+        _raw: b.accepted,
+        lineStyle: { color: cDrop, opacity: 0.32 },
+      });
     }
+  });
+
+  pushNode({
+    name: sinkNotAcc,
+    depth: 2,
+    itemStyle: { color: cDrop, borderColor: cDrop },
+    label: { color: tc },
+    __rank: 9000,
+  });
+  pushNode({
+    name: sinkNoInb,
+    depth: 3,
+    itemStyle: { color: cDrop, borderColor: cDrop },
+    label: { color: tc },
+    __rank: 9001,
+  });
+  pushNode({
+    name: sinkNonPos,
+    depth: 4,
+    itemStyle: { color: cDrop, borderColor: cDrop },
+    label: { color: tc },
+    __rank: 9002,
   });
 
   return { nodes, links };
@@ -1040,6 +1167,15 @@ function buildReachFunnelSankey(
   return { nodes, links };
 }
 
+const legacySankeyCompat = [
+  stripSankeyPrefix,
+  buildAbsoluteSankey,
+  buildConversionSankey,
+  buildDownstreamSankey,
+  buildReachFunnelSankey,
+];
+void legacySankeyCompat;
+
 watch(analyticsGroupBy, (g) => {
   if (g !== "hypothesis" && funnelSankeyMode.value === "reach") {
     funnelSankeyMode.value = "absolute";
@@ -1052,124 +1188,560 @@ watch(reachModeAvailable, (ok) => {
   }
 });
 
+type AlluvialStageLabel = { id: string; label: string; color: string };
+
+type AlluvialEntry = {
+  id: string;
+  label: string;
+  value: number;
+  rank: number;
+  color?: string;
+};
+
+type AlluvialRibbon = {
+  sourceStage: string;
+  targetStage: string;
+  sourceEntry: string;
+  targetEntry: string;
+  raw: number;
+  color: string;
+  opacity: number;
+  sourceLabel: string;
+  targetLabel: string;
+};
+
+type AlluvialStage = {
+  id: string;
+  label: string;
+  color: string;
+  entries: Map<string, AlluvialEntry>;
+};
+
+type AlluvialSlot = {
+  id: string;
+  label: string;
+  rank: number;
+  raw: number;
+  pct: number;
+  y0: number;
+  y1: number;
+  color?: string;
+  stageId: string;
+  stageLabel: string;
+  stageIndex: number;
+  stageTotal: number;
+};
+
+type AlluvialModel = {
+  stageLabels: AlluvialStageLabel[];
+  slotsByStage: AlluvialSlot[][];
+  ribbons: Array<
+    AlluvialRibbon & {
+      sourceSlot: AlluvialSlot;
+      targetSlot: AlluvialSlot;
+      sourceStageIndex: number;
+      targetStageIndex: number;
+      sourceY0: number;
+      sourceY1: number;
+      targetY0: number;
+      targetY1: number;
+    }
+  >;
+};
+
+function stageColorByMode(mode: FunnelSankeyMode, stageIndex: number, dark: boolean): string {
+  if (mode === "conversion") {
+    if (stageIndex <= 1) return funnelStageColor(0, dark);
+    return funnelStageColor(stageIndex - 1, dark);
+  }
+  if (mode === "reach") {
+    if (stageIndex <= 2) return funnelStageColor(0, dark);
+    return funnelStageColor(stageIndex - 2, dark);
+  }
+  if (mode === "downstream") {
+    return funnelStageColor(Math.min(stageIndex + 1, 3), dark);
+  }
+  return funnelStageColor(stageIndex, dark);
+}
+
+function buildNormalizedAlluvial(
+  buckets: FunnelBucket[],
+  mode: FunnelSankeyMode,
+  dark: boolean
+): AlluvialModel | null {
+  const flowMeta = buckets.map((b, idx) => ({
+    bucket: b,
+    flowId: `flow:${b.key}`,
+    rank: idx,
+    color: flowAlluviumColor(idx, dark, b.key === "__other__"),
+  }));
+  const stageMap = new Map<string, AlluvialStage>();
+  const ribbons: AlluvialRibbon[] = [];
+  const stageOrder: AlluvialStageLabel[] = [];
+
+  const addStage = (id: string, label: string, color: string): void => {
+    if (stageMap.has(id)) return;
+    stageMap.set(id, { id, label, color, entries: new Map<string, AlluvialEntry>() });
+    stageOrder.push({ id, label, color });
+  };
+  const addEntry = (
+    stageId: string,
+    entryId: string,
+    label: string,
+    value: number,
+    rank: number,
+    color?: string
+  ): void => {
+    if (value <= 0) return;
+    const stage = stageMap.get(stageId);
+    if (!stage) return;
+    const prev = stage.entries.get(entryId);
+    if (prev) {
+      prev.value += value;
+      return;
+    }
+    stage.entries.set(entryId, { id: entryId, label, value, rank, color });
+  };
+  const addRibbon = (
+    sourceStage: string,
+    targetStage: string,
+    sourceEntry: string,
+    targetEntry: string,
+    raw: number,
+    color: string,
+    opacity: number,
+    sourceLabel: string,
+    targetLabel: string
+  ): void => {
+    if (raw <= 0) return;
+    ribbons.push({
+      sourceStage,
+      targetStage,
+      sourceEntry,
+      targetEntry,
+      raw,
+      color,
+      opacity,
+      sourceLabel,
+      targetLabel,
+    });
+  };
+
+  const sumSent = buckets.reduce((s, b) => s + b.sent, 0);
+  const sumAcc = buckets.reduce((s, b) => s + b.accepted, 0);
+  const hasPipelineStageData = buckets.some((b) => (b.pipelineStageBreakdown?.length ?? 0) > 0);
+  if (mode !== "downstream" && sumSent <= 0) return null;
+  if (mode === "downstream" && sumAcc <= 0) return null;
+
+  if (mode === "conversion") {
+    const stageIds = [
+      "total",
+      "byFlow",
+      "accepted",
+      "inbox",
+      "positive",
+      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
+    ] as const;
+    stageIds.forEach((sid, i) => {
+      const label =
+        sid === "total"
+          ? "Total"
+          : sid === "byFlow"
+            ? "By flow"
+            : sid === "accepted"
+              ? "Accepted"
+              : sid === "inbox"
+                ? "Inbox"
+                : sid === "positive"
+                  ? "Positive"
+                  : "Pipeline";
+      addStage(sid, label, stageColorByMode(mode, i, dark));
+    });
+    addEntry("total", "total:all", "All connections", sumSent, -1, stageColorByMode(mode, 0, dark));
+
+    flowMeta.forEach(({ bucket: b, flowId, rank, color }) => {
+      addEntry("byFlow", flowId, b.label, b.sent, rank, color);
+      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
+      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
+      addEntry("positive", flowId, b.label, b.positive, rank, color);
+
+      addRibbon("total", "byFlow", "total:all", flowId, b.sent, color, 0.38, "All connections", b.label);
+      addRibbon("byFlow", "accepted", flowId, flowId, b.accepted, color, 0.54, b.label, b.label);
+      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
+      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
+      if (hasPipelineStageData) {
+        const rows = b.pipelineStageBreakdown ?? [];
+        for (const ps of rows) {
+          const stageName = ps.stageName?.trim();
+          if (!stageName) continue;
+          const count = Math.max(0, ps.contactsCount | 0);
+          if (count <= 0) continue;
+          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
+          const stageId = `pstage:${ps.stageUuid || stageName}`;
+          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
+          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
+        }
+      }
+    });
+  } else if (mode === "downstream") {
+    const stageIds = [
+      "accepted",
+      "inbox",
+      "positive",
+      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
+    ] as const;
+    stageIds.forEach((sid, i) => {
+      const label =
+        sid === "accepted" ? "Accepted" : sid === "inbox" ? "Inbox" : sid === "positive" ? "Positive" : "Pipeline";
+      addStage(sid, label, stageColorByMode(mode, i, dark));
+    });
+    flowMeta.forEach(({ bucket: b, flowId, rank, color }) => {
+      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
+      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
+      addEntry("positive", flowId, b.label, b.positive, rank, color);
+
+      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
+      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
+      if (hasPipelineStageData) {
+        const rows = b.pipelineStageBreakdown ?? [];
+        for (const ps of rows) {
+          const stageName = ps.stageName?.trim();
+          if (!stageName) continue;
+          const count = Math.max(0, ps.contactsCount | 0);
+          if (count <= 0) continue;
+          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
+          const stageId = `pstage:${ps.stageUuid || stageName}`;
+          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
+          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
+        }
+      }
+    });
+  } else if (mode === "reach") {
+    const stageIds = [
+      "total",
+      "byReach",
+      "sent",
+      "accepted",
+      "inbox",
+      "positive",
+      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
+    ] as const;
+    stageIds.forEach((sid, i) => {
+      const label =
+        sid === "total"
+          ? "Total"
+          : sid === "byReach"
+            ? "By reach"
+            : sid === "sent"
+              ? "Sent"
+              : sid === "accepted"
+                ? "Accepted"
+                : sid === "inbox"
+                  ? "Inbox"
+                  : sid === "positive"
+                    ? "Positive"
+                    : "Pipeline";
+      addStage(sid, label, stageColorByMode(mode, i, dark));
+    });
+    const basis = flowMeta.map(({ bucket: b }) => Math.max(Math.max(0, b.reach ?? 0), b.sent));
+    const basisSum = basis.reduce((s, n) => s + n, 0);
+    if (basisSum <= 0) return null;
+    addEntry("total", "total:reach", "Tagged reach (all)", basisSum, -1, stageColorByMode(mode, 0, dark));
+
+    flowMeta.forEach(({ bucket: b, flowId, rank, color }, i) => {
+      const bi = basis[i] ?? 0;
+      const reachLabel = b.label;
+      addEntry("byReach", flowId, reachLabel, bi, rank, color);
+      addEntry("sent", flowId, b.label, b.sent, rank, color);
+      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
+      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
+      addEntry("positive", flowId, b.label, b.positive, rank, color);
+
+      addRibbon("total", "byReach", "total:reach", flowId, bi, color, 0.38, "Tagged reach (all)", reachLabel);
+      addRibbon("byReach", "sent", flowId, flowId, b.sent, color, 0.48, b.label, b.label);
+      addRibbon("sent", "accepted", flowId, flowId, b.accepted, color, 0.54, b.label, b.label);
+      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
+      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
+      if (hasPipelineStageData) {
+        const rows = b.pipelineStageBreakdown ?? [];
+        for (const ps of rows) {
+          const stageName = ps.stageName?.trim();
+          if (!stageName) continue;
+          const count = Math.max(0, ps.contactsCount | 0);
+          if (count <= 0) continue;
+          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
+          const stageId = `pstage:${ps.stageUuid || stageName}`;
+          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
+          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
+        }
+      }
+    });
+  } else {
+    const stageIds = [
+      "sent",
+      "accepted",
+      "inbox",
+      "positive",
+      ...(hasPipelineStageData ? (["pipeline"] as const) : ([] as const)),
+    ] as const;
+    stageIds.forEach((sid, i) => {
+      const label =
+        sid === "sent" ? "Sent" : sid === "accepted" ? "Accepted" : sid === "inbox" ? "Inbox" : sid === "positive" ? "Positive" : "Pipeline";
+      addStage(sid, label, stageColorByMode(mode, i, dark));
+    });
+    flowMeta.forEach(({ bucket: b, flowId, rank, color }) => {
+      addEntry("sent", flowId, b.label, b.sent, rank, color);
+      addEntry("accepted", flowId, b.label, b.accepted, rank, color);
+      addEntry("inbox", flowId, b.label, b.inbox, rank, color);
+      addEntry("positive", flowId, b.label, b.positive, rank, color);
+
+      addRibbon("sent", "accepted", flowId, flowId, b.accepted, color, 0.54, b.label, b.label);
+      addRibbon("accepted", "inbox", flowId, flowId, b.inbox, color, 0.56, b.label, b.label);
+      addRibbon("inbox", "positive", flowId, flowId, b.positive, color, 0.59, b.label, b.label);
+      if (hasPipelineStageData) {
+        const rows = b.pipelineStageBreakdown ?? [];
+        for (const ps of rows) {
+          const stageName = ps.stageName?.trim();
+          if (!stageName) continue;
+          const count = Math.max(0, ps.contactsCount | 0);
+          if (count <= 0) continue;
+          const stageOrder = ps.stageOrder ?? Number.MAX_SAFE_INTEGER;
+          const stageId = `pstage:${ps.stageUuid || stageName}`;
+          addEntry("pipeline", stageId, stageName, count, 5000 + stageOrder);
+          addRibbon("positive", "pipeline", flowId, stageId, count, color, 0.6, b.label, stageName);
+        }
+      }
+    });
+  }
+
+  const slotsByStage: AlluvialSlot[][] = stageOrder.map((s, stageIndex) => {
+    const stage = stageMap.get(s.id);
+    if (!stage) return [];
+    const arr = [...stage.entries.values()].filter((x) => x.value > 0);
+    arr.sort((a, b) => (a.rank === b.rank ? a.label.localeCompare(b.label) : a.rank - b.rank));
+    const total = arr.reduce((sum, x) => sum + x.value, 0);
+    if (total <= 0) return [];
+    let acc = 0;
+    return arr.map((x) => {
+      const pct = x.value / total;
+      const y0 = acc;
+      const y1 = Math.min(1, acc + pct);
+      acc = y1;
+      return {
+        id: x.id,
+        label: x.label,
+        rank: x.rank,
+        raw: x.value,
+        pct,
+        y0,
+        y1,
+        color: x.color,
+        stageId: s.id,
+        stageLabel: s.label,
+        stageIndex,
+        stageTotal: total,
+      };
+    });
+  });
+
+  if (slotsByStage.some((x) => x.length === 0)) return null;
+
+  const slotIdx = new Map<string, AlluvialSlot>();
+  slotsByStage.forEach((slots) => {
+    slots.forEach((slot) => {
+      slotIdx.set(`${slot.stageId}::${slot.id}`, slot);
+    });
+  });
+
+  const ribbonResolved = ribbons
+    .map((r) => {
+      const sourceSlot = slotIdx.get(`${r.sourceStage}::${r.sourceEntry}`);
+      const targetSlot = slotIdx.get(`${r.targetStage}::${r.targetEntry}`);
+      if (!sourceSlot || !targetSlot) return null;
+      return {
+        ...r,
+        sourceSlot,
+        targetSlot,
+        sourceStageIndex: sourceSlot.stageIndex,
+        targetStageIndex: targetSlot.stageIndex,
+        sourceY0: sourceSlot.y0,
+        sourceY1: sourceSlot.y1,
+        targetY0: targetSlot.y0,
+        targetY1: targetSlot.y1,
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => x != null);
+
+  if (ribbonResolved.length === 0) return null;
+
+  const sourceGroups = new Map<string, typeof ribbonResolved>();
+  const targetGroups = new Map<string, typeof ribbonResolved>();
+  ribbonResolved.forEach((r) => {
+    const sKey = `${r.sourceStage}::${r.sourceEntry}`;
+    const tKey = `${r.targetStage}::${r.targetEntry}`;
+    if (!sourceGroups.has(sKey)) sourceGroups.set(sKey, []);
+    if (!targetGroups.has(tKey)) targetGroups.set(tKey, []);
+    sourceGroups.get(sKey)!.push(r);
+    targetGroups.get(tKey)!.push(r);
+  });
+  sourceGroups.forEach((group) => {
+    const total = group.reduce((s, r) => s + r.raw, 0);
+    if (total <= 0) return;
+    group.sort((a, b) =>
+      a.targetSlot.rank === b.targetSlot.rank
+        ? a.targetSlot.label.localeCompare(b.targetSlot.label)
+        : a.targetSlot.rank - b.targetSlot.rank
+    );
+    let acc = 0;
+    const slotSpan = Math.max(0, group[0]!.sourceSlot.y1 - group[0]!.sourceSlot.y0);
+    group.forEach((r) => {
+      const p = r.raw / total;
+      r.sourceY0 = r.sourceSlot.y0 + slotSpan * acc;
+      r.sourceY1 = r.sourceSlot.y0 + slotSpan * Math.min(1, acc + p);
+      acc += p;
+    });
+  });
+  targetGroups.forEach((group) => {
+    const total = group.reduce((s, r) => s + r.raw, 0);
+    if (total <= 0) return;
+    group.sort((a, b) =>
+      a.sourceSlot.rank === b.sourceSlot.rank
+        ? a.sourceSlot.label.localeCompare(b.sourceSlot.label)
+        : a.sourceSlot.rank - b.sourceSlot.rank
+    );
+    let acc = 0;
+    const slotSpan = Math.max(0, group[0]!.targetSlot.y1 - group[0]!.targetSlot.y0);
+    group.forEach((r) => {
+      const p = r.raw / total;
+      r.targetY0 = r.targetSlot.y0 + slotSpan * acc;
+      r.targetY1 = r.targetSlot.y0 + slotSpan * Math.min(1, acc + p);
+      acc += p;
+    });
+  });
+
+  return { stageLabels: stageOrder, slotsByStage, ribbons: ribbonResolved };
+}
+
 const funnelSankeyOption = computed((): EChartsOption => {
   const buckets = funnelSankeyBuckets.value;
   const dark = isDark.value;
   const tc = chartTextColor(dark);
   const mode = funnelSankeyMode.value;
 
-  if (buckets.length === 0) {
-    return { animation: false, series: [] };
-  }
+  if (buckets.length === 0) return { animation: false, series: [] };
 
-  let nodes: SankeyNodeLite[] = [];
-  let links: SankeyLinkLite[] = [];
-  if (mode === "conversion") {
-    ({ nodes, links } = buildConversionSankey(buckets, dark, tc));
-  } else if (mode === "downstream") {
-    ({ nodes, links } = buildDownstreamSankey(buckets, dark, tc));
-  } else if (mode === "reach") {
-    ({ nodes, links } = buildReachFunnelSankey(buckets, dark, tc));
-  } else {
-    ({ nodes, links } = buildAbsoluteSankey(buckets, dark, tc));
-  }
+  const model = buildNormalizedAlluvial(buckets, mode, dark);
+  if (!model) return { animation: false, series: [] };
 
-  if (links.length === 0) {
-    return { animation: false, series: [] };
-  }
-
+  const stageLabels = model.stageLabels.map((s) => s.label);
+  const hasPipelineColumn = stageLabels.includes("Pipeline");
   const topN = Math.min(buckets.length, FUNNEL_SANKEY_FLOW_LIMIT);
   const subtext =
     mode === "conversion"
-      ? `Conversion · sent-share width through Total → By flow → Accepted; Inbox / Positive only when that flow has volume (no zero ribbons). Top ${topN} ${groupEntityPlural.value}.`
+      ? `Conversion (100% per stage) · each column is normalized independently; strata show stage share by ${groupEntitySingular.value}.${hasPipelineColumn ? " Final stage uses contact pipeline stages (Opportunity, Handraiser, etc.)." : ""} Top ${topN} ${groupEntityPlural.value}.`
       : mode === "downstream"
-        ? `Downstream · widths = accepted counts (not connection sent). Accepted → Inbox / no reply → Positive / non-positive. Top ${topN} ${groupEntityPlural.value} with accept > 0.`
+        ? `Downstream (100% per stage) · Accepted → Inbox → Positive by ${groupEntitySingular.value}.${hasPipelineColumn ? " Final stage uses contact pipeline stages." : ""} Top ${topN} ${groupEntityPlural.value}.`
         : mode === "reach"
-          ? `Reach → funnel · first split width ∝ max(tagged reach, sent) per hypothesis (reach capped at ${FUNNEL_REACH_DISPLAY_CAP.toLocaleString()}); links & later nodes use funnel counts (see tooltips).`
-          : `Absolute · Flow → Accepted → Inbox → Positive · top ${topN} ${groupEntityPlural.value}`;
+          ? `Reach alluvial (100% per stage) · Reach basis = max(tagged reach, sent), reach capped at ${FUNNEL_REACH_DISPLAY_CAP.toLocaleString()}.${hasPipelineColumn ? " Final stage uses contact pipeline stages." : ""}`
+          : `Absolute alluvial (100% per stage) · Sent → Accepted → Inbox → Positive by ${groupEntitySingular.value}.${hasPipelineColumn ? " Final stage uses contact pipeline stages." : ""}`;
 
-  const stageLabels: readonly string[] =
-    mode === "conversion"
-      ? ["Total", "By flow", "Accepted", "Inbox", "Positive"]
-      : mode === "downstream"
-        ? ["Accepted", "Inbox", "Positive"]
-        : mode === "reach"
-          ? ["Total", "By reach", "Sent", "Accepted", "Inbox", "Positive"]
-          : ["Sent", "Accepted", "Inbox", "Positive"];
   const axisHeaderTop = 52;
-  const sankeyTop = 76;
-  const sankeyLeft = 12;
-  const sankeyRight = 140;
-  const nodeWidth = 14;
-
-  const truncateLabel = (name: string, max = 18): string =>
-    name.length > max ? `${name.slice(0, max - 1)}…` : name;
-
-  const totalSentConv = buckets.reduce((s, b) => s + b.sent, 0);
-  const sumAccConv = buckets.reduce((s, b) => s + b.accepted, 0);
-  const sumInbConv = buckets.reduce((s, b) => s + b.inbox, 0);
-  const sumPosConv = buckets.reduce((s, b) => s + b.positive, 0);
-  const reachBasisSum = buckets.reduce(
-    (s, b) => s + Math.max(Math.max(0, b.reach ?? 0), b.sent),
-    0
-  );
-
-  const axisHeaders = stageLabels.map((txt, i) => {
-    const color =
-      mode === "conversion"
-        ? i === 0 || i === 1
-          ? funnelStageColor(0, dark)
-          : funnelStageColor(i - 1, dark)
-        : mode === "reach"
-          ? i === 0 || i === 1
-            ? funnelStageColor(0, dark)
-            : funnelStageColor(i - 2, dark)
-          : funnelStageColor(
-              mode === "downstream" ? Math.min(i + 1, 3) : i,
-              dark
-            );
-    const baseStyle = {
-      text: txt,
-      fill: color,
-      opacity: 0.85,
-      font: "bold 11px sans-serif",
-    };
-    const last = stageLabels.length - 1;
-    if (i === 0) {
-      return {
-        type: "text" as const,
-        left: sankeyLeft,
-        top: axisHeaderTop,
-        style: { ...baseStyle, textAlign: "left" as const },
-      };
-    }
-    if (i === last) {
-      return {
-        type: "text" as const,
-        right: sankeyRight + nodeWidth - 4,
-        top: axisHeaderTop,
-        style: { ...baseStyle, textAlign: "right" as const },
-      };
-    }
-    const spread =
-      mode === "reach" ? 48 : mode === "conversion" ? 58 : mode === "downstream" ? 64 : 62;
-    const start =
-      mode === "reach" ? 12 : mode === "conversion" ? 16 : mode === "downstream" ? 22 : 18;
-    const leftPct = `${start + (spread * i) / last}%`;
+  const axisHeaders = model.stageLabels.map((stage, i) => {
+    const last = Math.max(1, model.stageLabels.length - 1);
+    const leftPct = `${8 + (80 * i) / last}%`;
     return {
       type: "text" as const,
       left: leftPct,
       top: axisHeaderTop,
-      style: { ...baseStyle, textAlign: "center" as const },
+      style: {
+        text: stage.label,
+        fill: stage.color,
+        opacity: 0.88,
+        font: "bold 22px sans-serif",
+        textAlign: "center" as const,
+      },
     };
   });
+
+  const slotByStageAndId = new Map<string, AlluvialSlot>();
+  model.slotsByStage.forEach((slots) => {
+    slots.forEach((slot) => {
+      slotByStageAndId.set(`${slot.stageId}::${slot.id}`, slot);
+    });
+  });
+  const convPctForSlot = (slot: AlluvialSlot): number | null => {
+    if (mode !== "conversion") return null;
+    if (slot.stageId === "total") return 100;
+    if (slot.stageId === "byFlow") {
+      const total = model.slotsByStage[0]?.[0]?.raw ?? 0;
+      return total > 0 ? (100 * slot.raw) / total : 0;
+    }
+    const prevStageId =
+      slot.stageId === "accepted"
+        ? "byFlow"
+        : slot.stageId === "inbox"
+          ? "accepted"
+          : slot.stageId === "positive"
+            ? "inbox"
+            : "";
+    if (!prevStageId) return null;
+    const prev = slotByStageAndId.get(`${prevStageId}::${slot.id}`)?.raw ?? 0;
+    return prev > 0 ? (100 * slot.raw) / prev : 0;
+  };
+  const ribbonItems = model.ribbons.map((r, i) => ({
+    kind: "ribbon" as const,
+    id: `rib:${i}`,
+    sourceStageIndex: r.sourceStageIndex,
+    targetStageIndex: r.targetStageIndex,
+    sourceY0: r.sourceY0,
+    sourceY1: r.sourceY1,
+    targetY0: r.targetY0,
+    targetY1: r.targetY1,
+    raw: r.raw,
+    color: r.color,
+    opacity: r.opacity,
+    sourceLabel: r.sourceLabel,
+    targetLabel: r.targetLabel,
+    sourceStageLabel: r.sourceSlot.stageLabel,
+    targetStageLabel: r.targetSlot.stageLabel,
+  }));
+  const stratumItems = model.slotsByStage.flatMap((slots) =>
+    slots.map((slot, i) => ({
+      kind: "stratum" as const,
+      id: `bar:${slot.stageId}:${slot.id}:${i}`,
+      stageIndex: slot.stageIndex,
+      stageLabel: slot.stageLabel,
+      y0: slot.y0,
+      y1: slot.y1,
+      raw: slot.raw,
+      pct: slot.pct,
+      convPct: convPctForSlot(slot),
+      stageTotal: slot.stageTotal,
+      label: slot.label,
+      rank: slot.rank,
+      color: slot.color,
+    }))
+  );
+  const firstBandFlowNameItems = model.ribbons
+    .filter((r) => r.sourceStageIndex === 0 && r.targetStageIndex === 1)
+    .map((r, i) => ({
+      kind: "flowName" as const,
+      id: `flow-label:${i}`,
+      label: r.targetLabel,
+      sourceStageIndex: r.sourceStageIndex,
+      targetStageIndex: r.targetStageIndex,
+      sourceY0: r.sourceY0,
+      sourceY1: r.sourceY1,
+      targetY0: r.targetY0,
+      targetY1: r.targetY1,
+    }));
 
   return {
     animation: false,
     backgroundColor: chartSurfaceBg(dark),
     textStyle: { color: tc },
     title: {
-      text: "Funnel Sankey",
+      text: "Funnel Alluvial",
       subtext,
       left: "center",
       top: 6,
@@ -1183,163 +1755,187 @@ const funnelSankeyOption = computed((): EChartsOption => {
       borderColor: splitLineColor(dark),
       textStyle: { fontSize: 13, color: tc },
       formatter: (params: unknown) => {
-        const p = Array.isArray(params) ? params[0] : params;
-        if (!p || typeof p !== "object") return "";
-        const dataType = (p as { dataType?: string }).dataType;
-        const data = (p as { data?: { source?: string; target?: string; value?: number; _raw?: number } }).data ?? {};
-        const raw = typeof data._raw === "number" ? data._raw : undefined;
-        if (dataType === "edge") {
-          const src = stripSankeyPrefix(String(data.source ?? ""));
-          const tgt = stripSankeyPrefix(String(data.target ?? ""));
-          const v = raw ?? Number(data.value ?? 0);
-          return `${src} → ${tgt}<br/><strong>${v.toLocaleString()}</strong>`;
+        const data = ((params as { data?: unknown } | undefined)?.data ?? null) as
+          | {
+              kind?: "ribbon" | "stratum";
+              sourceStageLabel?: string;
+              targetStageLabel?: string;
+              sourceLabel?: string;
+              targetLabel?: string;
+              raw?: number;
+              stageLabel?: string;
+              label?: string;
+              pct?: number;
+              convPct?: number;
+              stageTotal?: number;
+            }
+          | null;
+        if (!data || typeof data !== "object") return "";
+        if (data.kind === "ribbon") {
+          const raw = Math.max(0, Math.round(Number(data.raw ?? 0)));
+          return `${data.sourceStageLabel} · ${data.sourceLabel} → ${data.targetStageLabel} · ${data.targetLabel}<br/><strong>${raw.toLocaleString()}</strong>`;
         }
-        const fullName = String((p as { name?: string }).name ?? "");
-        const name = stripSankeyPrefix(fullName);
-        const v = raw ?? Number((p as { value?: number }).value ?? 0);
-        if (mode === "conversion") {
-          const b = buckets.find((x) => x.label === name);
-          if (fullName.startsWith("total:")) {
-            return `Total connections<br/><strong>${totalSentConv.toLocaleString()}</strong> (connection sent)`;
+        if (data.kind === "stratum") {
+          const raw = Math.max(0, Math.round(Number(data.raw ?? 0)));
+          const total = Math.max(0, Math.round(Number(data.stageTotal ?? 0)));
+          if (mode === "conversion") {
+            const conv = Math.max(0, Number(data.convPct ?? 0));
+            return `${data.stageLabel} · ${data.label}<br/><strong>${Math.round(conv)}%</strong> conversion<br/><em>Raw: ${raw.toLocaleString()} · Stage total: ${total.toLocaleString()}</em>`;
           }
-          if (fullName.startsWith("split:") && b && totalSentConv > 0) {
-            const pct = Math.round((100 * b.sent) / totalSentConv);
-            return `${name}<br/><strong>${b.sent.toLocaleString()}</strong> (${pct}% of connection sent)`;
-          }
-          if (fullName.startsWith("accepted:") && b && sumAccConv > 0) {
-            const pct = Math.round((100 * b.accepted) / sumAccConv);
-            return `${name}<br/><strong>${b.accepted.toLocaleString()}</strong> (${pct}% of accepted)`;
-          }
-          if (fullName.startsWith("inbox:") && b && sumInbConv > 0) {
-            const pct = Math.round((100 * b.inbox) / sumInbConv);
-            return `${name}<br/><strong>${b.inbox.toLocaleString()}</strong> (${pct}% of inbox)`;
-          }
-          if (fullName.startsWith("positive:") && b && sumPosConv > 0) {
-            const pct = Math.round((100 * b.positive) / sumPosConv);
-            return `${name}<br/><strong>${b.positive.toLocaleString()}</strong> (${pct}% of positive)`;
-          }
+          return `${data.stageLabel} · ${data.label}<br/><strong>${raw.toLocaleString()}</strong><br/><em>Stage total: ${total.toLocaleString()}</em>`;
         }
-        if (mode === "reach") {
-          const b = buckets.find((x) => x.label === name);
-          const reachN = Math.max(0, b?.reach ?? 0);
-          if (fullName.startsWith("total:")) {
-            return `Σ max(tagged reach, sent)<br/><strong>${reachBasisSum.toLocaleString()}</strong> (layout basis)`;
-          }
-          if (fullName.startsWith("rsplit:") && b) {
-            return `${name}<br/>Tagged: <strong>${reachN.toLocaleString()}</strong> · Sent: <strong>${b.sent.toLocaleString()}</strong>`;
-          }
-          if (fullName.startsWith("rsent:") && b) {
-            return `${name}<br/><strong>${b.sent.toLocaleString()}</strong> connection sent`;
-          }
-          if (fullName.startsWith("racc:") && b) {
-            return `${name}<br/><strong>${b.accepted.toLocaleString()}</strong> accepted`;
-          }
-          if (fullName.startsWith("rinb:") && b) {
-            return `${name}<br/><strong>${b.inbox.toLocaleString()}</strong> inbox`;
-          }
-          if (fullName.startsWith("rpos:") && b) {
-            return `${name}<br/><strong>${b.positive.toLocaleString()}</strong> positive`;
-          }
-          if (fullName.startsWith("sinkreach:")) {
-            return `Drop-offs (tagged unused, not accepted, no reply, etc.)<br/><em>Layout only — see edge tooltips for counts.</em>`;
-          }
-        }
-        if (mode === "downstream") {
-          const b = buckets.find((x) => x.label === name);
-          if (fullName.startsWith("dacc:") && b) {
-            return `${name}<br/><strong>${b.accepted.toLocaleString()}</strong> accepted`;
-          }
-          if (fullName.startsWith("dinb:") && b) {
-            return `${name}<br/><strong>${b.inbox.toLocaleString()}</strong> inbox`;
-          }
-        }
-        return `${name}<br/><strong>${v.toLocaleString()}</strong>`;
+        return "";
       },
     },
-    // `nodeSort` is supported at runtime but missing from the current ECharts
-    // type definitions for SankeySeriesOption; cast to EChartsOption["series"].
     series: [
       {
-        type: "sankey",
-        left: sankeyLeft,
-        right: sankeyRight,
-        top: sankeyTop,
-        bottom: 16,
-        nodeWidth,
-        nodeGap: 8,
-        nodeAlign: "justify",
-        layoutIterations: 0,
-        draggable: false,
-        emphasis: {
-          focus: mode === "conversion" || mode === "reach" ? "trajectory" : "adjacency",
+        name: "alluvial-ribbons",
+        type: "custom",
+        coordinateSystem: "none",
+        data: ribbonItems,
+        z: 2,
+        renderItem: (params: unknown, api: unknown) => {
+          const d = (params as { dataIndexInside?: number }).dataIndexInside ?? 0;
+          const row = ribbonItems[d];
+          if (!row) return null;
+          const w = (api as { getWidth: () => number }).getWidth();
+          const h = (api as { getHeight: () => number }).getHeight();
+          const left = 26;
+          const right = 150;
+          const top = 78;
+          const bottom = 18;
+          const n = Math.max(1, stageLabels.length);
+          const plotW = Math.max(120, w - left - right);
+          const plotH = Math.max(40, h - top - bottom);
+          const step = n <= 1 ? 0 : plotW / (n - 1);
+          const barW = Math.min(50, Math.max(22, n <= 1 ? 40 : step * 0.34));
+          const xS = left + row.sourceStageIndex * step + barW / 2;
+          const xT = left + row.targetStageIndex * step - barW / 2;
+          const yS0 = top + row.sourceY0 * plotH;
+          const yS1 = top + row.sourceY1 * plotH;
+          const yT0 = top + row.targetY0 * plotH;
+          const yT1 = top + row.targetY1 * plotH;
+          const c = Math.max(10, (xT - xS) * 0.42);
+          const pathData = [
+            `M${xS},${yS0}`,
+            `C${xS + c},${yS0} ${xT - c},${yT0} ${xT},${yT0}`,
+            `L${xT},${yT1}`,
+            `C${xT - c},${yT1} ${xS + c},${yS1} ${xS},${yS1}`,
+            "Z",
+          ].join(" ");
+          return {
+            type: "path",
+            shape: { pathData },
+            style: { fill: row.color, opacity: row.opacity },
+          };
         },
-        label: {
-          color: tc,
-          fontSize: 12,
-          formatter: (p: unknown) => {
-            const full = String((p as { name?: string } | undefined)?.name ?? "");
-            const name = stripSankeyPrefix(full);
-            if (mode !== "conversion" && mode !== "reach") return truncateLabel(name);
-            if (
-              full.startsWith("sink:") ||
-              full.startsWith("total:") ||
-              full.startsWith("sinkreach:")
-            ) {
-              return "";
-            }
-            const b = buckets.find((x) => x.label === name);
-            if (mode === "conversion") {
-              if (full.startsWith("split:") && b && totalSentConv > 0) {
-                const pct = Math.round((100 * b.sent) / totalSentConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-              if (full.startsWith("accepted:") && b && sumAccConv > 0) {
-                const pct = Math.round((100 * b.accepted) / sumAccConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-              if (full.startsWith("inbox:") && b && sumInbConv > 0) {
-                const pct = Math.round((100 * b.inbox) / sumInbConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-              if (full.startsWith("positive:") && b && sumPosConv > 0) {
-                const pct = Math.round((100 * b.positive) / sumPosConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-            }
-            if (mode === "reach" && b && reachBasisSum > 0) {
-              const bi = Math.max(Math.max(0, b.reach ?? 0), b.sent);
-              if (full.startsWith("rsplit:")) {
-                const pct = Math.round((100 * bi) / reachBasisSum);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-              if (full.startsWith("rsent:") && totalSentConv > 0) {
-                const pct = Math.round((100 * b.sent) / totalSentConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-              if (full.startsWith("racc:") && sumAccConv > 0) {
-                const pct = Math.round((100 * b.accepted) / sumAccConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-              if (full.startsWith("rinb:") && sumInbConv > 0) {
-                const pct = Math.round((100 * b.inbox) / sumInbConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-              if (full.startsWith("rpos:") && sumPosConv > 0) {
-                const pct = Math.round((100 * b.positive) / sumPosConv);
-                return truncateLabel(`${name} (${pct}%)`);
-              }
-            }
-            return truncateLabel(name);
-          },
+      },
+      {
+        name: "alluvial-strata",
+        type: "custom",
+        coordinateSystem: "none",
+        data: stratumItems,
+        z: 4,
+        renderItem: (params: unknown, api: unknown) => {
+          const d = (params as { dataIndexInside?: number }).dataIndexInside ?? 0;
+          const row = stratumItems[d];
+          if (!row) return null;
+          const w = (api as { getWidth: () => number }).getWidth();
+          const h = (api as { getHeight: () => number }).getHeight();
+          const left = 26;
+          const right = 150;
+          const top = 78;
+          const bottom = 18;
+          const n = Math.max(1, stageLabels.length);
+          const plotW = Math.max(120, w - left - right);
+          const plotH = Math.max(40, h - top - bottom);
+          const step = n <= 1 ? 0 : plotW / (n - 1);
+          const barW = Math.min(50, Math.max(22, n <= 1 ? 40 : step * 0.34));
+          const x = left + row.stageIndex * step - barW / 2;
+          const y = top + row.y0 * plotH;
+          const hRect = Math.max(1, (row.y1 - row.y0) * plotH);
+          const fill = row.color ?? (dark ? "rgba(44, 44, 50, 0.96)" : "rgba(245, 245, 245, 0.98)");
+          const stroke = dark ? "rgba(255,255,255,0.55)" : "rgba(20,20,20,0.78)";
+          const showNumber = hRect >= 10;
+          const valueText =
+            mode === "conversion"
+              ? `${Math.max(0, Math.round(Number((row as { convPct?: number }).convPct ?? 0)))}%`
+              : Math.max(0, Math.round(row.raw)).toLocaleString();
+          return {
+            type: "group",
+            children: [
+              {
+                type: "rect",
+                shape: { x, y, width: barW, height: hRect },
+                style: { fill, stroke, lineWidth: 1 },
+              },
+              ...(showNumber
+                ? [
+                    {
+                      type: "text",
+                      style: {
+                        x: x + barW + 4,
+                        y: y + hRect / 2,
+                        text: valueText,
+                        fill: tc,
+                        font: "bold 22px sans-serif",
+                        align: "left",
+                        verticalAlign: "middle",
+                      },
+                    },
+                  ]
+                : []),
+            ],
+          };
         },
-        lineStyle: { curveness: 0.5 },
-        nodeSort: (a: unknown, b: unknown): number => {
-          const ra = (a as { __rank?: number } | undefined)?.__rank ?? 9999;
-          const rb = (b as { __rank?: number } | undefined)?.__rank ?? 9999;
-          return ra - rb;
+      },
+      {
+        name: "alluvial-flow-names",
+        type: "custom",
+        coordinateSystem: "none",
+        data: firstBandFlowNameItems,
+        z: 50,
+        zlevel: 2,
+        silent: true,
+        renderItem: (params: unknown, api: unknown) => {
+          const d = (params as { dataIndexInside?: number }).dataIndexInside ?? 0;
+          const row = firstBandFlowNameItems[d];
+          if (!row) return null;
+          const w = (api as { getWidth: () => number }).getWidth();
+          const h = (api as { getHeight: () => number }).getHeight();
+          const left = 26;
+          const right = 150;
+          const top = 78;
+          const bottom = 18;
+          const n = Math.max(1, stageLabels.length);
+          const plotW = Math.max(120, w - left - right);
+          const plotH = Math.max(40, h - top - bottom);
+          const step = n <= 1 ? 0 : plotW / (n - 1);
+          const barW = Math.min(50, Math.max(22, n <= 1 ? 40 : step * 0.34));
+          const xS = left + row.sourceStageIndex * step + barW / 2;
+          const xT = left + row.targetStageIndex * step - barW / 2;
+          const x = xS + (xT - xS) * 0.5;
+          const yMid = top + ((row.targetY0 + row.targetY1) * 0.5) * plotH;
+          const laneH = Math.max(0, (row.targetY1 - row.targetY0) * plotH);
+          if (laneH < 14) return null;
+          const textColor = dark ? "rgba(255,255,255,0.92)" : "rgba(20,20,20,0.86)";
+          return {
+            type: "text",
+            z2: 200,
+            style: {
+              x,
+              y: yMid,
+              text: row.label,
+              fill: textColor,
+              font: "bold 12px sans-serif",
+              align: "center",
+              verticalAlign: "middle",
+              backgroundColor: dark ? "rgba(16,16,20,0.6)" : "rgba(255,255,255,0.7)",
+              borderRadius: 4,
+              padding: [3, 8, 3, 8],
+            },
+          };
         },
-        data: nodes,
-        links,
       },
     ] as EChartsOption["series"],
   };

@@ -29,7 +29,7 @@ defineProps<{
         Select at least one tag under <strong>Filters</strong> to render charts.
       </NAlert>
       <template v-else>
-        <NCard title="Funnel Sankey" size="small" class="flow-dash__card flow-dash__card--spaced">
+        <NCard title="Funnel Alluvial" size="small" class="flow-dash__card flow-dash__card--spaced">
           <div class="flow-dash__sankey-toolbar">
             <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
               Per-{{ groupEntitySingular }} attribution through every stage:
@@ -37,7 +37,10 @@ defineProps<{
               <strong>Accepted → …</strong> (downstream only), or
               <strong>Reach → Sent → …</strong> when <strong>Hypotheses</strong> is selected and tagged-reach exists. Top
               {{ FUNNEL_SANKEY_FLOW_LIMIT }} selected {{ groupEntityPlural }} by connection sent; remainder rolled into "Other".
-              Conversion: ribbon width = share of connection sent. Reach: first split ∝ max(tagged reach, sent) (reach capped at
+              When available, a final <strong>Pipeline</strong> stage is appended from
+              <code>FlowLeads → Contacts.pipeline_stage_uuid → PipelineStages</code>.
+              All modes normalize each stage column to <strong>100%</strong>; strata heights show that stage’s shares by
+              {{ groupEntitySingular }}. Reach basis uses max(tagged reach, sent) (reach capped at
               {{ FUNNEL_REACH_DISPLAY_CAP.toLocaleString() }}); later links use funnel counts — read tooltips.
             </NText>
             <NSelect

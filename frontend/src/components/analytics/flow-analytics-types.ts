@@ -1,5 +1,12 @@
 /** Shared types for flow / hypothesis analytics dashboards and matrices. */
 
+export interface FlowPipelineStageBreakdownRow {
+  stageUuid: string;
+  stageName: string;
+  stageOrder: number | null;
+  contactsCount: number;
+}
+
 export interface FlowFunnelRow {
   flowUuid: string;
   flowName: string;
@@ -14,6 +21,7 @@ export interface FlowFunnelRow {
   connectionRequestRatePct?: number | null;
   linkedContactsCount?: number;
   linkedFlowsCount?: number;
+  pipelineStageBreakdown?: FlowPipelineStageBreakdownRow[];
 }
 
 export interface FlowFunnelProjectTotalsPayload {
