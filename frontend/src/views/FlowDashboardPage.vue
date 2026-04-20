@@ -490,43 +490,6 @@ const selectedPipelineStageConfigs = computed(() =>
     .filter((x): x is { stageUuid: string; stageName: string; position: number } => x != null)
 );
 
-watch(
-  availablePipelineStages,
-  (list) => {
-    const allowed = new Set(list.map((s) => s.stageUuid));
-    const kept = selectedPipelineStageUuids.value.filter((id) => allowed.has(id));
-    if (kept.length === 0 && list.length > 0) {
-      const preferred = list
-        .filter((s) => {
-          const n = s.stageName.trim().toLowerCase();
-          return n === "handraiser" || n === "opportunity" || n === "active opportunity";
-        })
-        .map((s) => s.stageUuid);
-      selectedPipelineStageUuids.value = preferred.length > 0 ? preferred : list.slice(0, 2).map((s) => s.stageUuid);
-    } else {
-      selectedPipelineStageUuids.value = kept;
-    }
-    const nextPos: Record<string, number> = {};
-    const selectedSet = new Set(selectedPipelineStageUuids.value);
-    const ordered = [...selectedPipelineStageUuids.value].sort((a, b) => {
-      const ao = pipelineStagePositions.value[a] ?? Number.MAX_SAFE_INTEGER;
-      const bo = pipelineStagePositions.value[b] ?? Number.MAX_SAFE_INTEGER;
-      if (ao !== bo) return ao - bo;
-      const an = pipelineStageNameByUuid.value[a] ?? a;
-      const bn = pipelineStageNameByUuid.value[b] ?? b;
-      return an.localeCompare(bn);
-    });
-    let idx = 1;
-    for (const id of ordered) {
-      if (!selectedSet.has(id)) continue;
-      nextPos[id] = Math.max(1, Math.trunc(pipelineStagePositions.value[id] ?? idx));
-      idx += 1;
-    }
-    pipelineStagePositions.value = nextPos;
-  },
-  { deep: true, immediate: true }
-);
-
 const reachModeAvailable = computed(
   () =>
     analyticsGroupBy.value === "hypothesis" &&

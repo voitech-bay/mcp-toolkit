@@ -18,6 +18,7 @@ const distinctId = existingDistinctId ?? crypto.randomUUID();
 if (!existingDistinctId) localStorage.setItem(distinctIdStorageKey, distinctId);
 
 mixpanel.init("a108ea7e5ad166183e1f0c548b8bf319", {
+  autocapture: true,
   api_host: "https://api-eu.mixpanel.com",
 });
 mixpanel.identify(distinctId);
