@@ -371,14 +371,6 @@ function cursorDateOnly(iso: string | null): string | null {
   return iso.slice(0, 10);
 }
 
-/** Skip bucket entirely if every row in bucket would be at or before incremental cursor (created_at). */
-function shouldSkipCreatedAtBucket(bucket: DateRangeFilter, sinceCreatedAt: string | null): boolean {
-  if (sinceCreatedAt == null) return false;
-  const c = cursorDateOnly(sinceCreatedAt);
-  if (c == null) return false;
-  return bucket.to < c;
-}
-
 function shouldSkipUpdatedAtBucket(bucket: DateRangeFilter, sinceUpdatedAt: string | null): boolean {
   if (sinceUpdatedAt == null) return false;
   const c = cursorDateOnly(sinceUpdatedAt);
@@ -420,15 +412,14 @@ export async function fetchAllContacts(credentials?: ApiCredentials, onLog?: Fet
 }
 
 /**
- * One search filter pass: POST /leads/api/leads/search with optional `filter.created_at` range.
- * Newest first; stops when a row has created_at <= sinceCreatedAt.
+ * One search filter pass: POST /leads/api/leads/search with optional `filter.updated_at` range.
+ * Newest first; stops when a row has updated_at <= sinceUpdatedAt.
  */
 async function fetchContactsSearchPass(
-  sinceCreatedAt: string | null,
+  sinceUpdatedAt: string | null,
   config: { baseUrl: string; apiKey: string },
   onLog: FetchLogger | undefined,
-  options: FetchIncrementalOptions | undefined,
-  createdAtRange: DateRangeFilter | null
+  options: FetchIncrementalOptions | undefined
 ): Promise<FetchContactsResult> {
   const onPage = options?.onPage;
   const onBeforePage = options?.onBeforePage;
@@ -436,12 +427,7 @@ async function fetchContactsSearchPass(
   let offset = 0;
   let fetchedCount = 0;
   let lastTotal: number | undefined;
-  const filter: Record<string, unknown> =
-    createdAtRange != null
-      ? {
-          created_at: toGetSalesLeadDateRangeArray(createdAtRange),
-        }
-      : {};
+  const filter: Record<string, unknown> = {};
   try {
     while (true) {
       const limit = pageLimitForOffset(offset);
@@ -462,7 +448,7 @@ async function fetchContactsSearchPass(
         filter,
         limit,
         offset,
-        order_field: "created_at",
+        order_field: "updated_at",
         order_type: "desc",
       });
       const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config.apiKey, {
@@ -482,18 +468,18 @@ async function fetchContactsSearchPass(
           limit,
           totalSoFar,
           head10: preview,
-          createdAtFilter: createdAtRange ?? "none",
+          updatedAtFilter: "none",
         });
       }
       let shouldStop = false;
       const pageRows: Record<string, unknown>[] = [];
       for (const row of page) {
-        const at = rowCreatedAt(row);
-        if (sinceCreatedAt != null && isAtOrOlder(at, sinceCreatedAt)) {
+        const at = rowUpdatedAt(row);
+        if (sinceUpdatedAt != null && isAtOrOlder(at, sinceUpdatedAt)) {
           shouldStop = true;
           break;
         }
-        if (sinceCreatedAt == null || (at != null && at > sinceCreatedAt)) {
+        if (sinceUpdatedAt == null || (at != null && at > sinceUpdatedAt)) {
           pageRows.push(row);
         }
       }
@@ -527,59 +513,12 @@ async function fetchContactsSearchPass(
   }
 }
 
-async function fetchContactsBucketRecursive(
-  sinceCreatedAt: string | null,
-  config: { baseUrl: string; apiKey: string },
-  onLog: FetchLogger | undefined,
-  options: FetchIncrementalOptions | undefined,
-  range: DateRangeFilter,
-  depth: number
-): Promise<FetchContactsResult> {
-  if (depth > 48) {
-    return {
-      data: [],
-      error: `contacts: date bucket split exceeded max depth for ${range.from}..${range.to}`,
-      fetchedCount: 0,
-    };
-  }
-  const pass = await fetchContactsSearchPass(sinceCreatedAt, config, onLog, options, range);
-  if (pass.error == null) return pass;
-  if (!pass.error.includes(String(SOURCE_API_MAX_OFFSET_PLUS_LIMIT)) && !pass.error.includes("cannot paginate past")) {
-    return pass;
-  }
-  if (range.from === range.to) {
-    return pass;
-  }
-  const [left, right] = splitDateRangeHalves(range);
-  if (
-    left.from === range.from &&
-    left.to === range.to &&
-    right.from === range.from &&
-    right.to === range.to
-  ) {
-    return pass;
-  }
-  if (left.from > left.to || right.from > right.to) {
-    return pass;
-  }
-  const a = await fetchContactsBucketRecursive(sinceCreatedAt, config, onLog, options, left, depth + 1);
-  if (a.error) return a;
-  const b = await fetchContactsBucketRecursive(sinceCreatedAt, config, onLog, options, right, depth + 1);
-  return {
-    data: [],
-    error: b.error,
-    fetchedCount: a.fetchedCount + b.fetchedCount,
-    errorDetail: b.errorDetail,
-  };
-}
-
 /**
- * Fetch contacts from source API (newest first). Stops when a row has created_at <= sinceCreatedAt.
- * If sinceCreatedAt is null, fetches all (subject to empty-month streak / max years when no dateRange).
- * Uses monthly date buckets; if a bucket hits Elasticsearch 10k window, recursively split by date.
+ * Fetch contacts from source API in unfiltered batches (order by updated_at DESC).
+ * Incremental cursor (`sinceUpdatedAt`) stops once older/equal rows appear.
  */
 export async function fetchContactsIncremental(
-  sinceCreatedAt: string | null,
+  sinceUpdatedAt: string | null,
   credentials?: ApiCredentials,
   onLog?: FetchLogger,
   options?: FetchIncrementalOptions
@@ -589,85 +528,26 @@ export async function fetchContactsIncremental(
     return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required", fetchedCount: 0 };
   }
   const usePartition = options?.useDatePartition !== false;
+  if (sinceUpdatedAt != null) {
+    if (onLog) {
+      await onLog("contacts: incremental mode (updated_at cursor) — date bucket filter disabled", {
+        cursor: sinceUpdatedAt,
+      });
+    }
+    // Incremental contacts sync must not be constrained by month buckets from date filters; otherwise
+    // pipeline stage updates on older contacts are skipped.
+    return fetchContactsSearchPass(sinceUpdatedAt, config, onLog, options);
+  }
   if (!usePartition) {
-    return fetchContactsSearchPass(sinceCreatedAt, config, onLog, options, null);
+    return fetchContactsSearchPass(sinceUpdatedAt, config, onLog, options);
   }
 
-  const onPage = options?.onPage;
-  const userRange = options?.dateRange;
-  const today = formatYmdUtc(new Date());
-  const oldestAllowed = formatYmdUtc(
-    new Date(Date.UTC(new Date().getUTCFullYear() - CONTACTS_FULL_SYNC_MAX_YEARS_BACK, 0, 1))
-  );
-
-  let rangeFrom: string;
-  let rangeTo: string;
-  if (userRange) {
-    rangeFrom = userRange.from;
-    rangeTo = userRange.to;
-    if (rangeFrom > rangeTo) {
-      return { data: [], error: "contacts: dateRange.from must be <= dateRange.to", fetchedCount: 0 };
-    }
-  } else {
-    rangeTo = today;
-    rangeFrom = oldestAllowed;
+  if (onLog) {
+    await onLog("contacts: full sync mode — date buckets disabled, using unfiltered batches", {
+      hasDateRange: options?.dateRange != null,
+    });
   }
-
-  const months = enumerateMonthBucketsDescending(rangeFrom, rangeTo, 6);
-  let totalFetched = 0;
-  let streakEmpty = 0;
-  let firstError: string | null = null;
-  let firstErrorDetail: SourceApiErrorDetail | undefined;
-
-  for (const monthBucket of months) {
-    if (shouldSkipCreatedAtBucket(monthBucket, sinceCreatedAt)) {
-      // Buckets are newest-first; if this whole month is before the cursor, every older month is too.
-      if (onLog) {
-        await onLog(`contacts: stop — reached months before incremental cursor`, {
-          cursor: cursorDateOnly(sinceCreatedAt),
-          firstSkippedBucket: monthBucket,
-        });
-      }
-      break;
-    }
-    if (onLog) await onLog(`contacts: processing bucket`, { bucket: monthBucket });
-    const sub = await fetchContactsBucketRecursive(
-      sinceCreatedAt,
-      config,
-      onLog,
-      options,
-      monthBucket,
-      0
-    );
-    totalFetched += sub.fetchedCount;
-    if (sub.error) {
-      firstError = firstError ?? sub.error;
-      firstErrorDetail = firstErrorDetail ?? sub.errorDetail;
-      break;
-    }
-    if (sub.fetchedCount === 0) {
-      streakEmpty += 1;
-      if (
-        sinceCreatedAt == null &&
-        !userRange &&
-        streakEmpty >= CONTACTS_FULL_SYNC_MAX_EMPTY_MONTH_STREAK
-      ) {
-        if (onLog) await onLog(`contacts: stopping — ${CONTACTS_FULL_SYNC_MAX_EMPTY_MONTH_STREAK} empty months in a row`);
-        break;
-      }
-    } else {
-      streakEmpty = 0;
-    }
-    await sleep(DELAY_MS);
-  }
-
-  if (onLog) await onLog(`contacts: partitioned fetch complete`, { totalRows: totalFetched });
-  return {
-    data: [],
-    error: firstError,
-    fetchedCount: totalFetched,
-    errorDetail: firstErrorDetail,
-  };
+  return fetchContactsSearchPass(sinceUpdatedAt, config, onLog, options);
 }
 
 /**

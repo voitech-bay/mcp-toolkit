@@ -409,6 +409,49 @@ function formatSupabaseError(error: { message: string; code?: string; details?: 
   return parts.join(" | ");
 }
 
+const NULL_BYTE_RE = /\u0000/g;
+
+function stripNullBytesDeep(value: unknown): { value: unknown; changed: boolean } {
+  if (typeof value === "string") {
+    const cleaned = value.replace(NULL_BYTE_RE, "");
+    return { value: cleaned, changed: cleaned !== value };
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const cleaned = value.map((item) => {
+      const next = stripNullBytesDeep(item);
+      if (next.changed) changed = true;
+      return next.value;
+    });
+    return { value: cleaned, changed };
+  }
+  if (value && typeof value === "object") {
+    let changed = false;
+    const src = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(src)) {
+      const next = stripNullBytesDeep(v);
+      if (next.changed) changed = true;
+      out[k] = next.value;
+    }
+    return { value: out, changed };
+  }
+  return { value, changed: false };
+}
+
+function sanitizeRowsForPostgres(rows: Record<string, unknown>[]): {
+  rows: Record<string, unknown>[];
+  changedRows: number;
+} {
+  let changedRows = 0;
+  const sanitized = rows.map((row) => {
+    const next = stripNullBytesDeep(row);
+    if (next.changed) changedRows += 1;
+    return next.value as Record<string, unknown>;
+  });
+  return { rows: sanitized, changedRows };
+}
+
 async function upsertChunkBulk(
   client: SupabaseClient,
   table: string,
@@ -548,7 +591,15 @@ async function flushContactMappedBatches(
   for (let i = 0; i < mappedContacts.length; i += CHUNK_SIZE) {
     const chunkIdx = Math.floor(i / CHUNK_SIZE) + 1;
     const chunk = mappedContacts.slice(i, i + CHUNK_SIZE);
-    const upsertResult = await upsertChunk(client, CONTACTS_TABLE, chunk, "uuid");
+    const sanitized = sanitizeRowsForPostgres(chunk);
+    if (sanitized.changedRows > 0) {
+      await logger.log("contacts: sanitized null bytes before upsert", {
+        chunkIndex: chunkIdx,
+        totalChunks: contactChunkCount,
+        changedRows: sanitized.changedRows,
+      });
+    }
+    const upsertResult = await upsertChunk(client, CONTACTS_TABLE, sanitized.rows, "uuid");
     upserted += upsertResult.inserted;
     if (upsertResult.inserted > 0) {
       await logger.logUpsert(CONTACTS_TABLE, upsertResult.inserted);
@@ -1028,7 +1079,7 @@ export async function syncSupabaseFromSource(
     flowLeadsLatest,
   ] = await Promise.all([
     effective.has("companies") ? latestUpdatedAt(client, COMPANIES_TABLE, null) : Promise.resolve(null),
-    effective.has("contacts") ? latestCreatedAt(client, CONTACTS_TABLE, projectId) : Promise.resolve(null),
+    effective.has("contacts") ? latestUpdatedAt(client, CONTACTS_TABLE, projectId) : Promise.resolve(null),
     effective.has("linkedin_messages")
       ? latestCreatedAt(client, LINKEDIN_MESSAGES_TABLE, projectId)
       : Promise.resolve(null),
@@ -1047,7 +1098,7 @@ export async function syncSupabaseFromSource(
   ]);
   await logger.log("cursors resolved", {
     companiesSinceUpdated: effective.has("companies") ? companiesLatest ?? "null" : "skipped",
-    contactsSince: effective.has("contacts") ? contactsLatest ?? "null" : "skipped",
+    contactsSinceUpdated: effective.has("contacts") ? contactsLatest ?? "null" : "skipped",
     messagesSince: effective.has("linkedin_messages") ? messagesLatest ?? "null" : "skipped",
     sendersSince: effective.has("senders") ? sendersLatest ?? "null" : "skipped",
     contactListsSinceUpdated: effective.has("contact_lists")

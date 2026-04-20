@@ -1425,19 +1425,29 @@ function buildNormalizedAlluvial(
 
   const sumSent = buckets.reduce((s, b) => s + b.sent, 0);
   const sumAcc = buckets.reduce((s, b) => s + b.accepted, 0);
-  const hasPipelineStageData =
-    selectedPipelineStages.length > 0 &&
-    buckets.some((b) => (b.pipelineStageBreakdown?.length ?? 0) > 0);
+  const hasAnyPipelineStageData = buckets.some(
+    (b) => (b.pipelineStageBreakdown?.length ?? 0) > 0
+  );
   if (mode !== "downstream" && sumSent <= 0) return null;
   if (mode === "downstream" && sumAcc <= 0) return null;
   const pipeStageId = (uuid: string) => `pipe:${uuid}`;
   const selectedPipelineSorted = [...selectedPipelineStages]
     .filter((s) => s.stageUuid && s.stageName.trim().length > 0)
     .sort((a, b) => a.position - b.position || a.stageName.localeCompare(b.stageName));
+  const selectedPipelineActive = hasAnyPipelineStageData
+    ? selectedPipelineSorted.filter((s) =>
+        buckets.some((b) =>
+          (b.pipelineStageBreakdown ?? []).some(
+            (row) => row.stageUuid === s.stageUuid && row.contactsCount > 0
+          )
+        )
+      )
+    : [];
+  const hasPipelineStageData = selectedPipelineActive.length > 0;
   const insertPipelineStages = (base: string[]): string[] => {
-    if (!hasPipelineStageData || selectedPipelineSorted.length === 0) return base;
+    if (!hasPipelineStageData || selectedPipelineActive.length === 0) return base;
     const out = [...base];
-    for (const s of selectedPipelineSorted) {
+    for (const s of selectedPipelineActive) {
       const id = pipeStageId(s.stageUuid);
       if (out.includes(id)) continue;
       const at = Math.max(0, Math.min(out.length, Math.trunc(s.position) - 1));
@@ -1455,7 +1465,7 @@ function buildNormalizedAlluvial(
     if (stageId === "positive") return "Positive";
     if (stageId.startsWith("pipe:")) {
       const uuid = stageId.slice("pipe:".length);
-      return selectedPipelineSorted.find((s) => s.stageUuid === uuid)?.stageName ?? "Pipeline";
+      return selectedPipelineActive.find((s) => s.stageUuid === uuid)?.stageName ?? "Pipeline";
     }
     return stageId;
   };
