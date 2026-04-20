@@ -542,7 +542,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
 
 .main {
   flex: 1;
-  max-width: min(1760px, 96vw);
+  
   margin: 0 auto;
   width: 100%;
 }
@@ -550,7 +550,8 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
 .main-portal-cta {
   display: flex;
   justify-content: flex-end;
-  margin: 1rem 0;
+  max-width: min(1720px, 96vw);
+  margin: 1rem auto;
 }
 
 .no-project-orbit-wrap {
