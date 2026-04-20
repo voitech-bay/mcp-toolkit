@@ -232,8 +232,8 @@ export const DAILY_HEATMAP_METRIC_OPTIONS: { value: DailyHeatmapMetricId; label:
   { value: "positiveReplies", label: "Inbox positive" },
   { value: "messagesSent", label: "Messages sent (LinkedIn)" },
   { value: "acceptedRatePct", label: "Accepted rate (% of sent)" },
-  { value: "inboxRatePct", label: "Inbox rate (% of sent)" },
-  { value: "positiveRatePct", label: "Positive rate (% of sent)" },
+  { value: "inboxRatePct", label: "Inbox rate (% of accepted)" },
+  { value: "positiveRatePct", label: "Positive rate (% of inbox)" },
 ];
 
 export type DailyEntitySeriesRow = {
@@ -262,9 +262,9 @@ function dailyHeatmapMetricValue(pt: DailyMetricPoint | undefined, metric: Daily
     case "acceptedRatePct":
       return pt.connectionSent > 0 ? (100 * pt.connectionAccepted) / pt.connectionSent : 0;
     case "inboxRatePct":
-      return pt.connectionSent > 0 ? (100 * pt.inbox) / pt.connectionSent : 0;
+      return pt.connectionAccepted > 0 ? (100 * pt.inbox) / pt.connectionAccepted : 0;
     case "positiveRatePct":
-      return pt.connectionSent > 0 ? (100 * pt.positiveReplies) / pt.connectionSent : 0;
+      return pt.inbox > 0 ? (100 * pt.positiveReplies) / pt.inbox : 0;
     default:
       return 0;
   }

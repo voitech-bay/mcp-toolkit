@@ -174,7 +174,7 @@ Trigger phrases (non-exhaustive): "funnel", "funnel chart", "render funnel", "dr
 "show funnel for flow/hypothesis", "outreach funnel", "conversion funnel", "LinkedIn funnel".
 
 Output: PNG (default) or SVG saved under charts-public/, returns the public image URL.
-Each funnel shows 4 stages: Connection sent → Connection accepted → Inbox reply → Inbox positive (AnalyticsSnapshots). Subtitle adds rates and optional LinkedIn “all messages sent” count (not a funnel stage).
+Each funnel shows 4 stages: Connection sent → Connection accepted → Inbox reply → Inbox positive (AnalyticsSnapshots). Subtitle adds rates (accepted ÷ sent, inbox ÷ accepted, positive ÷ inbox) and optional LinkedIn “all messages sent” count (not a funnel stage).
 
 type="flows": one funnel per flow; entityIds = flow uuids (omit for all flows in project).
 type="hypothesis": resolves hypothesis→flows via GetSales tag→contacts→FlowLeads; one funnel per flow,

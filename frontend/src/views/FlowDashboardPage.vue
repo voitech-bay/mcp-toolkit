@@ -40,7 +40,12 @@ import type {
   DailyMetricPoint,
   DailyWowRow,
 } from "../components/analytics/flow-analytics-types.js";
-import { FUNNEL_SANKEY_FLOW_LIMIT, FUNNEL_REACH_DISPLAY_CAP } from "../components/analytics/flow-analytics-constants.js";
+import {
+  FUNNEL_SANKEY_FLOW_LIMIT,
+  FUNNEL_REACH_DISPLAY_CAP,
+  DEFAULT_FUNNEL_ALLUVIAL_PIPELINE_STAGE_NAME,
+  DEFAULT_FUNNEL_ALLUVIAL_PIPELINE_STAGE_POSITION,
+} from "../components/analytics/flow-analytics-constants.js";
 import {
   funnelStageColor,
   chartSurfaceBg,
@@ -447,6 +452,16 @@ type PipelineStageOptionLite = { stageUuid: string; stageName: string; stageOrde
 const availablePipelineStages = ref<PipelineStageOptionLite[]>([]);
 const selectedPipelineStageUuids = ref<string[]>([]);
 const pipelineStagePositions = ref<Record<string, number>>({});
+
+function applyDefaultAlluvialPipelineSelection(stages: PipelineStageOptionLite[]): void {
+  if (selectedPipelineStageUuids.value.length > 0) return;
+  const want = DEFAULT_FUNNEL_ALLUVIAL_PIPELINE_STAGE_NAME.trim().toLowerCase();
+  const match = stages.find((s) => s.stageName.trim().toLowerCase() === want);
+  if (!match) return;
+  selectedPipelineStageUuids.value = [match.stageUuid];
+  pipelineStagePositions.value = { [match.stageUuid]: DEFAULT_FUNNEL_ALLUVIAL_PIPELINE_STAGE_POSITION };
+}
+
 watch(funnelSankeyMode, (mode) => {
   const projectId = selectedProjectId.value;
   if (!projectId) return;
@@ -2062,8 +2077,8 @@ const dailyRatesOption = computed((): EChartsOption => {
   if (rows.length === 0) return { animation: false, backgroundColor: bg, series: [] };
   const pct = (num: number, den: number) => (den > 0 ? (100 * num) / den : null);
   const accP = rows.map((r) => pct(r.connectionAccepted, r.connectionSent));
-  const inboxP = rows.map((r) => pct(r.inbox, r.connectionSent));
-  const posP = rows.map((r) => pct(r.positiveReplies, r.connectionSent));
+  const inboxP = rows.map((r) => pct(r.inbox, r.connectionAccepted));
+  const posP = rows.map((r) => pct(r.positiveReplies, r.inbox));
   const axLabels = rows.map((r) => r.date.slice(5));
   const rotate = rows.length > 16 ? 40 : rows.length > 10 ? 28 : 0;
   return {
@@ -2071,7 +2086,7 @@ const dailyRatesOption = computed((): EChartsOption => {
     backgroundColor: bg,
     textStyle: { color: tc },
     title: {
-      text: "Daily rates (÷ connection sent that day)",
+      text: "Daily rates (accepted ÷ sent · inbox ÷ accepted · positive ÷ inbox)",
       left: "center",
       top: 4,
       textStyle: { color: tc, fontSize: 14 },
@@ -2625,6 +2640,7 @@ async function loadAnalytics(projectId: string, from: string, to: string) {
         const bo = b.stageOrder ?? Number.MAX_SAFE_INTEGER;
         return ao - bo || a.stageName.localeCompare(b.stageName);
       });
+    applyDefaultAlluvialPipelineSelection(availablePipelineStages.value);
     warnings.value = data.warnings ?? [];
     funnelProjectTotals.value = data.projectTotals ?? null;
     funnelComparison.value = data.comparison ?? null;

@@ -28,8 +28,11 @@ export interface FunnelMetrics {
   positive_replies: number;
   /** Share of messages that included a connection request (when `messages_sent` > 0). */
   connection_request_rate_pct: number | null;
+  /** connection_accepted / connection_sent (null if sent = 0). */
   accepted_rate_pct: number | null;
+  /** inbox / connection_accepted (null if accepted = 0). */
   inbox_rate_pct: number | null;
+  /** positive_replies / inbox (null if inbox = 0). */
   positive_rate_pct: number | null;
 }
 
@@ -61,15 +64,11 @@ export function toInt(v: unknown): number {
 export function finalizeRates(m: FunnelMetrics): FunnelMetrics {
   m.connection_request_rate_pct =
     m.messages_sent > 0 ? (100 * m.connection_sent) / m.messages_sent : null;
-  if (m.connection_sent > 0) {
-    m.accepted_rate_pct = (100 * m.connection_accepted) / m.connection_sent;
-    m.inbox_rate_pct = (100 * m.inbox) / m.connection_sent;
-    m.positive_rate_pct = (100 * m.positive_replies) / m.connection_sent;
-  } else {
-    m.accepted_rate_pct = null;
-    m.inbox_rate_pct = null;
-    m.positive_rate_pct = null;
-  }
+  m.accepted_rate_pct =
+    m.connection_sent > 0 ? (100 * m.connection_accepted) / m.connection_sent : null;
+  m.inbox_rate_pct =
+    m.connection_accepted > 0 ? (100 * m.inbox) / m.connection_accepted : null;
+  m.positive_rate_pct = m.inbox > 0 ? (100 * m.positive_replies) / m.inbox : null;
   return m;
 }
 

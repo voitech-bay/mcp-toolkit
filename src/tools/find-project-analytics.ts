@@ -18,7 +18,7 @@ import {
 export function registerFindProjectAnalyticsTool(server: McpServer): void {
   server.tool(
     "find_project_analytics",
-    "Aggregate AnalyticsSnapshots (funnel metrics) for a project over a DATE_RANGE (max 30 days), grouped by 'flow' (1 group = 1 flow) or 'hypothesis' (1 group = N flows, mapped via hypothesis tag→contacts→FlowLeads). Metrics: messages_sent (linkedin_sent_count), connection_sent, connection_accepted, inbox, positive_replies and derived rate % (incl. connection_request_rate_pct vs messages). Pass `entityIds` to limit to specific flow uuids or hypothesis ids; omit to return all.",
+    "Aggregate AnalyticsSnapshots (funnel metrics) for a project over a DATE_RANGE (max 30 days), grouped by 'flow' (1 group = 1 flow) or 'hypothesis' (1 group = N flows, mapped via hypothesis tag→contacts→FlowLeads). Metrics: messages_sent (linkedin_sent_count), connection_sent, connection_accepted, inbox, positive_replies and derived rates: connection_request_rate_pct (requests/messages), accepted_rate_pct (accepted/sent), inbox_rate_pct (inbox/accepted), positive_rate_pct (positive/inbox). Pass `entityIds` to limit to specific flow uuids or hypothesis ids; omit to return all.",
     {
       projectId: z.string().uuid().describe("Supabase project id."),
       dateFrom: z

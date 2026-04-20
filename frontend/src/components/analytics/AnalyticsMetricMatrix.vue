@@ -54,6 +54,8 @@ interface RankedFlow extends AnalyticsMatrixFlowRow {
   acceptedRatePct: number;
   inboxRatePct: number;
   hasSent: boolean;
+  hasAccepted: boolean;
+  hasInbox: boolean;
 }
 
 const props = defineProps<{
@@ -80,12 +82,22 @@ function enrichFlowsToRanked(list: AnalyticsMatrixFlowRow[]): RankedFlow[] {
   return list.map((f) => ({
     ...f,
     hasSent: f.connectionSent > 0,
-    positiveRatePct:
-      f.connectionSent > 0 ? (100 * f.positiveReplies) / f.connectionSent : 0,
+    hasAccepted: f.connectionAccepted > 0,
+    hasInbox: f.inbox > 0,
+    positiveRatePct: f.inbox > 0 ? (100 * f.positiveReplies) / f.inbox : 0,
     acceptedRatePct:
       f.connectionSent > 0 ? (100 * f.connectionAccepted) / f.connectionSent : 0,
-    inboxRatePct: f.connectionSent > 0 ? (100 * f.inbox) / f.connectionSent : 0,
+    inboxRatePct: f.connectionAccepted > 0 ? (100 * f.inbox) / f.connectionAccepted : 0,
   }));
+}
+
+function rankedHasRateDenominator(
+  f: RankedFlow,
+  metric: "positiveReplyRate" | "inboxRate" | "acceptedRate"
+): boolean {
+  if (metric === "acceptedRate") return f.hasSent;
+  if (metric === "inboxRate") return f.hasAccepted;
+  return f.hasInbox;
 }
 
 function sortRankedByMetric(list: RankedFlow[], metric: RankSortMetric): RankedFlow[] {
@@ -101,7 +113,9 @@ function sortRankedByMetric(list: RankedFlow[], metric: RankSortMetric): RankedF
           ? ("inboxRatePct" as const)
           : ("acceptedRatePct" as const);
     return [...list].sort((a, b) => {
-      if (a.hasSent !== b.hasSent) return a.hasSent ? -1 : 1;
+      const da = rankedHasRateDenominator(a, metric);
+      const db = rankedHasRateDenominator(b, metric);
+      if (da !== db) return da ? -1 : 1;
       const av = a[rateKey];
       const bv = b[rateKey];
       if (bv !== av) return bv - av;
@@ -133,11 +147,11 @@ const rankMetricSelectOptions: Array<SelectOption | SelectGroupOption> = [
   {
     type: "group",
     key: "rank-rates",
-    label: "Rates (÷ connection sent)",
+    label: "Rates",
     children: [
-      { label: "Positive reply rate", value: "positiveReplyRate" },
-      { label: "Inbox rate", value: "inboxRate" },
-      { label: "Accepted rate", value: "acceptedRate" },
+      { label: "Positive rate (÷ inbox)", value: "positiveReplyRate" },
+      { label: "Inbox rate (÷ accepted)", value: "inboxRate" },
+      { label: "Accepted rate (÷ sent)", value: "acceptedRate" },
     ],
   },
   {
@@ -216,6 +230,13 @@ type MatrixMetricField =
   | "acceptedRatePct"
   | "inboxRatePct";
 
+function rateDenominatorOk(f: RankedFlow, field: MatrixMetricField): boolean {
+  if (field === "acceptedRatePct") return f.hasSent;
+  if (field === "inboxRatePct") return f.hasAccepted;
+  if (field === "positiveRatePct") return f.hasInbox;
+  return false;
+}
+
 interface MatrixRowDef {
   key: string;
   label: string;
@@ -227,9 +248,9 @@ const MATRIX_ROW_DEFS: MatrixRowDef[] = [
   { key: "acc", label: "Connection accepted", field: "connectionAccepted" },
   { key: "accRate", label: "Accepted rate (÷ sent)", field: "acceptedRatePct" },
   { key: "inb", label: "Inbox reply", field: "inbox" },
-  { key: "inbRate", label: "Inbox rate (÷ sent)", field: "inboxRatePct" },
+  { key: "inbRate", label: "Inbox rate (÷ accepted)", field: "inboxRatePct" },
   { key: "pos", label: "Inbox positive", field: "positiveReplies" },
-  { key: "rate", label: "Positive rate (÷ sent)", field: "positiveRatePct" },
+  { key: "rate", label: "Positive rate (÷ inbox)", field: "positiveRatePct" },
 ];
 
 function matrixDataRowKey(row: MatrixRowDef): string {
@@ -294,7 +315,7 @@ function renderMatrixCell(
   let diffUnit: "pp" | "relPct" = "relPct";
   if (!isBaseline && baselineFlow && bVal != null) {
     if (isRateRow) {
-      if (flow.hasSent && baselineFlow.hasSent) {
+      if (rateDenominatorOk(flow, row.field) && rateDenominatorOk(baselineFlow, row.field)) {
         diffVal = v - bVal;
         diffUnit = "pp";
       }
@@ -303,7 +324,7 @@ function renderMatrixCell(
       diffUnit = "relPct";
     }
   }
-  const rateHasBase = flow.hasSent;
+  const rateHasBase = rateDenominatorOk(flow, row.field);
   const numStr = isRateRow
     ? rateHasBase
       ? `${v.toFixed(1)}%`
@@ -656,7 +677,7 @@ const matrixBarChartOption = computed((): EChartsOption => {
         name: `${row.label} (%)`,
         yAxisIndex: 1,
         data: cols.map((f) => {
-          if (!f.hasSent) return null;
+          if (!rateDenominatorOk(f, row.field)) return null;
           return Number(metricValue(f, row.field).toFixed(2));
         }),
         style: rateStyle,

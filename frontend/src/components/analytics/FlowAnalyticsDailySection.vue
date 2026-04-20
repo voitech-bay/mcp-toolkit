@@ -124,8 +124,9 @@ const dailyHeatmapMetricSelectOptions = DAILY_HEATMAP_METRIC_OPTIONS;
         </NCard>
         <NCard title="Rates by day" size="small" class="flow-dash__card flow-dash__card--spaced">
           <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-            Accepted, inbox reply, and inbox positive as a percentage of <strong>that day’s</strong> connection sent (combined
-            selection). Gaps when sent = 0.
+            Accepted as a percentage of that day’s connection sent; inbox reply as a percentage of accepted; inbox positive
+            as a percentage of inbox reply (<strong>that day</strong>, combined selection). Gaps when the denominator for a
+            series is 0.
           </NText>
           <div class="flow-dash__daily-chart-host">
             <VChart

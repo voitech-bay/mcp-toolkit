@@ -1824,7 +1824,7 @@ export interface AutomationFlowFunnelRow {
   positiveReplies: number;
 }
 
-/** Project-wide sums (all flows) for a range; rates are null when connectionSent sum is 0. */
+/** Project-wide sums (all flows) for a range; accepted rate null when sent = 0; inbox rate null when accepted = 0; positive rate null when inbox = 0. */
 export interface FlowFunnelProjectTotals {
   connectionSent: number;
   connectionAccepted: number;
@@ -1832,6 +1832,7 @@ export interface FlowFunnelProjectTotals {
   positiveReplies: number;
   acceptedRatePct: number | null;
   inboxRatePct: number | null;
+  positiveRatePct: number | null;
 }
 
 export function aggregateAutomationFlowFunnelTotals(
@@ -1853,7 +1854,8 @@ export function aggregateAutomationFlowFunnelTotals(
     inbox,
     positiveReplies: positive,
     acceptedRatePct: sent > 0 ? (100 * accepted) / sent : null,
-    inboxRatePct: sent > 0 ? (100 * inbox) / sent : null,
+    inboxRatePct: accepted > 0 ? (100 * inbox) / accepted : null,
+    positiveRatePct: inbox > 0 ? (100 * positive) / inbox : null,
   };
 }
 

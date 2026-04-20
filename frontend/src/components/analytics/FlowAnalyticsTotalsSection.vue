@@ -87,7 +87,7 @@ function formatInt(n: number): string {
             </div>
           </div>
           <div class="flow-dash__stat-col">
-            <NText depth="3" class="flow-dash__stat-col-label">Inbox rate (÷ sent)</NText>
+            <NText depth="3" class="flow-dash__stat-col-label">Inbox rate (÷ accepted)</NText>
             <div class="flow-dash__stat-col-value">
               <span class="flow-dash__stat-col-num">{{
                 displayFunnelTotals.inboxRatePct == null ? "—" : `${displayFunnelTotals.inboxRatePct.toFixed(1)}%`
@@ -98,7 +98,7 @@ function formatInt(n: number): string {
             </div>
           </div>
           <div class="flow-dash__stat-col">
-            <NText depth="3" class="flow-dash__stat-col-label">Positive rate (÷ sent)</NText>
+            <NText depth="3" class="flow-dash__stat-col-label">Positive rate (÷ inbox)</NText>
             <div class="flow-dash__stat-col-value">
               <span class="flow-dash__stat-col-num">{{
                 displayFunnelTotals.positiveRatePct == null
