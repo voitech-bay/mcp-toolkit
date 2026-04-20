@@ -7,3 +7,5 @@ charts-public/
 .vercel/
 supabase/
 public/assets/
+client-public/assets/
+.idea/

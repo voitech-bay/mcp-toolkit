@@ -10,7 +10,7 @@
     "build:worker": "tsc -p tsconfig.worker.json",
     "build:worker:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.worker.json",
     "build:frontend": "cd frontend && npm run build",
-    "build:client-frontend": "cd client_frontend && npm ci && npm run build",
+    "build:client-frontend": "cd frontend && npm ci && cd ../client_frontend && npm ci && npm run build",
     "dev": "tsx src/stdio.ts",
     "dev:worker": "tsx src/workers/enrichment-worker.ts",
     "dev:http": "tsx src/api-server.ts",
