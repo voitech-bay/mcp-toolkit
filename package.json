@@ -23,7 +23,7 @@
     "start": "node dist/api-server.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
