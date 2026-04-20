@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, h, provide, ref, watch } from "vue";
-import { useDark, useNow } from "@vueuse/core";
+import { computed, h, ref, watch } from "vue";
+import { useDark } from "@vueuse/core";
 import { useRoute, useRouter } from "vue-router";
 import {
   NConfigProvider,
@@ -11,14 +11,6 @@ import {
   NCard,
   NDropdown,
   NAlert,
-  NText,
-  NDrawer,
-  NDrawerContent,
-  NScrollbar,
-  NDescriptions,
-  NDescriptionsItem,
-  NDivider,
-  NTag,
 } from "naive-ui";
 import type { SelectOption, DropdownOption } from "naive-ui";
 import { darkTheme, lightTheme } from "naive-ui";
@@ -38,12 +30,11 @@ import {
   Table2Icon,
   ChevronDownIcon,
   ClipboardListIcon,
-  CpuIcon,
-  Link2Icon,
+  Link2Icon,  
   BarChart3Icon,
+  CopyIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
-import { useWorkers, type WorkerEntry } from "./composables/useWorkers";
 
 const isDark = useDark();
 isDark.value = true;
@@ -181,6 +172,52 @@ const selectedProjectId = computed({
   set: (id: string | null) => projectStore.selectProject(id),
 });
 
+function normalizeClientPortalHost(raw: string | undefined): string | null {
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return null;
+  const withProtocol =
+    /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  const host = withProtocol.replace(/\/+$/, "");
+  try {
+    return new URL(host).toString().replace(/\/$/, "");
+  } catch {
+    return null;
+  }
+}
+
+const clientPortalHost = normalizeClientPortalHost(
+  import.meta.env.VITE_CLIENT_PORTAL_HOST as string | undefined
+);
+const clientPortalCopyState = ref<"idle" | "copied" | "failed">("idle");
+let clientPortalCopyTimer: ReturnType<typeof setTimeout> | null = null;
+
+const clientPortalProjectUrl = computed(() => {
+  if (!clientPortalHost || !selectedProjectId.value) return null;
+  return `${clientPortalHost}/analytics/${selectedProjectId.value}`;
+});
+
+async function copyClientPortalUrl(): Promise<void> {
+  const url = clientPortalProjectUrl.value;
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+    clientPortalCopyState.value = "copied";
+  } catch {
+    clientPortalCopyState.value = "failed";
+  }
+  if (clientPortalCopyTimer != null) clearTimeout(clientPortalCopyTimer);
+  clientPortalCopyTimer = setTimeout(() => {
+    clientPortalCopyState.value = "idle";
+    clientPortalCopyTimer = null;
+  }, 2200);
+}
+
+const clientPortalCtaLabel = computed(() => {
+  if (clientPortalCopyState.value === "copied") return "Copied";
+  if (clientPortalCopyState.value === "failed") return "Copy failed";
+  return "Copy client portal URL";
+});
+
 function renderProjectLabel(option: SelectOption) {
   const proj = projectStore.projects.find((p) => p.id === option.value);
   return h("div", { style: "display:flex;align-items:center;gap:8px" }, [
@@ -274,251 +311,6 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
   return `${formatHeaderYmd(first)} – ${formatHeaderYmd(last)}`;
 }
 
-const { workers, loading: workersLoading, error: workersError } = useWorkers();
-
-provide("workersRegistry", workers);
-
-const workerDrawerOpen = ref(false);
-const selectedWorkerId = ref<string | null>(null);
-
-const selectedWorker = computed(() =>
-  selectedWorkerId.value
-    ? workers.value.find((w) => w.workerId === selectedWorkerId.value) ?? null
-    : null
-);
-
-function onWorkerDropdownSelect(key: string | number) {
-  const k = String(key);
-  if (k === "err" || k === "empty") return;
-  selectedWorkerId.value = k;
-  workerDrawerOpen.value = true;
-}
-
-const RUNTIME_LABELS: Record<string, string> = {
-  workerName: "Worker name (ENV)",
-  llmAdapter: "LLM adapter (LLM_ADAPTER)",
-  cursorApiKeyConfigured: "Cursor API key set (CURSOR_API_KEY)",
-  cursorAgentRepoUrl: "Cursor agent repo (CURSOR_AGENT_REPO_URL)",
-  cursorAgentRef: "Cursor agent git ref (CURSOR_AGENT_REF)",
-  cursorApiBaseUrl: "Cursor API base (CURSOR_API_BASE_URL)",
-  cursorPollIntervalMs: "Cursor agent poll interval (ms)",
-  cursorTimeoutMs: "Cursor agent timeout (ms)",
-  maxConcurrentAgentRuns: "Max concurrent agent runs (this worker)",
-  pickLimit: "Max tasks claimed per pick",
-  pickIntervalMs: "Pick interval — time between picks (ms)",
-  maxParallel: "Max concurrent agent runs (legacy ENRICHMENT_MAX_PARALLEL)",
-  claimLimit: "Max tasks per pick (legacy ENRICHMENT_CLAIM_LIMIT)",
-  pollIntervalMs: "Pick interval (legacy ENRICHMENT_POLL_INTERVAL_MS)",
-  lockMinutes: "Task lock (minutes)",
-  batchWaitMs: "Batch wait before partial flush (ms); -1 = full batch only",
-  heartbeatIntervalMs: "Presence heartbeat interval (ms)",
-};
-
-/** Display order for runtime snapshot (unknown keys sort after). */
-const RUNTIME_KEY_ORDER: string[] = [
-  "workerName",
-  "llmAdapter",
-  "cursorApiKeyConfigured",
-  "cursorAgentRepoUrl",
-  "cursorAgentRef",
-  "cursorApiBaseUrl",
-  "cursorPollIntervalMs",
-  "cursorTimeoutMs",
-  "maxConcurrentAgentRuns",
-  "pickLimit",
-  "pickIntervalMs",
-  "lockMinutes",
-  "batchWaitMs",
-  "heartbeatIntervalMs",
-];
-
-function sortRuntimeKeys(keys: string[]): string[] {
-  const order = new Map(RUNTIME_KEY_ORDER.map((k, i) => [k, i]));
-  return [...keys].sort((a, b) => {
-    const ia = order.get(a) ?? 1000;
-    const ib = order.get(b) ?? 1000;
-    if (ia !== ib) return ia - ib;
-    return a.localeCompare(b);
-  });
-}
-
-function formatRuntimeLabel(key: string): string {
-  return RUNTIME_LABELS[key] ?? key.replace(/([A-Z])/g, " $1").replace(/^./, (c) => c.toUpperCase());
-}
-
-function formatRuntimeValue(key: string, v: string | number): string {
-  if (key === "batchWaitMs" && v === -1) return "full batch only (no partials)";
-  if (key.endsWith("Ms") && typeof v === "number") {
-    if (v === 0) return "0 (partial flush immediately after each pick)";
-    if (v >= 60_000) return `${v} (${Math.round(v / 1000)}s)`;
-    return String(v);
-  }
-  return String(v);
-}
-
-/** Tick once per second so “waiting Ns” stays accurate while the menu is open. */
-const now = useNow({ interval: 1000 });
-
-/** Connected to this API (live heartbeats); others may appear from Supabase only. */
-const liveWorkerCount = computed(() => workers.value.filter((w) => w.hasRuntime !== false).length);
-const remoteWorkerCount = computed(() =>
-  Math.max(0, workers.value.length - liveWorkerCount.value)
-);
-const busyWorkerCount = computed(() =>
-  workers.value.filter((w) => w.hasRuntime !== false && w.status === "busy").length
-);
-
-/** e.g. ` (1 cursor, 1 mock)` for live workers with runtime llmAdapter counts. */
-const liveWorkerProviderSummary = computed(() => {
-  const live = workers.value.filter((w) => w.hasRuntime !== false);
-  if (live.length === 0) return "";
-  const counts = new Map<string, number>();
-  for (const w of live) {
-    const raw = w.runtime?.llmAdapter;
-    const key =
-      typeof raw === "string" && raw.trim() !== ""
-        ? raw.trim().toLowerCase()
-        : "unknown";
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
-  const order = (k: string): number =>
-    k === "cursor" ? 0 : k === "mock" ? 1 : k === "unknown" ? 98 : 50;
-  const entries = [...counts.entries()].sort((a, b) => {
-    const d = order(a[0]) - order(b[0]);
-    return d !== 0 ? d : a[0].localeCompare(b[0]);
-  });
-  const parts = entries.map(([k, n]) => `${n} ${k}`);
-  return ` (${parts.join(", ")})`;
-});
-
-function formatWorkerSeen(iso: string): string {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return iso;
-  }
-}
-
-/** Dropdown tag: short label from `runtime.llmAdapter` (mock, cursor, …). */
-function formatLlmProviderShort(raw: string): string {
-  const s = raw.trim().toLowerCase();
-  if (s === "mock") return "Mock";
-  if (s === "cursor") return "Cursor";
-  if (!s) return raw;
-  return raw.charAt(0).toUpperCase() + raw.slice(1);
-}
-
-function waitingSeconds(waitingSince: string): number {
-  const t = new Date(waitingSince).getTime();
-  if (Number.isNaN(t)) return 0;
-  return Math.max(0, Math.floor((now.value.getTime() - t) / 1000));
-}
-
-function statusPillClass(status: "idle" | "busy" | "stopping"): string {
-  if (status === "busy") return "worker-dd-pill worker-dd-pill--busy";
-  if (status === "stopping") return "worker-dd-pill worker-dd-pill--stopping";
-  return "worker-dd-pill worker-dd-pill--idle";
-}
-
-const workerMenuOptions = computed<DropdownOption[]>(() => {
-  if (workersError.value) {
-    return [
-      {
-        key: "err",
-        type: "render",
-        disabled: true,
-        render: () =>
-          h("div", { class: "worker-dd-note" }, [
-            h("div", { class: "worker-dd-note__line" }, "Could not load workers"),
-            h(NText, { depth: 3, class: "worker-dd-note__detail" }, () => workersError.value ?? ""),
-          ]),
-      },
-    ];
-  }
-  if (workers.value.length === 0) {
-    return [
-      {
-        key: "empty",
-        type: "render",
-        disabled: true,
-        render: () =>
-          h(
-            NText,
-            { depth: 3, class: "worker-dd-note" },
-            () => (workersLoading.value ? "Loading…" : "No workers online")
-          ),
-      },
-    ];
-  }
-
-  return workers.value.map((w) => ({
-    key: w.workerId,
-    meta: {
-      worker: w
-    }
-  }));
-});
-
-
-function renderWorkerLabel(option: DropdownOption) {
-  const w = (option as { meta?: { worker: WorkerEntry } }).meta?.worker;
-  if (!w) {
-    return h(NText, { depth: 3 }, () => "—");
-  }
-  const dotBusy = w.status === "busy" || w.status === "stopping";
-  const llmRaw = w.runtime?.llmAdapter;
-  const llmTag =
-    typeof llmRaw === "string" && llmRaw.trim() !== ""
-      ? h(
-          NTag,
-          {
-            size: "tiny",
-            type: "info",
-            bordered: false,
-            round: true,
-            class: "worker-dd-row__llm-tag",
-            title: `LLM adapter: ${llmRaw}`,
-          },
-          { default: () => formatLlmProviderShort(llmRaw) }
-        )
-      : null;
-
-  return h("div", { class: "worker-dd-row worker-dd-row--simple" }, [
-    h("span", {
-      class: [
-        "worker-dd-row__dot",
-        dotBusy ? "worker-dd-row__icon--busy" : "worker-dd-row__icon--idle",
-      ],
-    }),
-    h("div", { class: "worker-dd-row__nameblock" }, [
-      h("div", { class: "worker-dd-row__namerow" }, [
-        h("span", { class: "worker-dd-row__name", title: w.name }, w.name),
-        ...(w.hasRuntime === false
-          ? [
-              h(
-                NTag,
-                {
-                  size: "tiny",
-                  bordered: true,
-                  round: true,
-                  title: "Last heartbeat seen via DB — not connected to this API",
-                },
-                { default: () => "Remote" }
-              ),
-            ]
-          : []),
-        ...(llmTag ? [llmTag] : []),
-      ]),
-    ]),
-    h("span", { class: statusPillClass(w.status) }, w.status),
-    h("span", { class: "worker-dd-row__seen" }, formatWorkerSeen(w.lastSeenAt)),
-  ]);
-}
 </script>
 
 <template>
@@ -568,38 +360,6 @@ function renderWorkerLabel(option: DropdownOption) {
                   }}</span>
                 </NButton>
               </NSpace>
-              <NDropdown
-                trigger="click"
-                :renderLabel="renderWorkerLabel"
-                placement="bottom-start"
-                :options="workerMenuOptions"
-                :show-arrow="true"
-                @select="onWorkerDropdownSelect"
-              >
-                <NButton quaternary size="small" class="workers-trigger" title="Workers — pick one to open details">
-                  <CpuIcon :size="14" class="workers-trigger__icon" />
-                  <span class="workers-trigger__label">Workers</span>
-                  <span v-if="workersLoading" class="workers-trigger__count workers-trigger__count--muted">
-                    …
-                  </span>
-                  <template v-else-if="workersError">
-                    <span class="workers-trigger__count workers-trigger__count--err">—</span>
-                  </template>
-                  <template v-else>
-                    <span class="workers-trigger__count">
-                      {{ liveWorkerCount }} live
-                      <span v-if="liveWorkerProviderSummary" class="workers-trigger__live-providers">{{
-                        liveWorkerProviderSummary
-                      }}</span>
-                    </span>
-                    <span v-if="remoteWorkerCount > 0" class="workers-trigger__count workers-trigger__count--muted">
-                      · {{ remoteWorkerCount }} remote
-                    </span>
-                    <span v-if="busyWorkerCount > 0" class="workers-trigger__busy">{{ busyWorkerCount }} busy</span>
-                  </template>
-                  <ChevronDownIcon :size="14" class="workers-trigger__chev" />
-                </NButton>
-              </NDropdown>
             </div>
             <nav class="nav-row" aria-label="Main">
               <NSpace wrap size="small" align="center">
@@ -654,100 +414,6 @@ function renderWorkerLabel(option: DropdownOption) {
           </header>
         </NCard>
 
-        <NDrawer
-          v-model:show="workerDrawerOpen"
-          :width="480"
-          placement="right"
-          display-directive="show"
-        >
-          <NDrawerContent
-            v-if="selectedWorker"
-            :title="`${selectedWorker.name} · ${selectedWorker.kind}`"
-            closable
-          >
-            <NScrollbar style="max-height: calc(100vh - 7rem)">
-              <div class="worker-drawer-body">
-                <p class="worker-drawer-meta">
-                  <span :class="statusPillClass(selectedWorker.status)">{{ selectedWorker.status }}</span>
-                  <span class="worker-drawer-meta__sep">·</span>
-                  <span class="worker-drawer-meta__seen">Last seen {{ formatWorkerSeen(selectedWorker.lastSeenAt) }}</span>
-                </p>
-                <NAlert
-                  v-if="selectedWorker.hasRuntime === false"
-                  type="warning"
-                  class="worker-drawer-note"
-                  title="Not connected to this API"
-                >
-                  This worker last heartbeated elsewhere (e.g. deployed API). The list shows basic info from the
-                  database. Point <code>WORKER_API_BASE_URL</code> / WebSocket at this app to see live tasks, batch
-                  buffers, and ENV here.
-                </NAlert>
-                <template v-else>
-                <NAlert type="info" class="worker-drawer-note" title="Scope">
-                  This panel shows this worker process only: tasks it has claimed (in progress), tasks it is
-                  batching in memory before a run, and its ENRICHMENT_* tuning. Rows still in the database queue
-                  but not yet claimed by any worker are not listed here.
-                </NAlert>
-
-                <NDivider title-placement="left">Configuration (runtime snapshot)</NDivider>
-                <p class="worker-drawer-runtime-hint">
-                  Includes enrichment tuning, <code>LLM_ADAPTER</code>, and Cursor-related env (no secrets).
-                </p>
-                <NDescriptions
-                  v-if="selectedWorker.runtime && Object.keys(selectedWorker.runtime).length"
-                  :column="1"
-                  label-placement="left"
-                  label-style="max-width: 12rem"
-                  size="small"
-                  bordered
-                >
-                  <NDescriptionsItem
-                    v-for="key in sortRuntimeKeys(Object.keys(selectedWorker.runtime))"
-                    :key="key"
-                    :label="formatRuntimeLabel(key)"
-                  >
-                    <span class="worker-drawer-runtime-val">{{
-                      formatRuntimeValue(key, selectedWorker.runtime[key])
-                    }}</span>
-                  </NDescriptionsItem>
-                </NDescriptions>
-                <NText v-else depth="3" class="worker-drawer-empty">
-                  No runtime snapshot yet (worker must send heartbeats with runtime; enrichment worker does this on
-                  startup).
-                </NText>
-
-                <NDivider title-placement="left">In progress</NDivider>
-                <ul v-if="selectedWorker.tasksInProgress.length" class="worker-drawer-list">
-                  <li v-for="t in selectedWorker.tasksInProgress" :key="t.taskId" class="worker-drawer-li">
-                    <strong>{{ t.agentName }}</strong>
-                    <span v-if="t.operationName" class="worker-drawer-op">{{ t.operationName }}</span>
-                    <code class="worker-drawer-id">{{ t.taskId }}</code>
-                  </li>
-                </ul>
-                <NText v-else depth="3">Nothing running on this worker right now.</NText>
-
-                <NDivider title-placement="left">Waiting for batch (worker buffer)</NDivider>
-                <p v-if="selectedWorker.pendingBatches.length" class="worker-drawer-batch-intro">
-                  Tasks claimed and held until <code>batch_size</code> is reached or batch wait elapses. Per agent:
-                </p>
-                <div v-if="selectedWorker.pendingBatches.length" class="worker-drawer-batches">
-                  <div
-                    v-for="p in selectedWorker.pendingBatches"
-                    :key="`${p.agentName}-${p.waitingSince}`"
-                    class="worker-drawer-batch-row"
-                  >
-                    <NTag size="small" type="warning" bordered>{{ p.agentName }}</NTag>
-                    <span class="worker-drawer-batch-count">{{ p.count }} / {{ p.batchSize }}</span>
-                    <span class="worker-drawer-batch-wait">waiting {{ waitingSeconds(p.waitingSince) }}s</span>
-                  </div>
-                </div>
-                <NText v-else depth="3">No tasks batching in memory on this worker.</NText>
-                </template>
-              </div>
-            </NScrollbar>
-          </NDrawerContent>
-        </NDrawer>
-
         <main class="main">
           <template v-if="!projectStore.selectedProjectId">
             <div class="no-project-orbit-wrap" :style="noProjectOrbitStageStyle">
@@ -763,6 +429,24 @@ function renderWorkerLabel(option: DropdownOption) {
             </NAlert>
           </template>
           <template v-else>
+            <div v-if="isFlowDashboard" class="main-portal-cta">
+              <NButton
+                type="primary"
+                size="small"
+                :disabled="!clientPortalProjectUrl"
+                :title="
+                  clientPortalProjectUrl
+                    ? 'Copy client portal analytics URL'
+                    : 'Set VITE_CLIENT_PORTAL_HOST and select project'
+                "
+                @click="copyClientPortalUrl"
+              >
+                <template #icon>
+                  <CopyIcon :size="14" />
+                </template>
+                <span>{{ clientPortalCtaLabel }}</span>
+              </NButton>
+            </div>
             <router-view />
           </template>
         </main>
@@ -770,16 +454,6 @@ function renderWorkerLabel(option: DropdownOption) {
     </NConfigProvider>
   </NMessageProvider>
 </template>
-
-<style>
-.worker-dd-row__icon--busy {
-  background: #e88080;
-}
-
-.worker-dd-row__icon--idle {
-  background: #63e2b7;
-}
-</style>
 
 <style scoped lang="less">
 .header-card {
@@ -849,73 +523,6 @@ function renderWorkerLabel(option: DropdownOption) {
   color: var(--n-text-color);
 }
 
-.workers-trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: min(100%, 320px);
-
-  :deep(.n-button__content) {
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 8px;
-  }
-}
-
-.workers-trigger__icon {
-  flex-shrink: 0;
-  opacity: 0.85;
-}
-
-.workers-trigger__label {
-  font-weight: 500;
-}
-
-.workers-trigger__count {
-  font-size: 11px;
-  font-weight: 500;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(24, 160, 88, 0.18);
-  color: var(--n-success-color, #18a058);
-  line-height: 1.35;
-  white-space: nowrap;
-}
-
-.workers-trigger__live-providers {
-  font-weight: 400;
-  opacity: 0.88;
-  white-space: normal;
-}
-
-.workers-trigger__count--muted {
-  background: var(--n-color-hover);
-  color: var(--n-text-color-3);
-  font-weight: 400;
-}
-
-.workers-trigger__count--err {
-  background: rgba(208, 48, 80, 0.15);
-  color: var(--n-error-color);
-}
-
-.workers-trigger__busy {
-  font-size: 11px;
-  font-weight: 500;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: rgba(240, 160, 32, 0.2);
-  color: var(--n-warning-color, #f0a020);
-  line-height: 1.35;
-  white-space: nowrap;
-}
-
-.workers-trigger__chev {
-  flex-shrink: 0;
-  margin-left: 1px;
-  opacity: 0.55;
-}
-
 .nav-row {
   display: flex;
   align-items: center;
@@ -935,9 +542,15 @@ function renderWorkerLabel(option: DropdownOption) {
 
 .main {
   flex: 1;
-  max-width: 1760px;
+  max-width: min(1760px, 96vw);
   margin: 0 auto;
   width: 100%;
+}
+
+.main-portal-cta {
+  display: flex;
+  justify-content: flex-end;
+  margin: 1rem 0;
 }
 
 .no-project-orbit-wrap {
@@ -983,257 +596,4 @@ function renderWorkerLabel(option: DropdownOption) {
   }
 }
 
-.worker-drawer-body {
-  padding-bottom: 0.5rem;
-}
-
-.worker-drawer-runtime-hint {
-  margin: 0 0 0.65rem;
-  font-size: 12px;
-  color: var(--n-text-color-3);
-  line-height: 1.45;
-}
-
-.worker-drawer-runtime-val {
-  word-break: break-word;
-  overflow-wrap: anywhere;
-}
-
-.worker-drawer-meta {
-  margin: 0 0 0.75rem;
-  font-size: 13px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.35rem 0.5rem;
-}
-
-.worker-drawer-meta__sep {
-  opacity: 0.45;
-}
-
-.worker-drawer-meta__seen {
-  font-variant-numeric: tabular-nums;
-  color: var(--n-text-color-3);
-}
-
-.worker-drawer-note {
-  margin-bottom: 0.75rem;
-}
-
-.worker-drawer-empty {
-  display: block;
-  margin-bottom: 0.75rem;
-  font-size: 13px;
-}
-
-.worker-drawer-list {
-  margin: 0;
-  padding-left: 1.1rem;
-}
-
-.worker-drawer-li {
-  margin-bottom: 0.45rem;
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.worker-drawer-op {
-  display: inline-block;
-  margin-left: 0.35rem;
-  opacity: 0.75;
-  font-size: 12px;
-}
-
-.worker-drawer-id {
-  display: block;
-  margin-top: 0.1rem;
-  font-size: 11px;
-  opacity: 0.55;
-}
-
-.worker-drawer-batch-intro {
-  margin: 0 0 0.5rem;
-  font-size: 12px;
-  color: var(--n-text-color-3);
-}
-
-.worker-drawer-batches {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-
-.worker-drawer-batch-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.5rem 0.75rem;
-  font-size: 13px;
-}
-
-.worker-drawer-batch-count {
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-}
-
-.worker-drawer-batch-wait {
-  font-size: 12px;
-  color: var(--n-text-color-3);
-}
-</style>
-
-<!-- Dropdown body is teleported; render() nodes use global classes -->
-<style>
-.worker-dd-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 300px;
-  max-width: 420px;
-}
-
-.worker-dd-row {
-  display: grid;
-  grid-template-columns: 10px minmax(0, 1fr) auto auto 28px;
-  align-items: center;
-  gap: 8px 12px;
-  font-size: 13px;
-}
-
-.worker-dd-row--simple {
-  grid-template-columns: 10px minmax(0, 1fr) auto auto;
-}
-
-.worker-dd-row__nameblock {
-  min-width: 0;
-}
-
-.worker-dd-row__namerow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.worker-dd-row__namerow .worker-dd-row__name {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.worker-dd-row__buf-tag,
-.worker-dd-row__batch-tag,
-.worker-dd-row__llm-tag {
-  flex-shrink: 0;
-  font-size: 10px !important;
-  line-height: 1.35 !important;
-  padding: 0 6px !important;
-}
-
-.worker-dd-row__expand-spacer {
-  width: 28px;
-  height: 1px;
-}
-
-.worker-dd-row__expand {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px;
-  margin: 0;
-  border: none;
-  background: transparent;
-  color: var(--n-text-color-3);
-  border-radius: 4px;
-  cursor: pointer;
-  line-height: 0;
-}
-
-.worker-dd-row__expand:hover {
-  color: var(--n-text-color-2);
-  background: var(--n-color-hover);
-}
-
-.worker-dd-pill {
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.35;
-  padding: 2px 8px;
-  border-radius: 999px;
-  text-transform: lowercase;
-  white-space: nowrap;
-}
-
-.worker-dd-pill--idle {
-  background: rgba(99, 226, 183, 0.2);
-  color: #63e2b7;
-}
-
-.worker-dd-pill--busy {
-  background: rgba(240, 160, 32, 0.22);
-  color: var(--n-warning-color, #f0a020);
-}
-
-.worker-dd-pill--stopping {
-  background: rgba(128, 128, 128, 0.25);
-  color: var(--n-text-color-2);
-}
-
-.worker-dd-sub__label {
-  font-weight: 600;
-  color: var(--n-text-color-2);
-}
-
-.worker-dd-row__dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.worker-dd-sub {
-  font-size: 11px;
-  line-height: 1.35;
-  color: var(--n-text-color-3);
-  padding-left: 18px;
-  word-break: break-word;
-}
-
-.worker-dd-sub--pending {
-  opacity: 0.95;
-}
-
-.worker-dd-row__name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 500;
-  color: var(--n-text-color-1);
-}
-
-.worker-dd-row__seen {
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--n-text-color-3);
-  white-space: nowrap;
-}
-
-.worker-dd-note {
-  padding: 8px 12px;
-  min-width: 200px;
-  max-width: 320px;
-  font-size: 13px;
-}
-
-.worker-dd-note__line {
-  margin-bottom: 4px;
-}
-
-.worker-dd-note__detail {
-  font-size: 12px;
-  line-height: 1.4;
-  word-break: break-word;
-}
 </style>

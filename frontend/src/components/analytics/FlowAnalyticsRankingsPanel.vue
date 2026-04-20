@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { NAlert, NSpin, NText, NCard, NDatePicker, NSelect } from "naive-ui";
+import { NAlert, NSpin, NCard, NDatePicker, NSelect } from "naive-ui";
 import type { SelectOption } from "naive-ui";
 import AnalyticsMetricMatrix from "./AnalyticsMetricMatrix.vue";
 import type { FlowFunnelRow } from "./flow-analytics-types.js";
@@ -52,11 +52,6 @@ const allEntityUuids = computed(() => props.flows.map((f) => f.flowUuid));
         </div>
       </div>
     </NCard>
-
-    <NText v-if="flows.length > 0" depth="3" class="flow-analytics-rankings__hint">
-      Top and least use <strong>all {{ groupEntityPlural }}</strong> in the range above.
-      <strong>Group by</strong> (flow vs hypothesis) is on the <strong>Funnel &amp; daily</strong> tab.
-    </NText>
     <NAlert v-if="loadError" type="error" class="flow-dash__alert" :title="loadError" />
     <NSpin :show="collectingDays || loading">
       <template v-if="flows.length > 0">

@@ -17,6 +17,7 @@ export default defineConfig({
       },
     }),
   ],
+  envDir: resolve(__dirname, ".."),
   root: ".",
   base: "/",
   resolve: {
