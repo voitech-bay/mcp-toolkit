@@ -53,6 +53,8 @@ export interface ProjectConversationGeoResult {
   flowCountryEdges: GeoFlowCountryReplyEdge[];
   /** Up to ~20 raw unparseable location strings to help the user spot patterns. */
   unknownLocationSamples: string[];
+  /** Best-effort country-like tokens extracted from unknown locations with frequencies. */
+  unknownCountryCandidates: Array<{ token: string; count: number }>;
   error: string | null;
 }
 
@@ -340,6 +342,39 @@ export function extractCountryFromLocation(
 }
 
 /**
+ * Best-effort extractor for unknown locations. Returns a likely country token
+ * from the tail of the location string so UI can surface repeated misses.
+ */
+function extractUnknownCountryCandidate(location: string | null | undefined): string | null {
+  if (typeof location !== "string") return null;
+  const raw = location.trim();
+  if (!raw) return null;
+  let candidate = raw;
+  if (raw.startsWith("{") || raw.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") {
+        const country = (parsed as { country?: unknown }).country;
+        if (typeof country === "string" && country.trim()) {
+          candidate = country.trim();
+        }
+      }
+    } catch {
+      // keep raw fallback
+    }
+  }
+  const parts = candidate
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  const tail = parts.length > 0 ? parts[parts.length - 1]! : candidate.trim();
+  const normalized = tail.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  if (normalized.length > 60) return normalized.slice(0, 60);
+  return normalized;
+}
+
+/**
  * Recent conversations for a project aggregated by contact country. Uses the
  * existing `getConversationsList` (RPC-backed) for conversation summaries, then
  * enriches with `Contacts.location` and `FlowLeads`/`Flows` for flow-country
@@ -348,9 +383,11 @@ export function extractCountryFromLocation(
 export async function getProjectConversationGeoAggregates(
   client: SupabaseClient,
   projectId: string,
-  options?: { limit?: number }
+  options?: { limit?: number; flowUuids?: string[] }
 ): Promise<ProjectConversationGeoResult> {
   const limit = Math.min(Math.max(options?.limit ?? 500, 1), 2000);
+  const flowFilterSet =
+    options?.flowUuids && options.flowUuids.length > 0 ? new Set(options.flowUuids) : null;
 
   const { data: conversations, error: convErr } = await getConversationsList(
     client,
@@ -363,6 +400,7 @@ export async function getProjectConversationGeoAggregates(
       byCountry: [],
       flowCountryEdges: [],
       unknownLocationSamples: [],
+      unknownCountryCandidates: [],
       error: convErr,
     };
   }
@@ -388,6 +426,7 @@ export async function getProjectConversationGeoAggregates(
           byCountry: [],
           flowCountryEdges: [],
           unknownLocationSamples: [],
+          unknownCountryCandidates: [],
           error: error.message,
         };
       }
@@ -417,6 +456,7 @@ export async function getProjectConversationGeoAggregates(
           byCountry: [],
           flowCountryEdges: [],
           unknownLocationSamples: [],
+          unknownCountryCandidates: [],
           error: error.message,
         };
       }
@@ -462,14 +502,25 @@ export async function getProjectConversationGeoAggregates(
   const edgeKey = (f: string, c: string, r: ConversationReplyTag) => `${f}|${c}|${r}`;
   const edgeMap = new Map<string, GeoFlowCountryReplyEdge>();
   const unknownSamples: string[] = [];
+  const unknownCandidateCounts = new Map<string, number>();
   let conversationsMapped = 0;
 
   for (const conv of conversations) {
     const lead = conv.leadUuid;
+    const flowUuid = lead ? flowByLead.get(lead) ?? null : null;
+    if (flowFilterSet && (!flowUuid || !flowFilterSet.has(flowUuid))) {
+      continue;
+    }
     const rawLocation = lead ? locationByLead.get(lead) ?? null : null;
     const country = extractCountryFromLocation(rawLocation);
     if (!country && rawLocation && unknownSamples.length < 20 && !unknownSamples.includes(rawLocation)) {
       unknownSamples.push(rawLocation);
+    }
+    if (!country) {
+      const token = extractUnknownCountryCandidate(rawLocation);
+      if (token) {
+        unknownCandidateCounts.set(token, (unknownCandidateCounts.get(token) ?? 0) + 1);
+      }
     }
     const key = country ? country.name : "Unknown";
     const iso2 = country ? country.iso2 : null;
@@ -504,7 +555,6 @@ export async function getProjectConversationGeoAggregates(
     }
     if (country) conversationsMapped += 1;
 
-    const flowUuid = lead ? flowByLead.get(lead) ?? null : null;
     if (flowUuid) {
       const flowName = flowNameByUuid.get(flowUuid) ?? flowUuid.slice(0, 8);
       const k = edgeKey(flowUuid, key, conv.replyTag);
@@ -541,6 +591,10 @@ export async function getProjectConversationGeoAggregates(
   rows.sort((a, b) => b.conversations - a.conversations);
 
   const knownCountryRows = rows.filter((r) => r.country !== "Unknown");
+  const unknownCountryCandidates = [...unknownCandidateCounts.entries()]
+    .map(([token, count]) => ({ token, count }))
+    .sort((a, b) => b.count - a.count || a.token.localeCompare(b.token))
+    .slice(0, 20);
 
   return {
     totals: {
@@ -552,6 +606,7 @@ export async function getProjectConversationGeoAggregates(
     byCountry: rows,
     flowCountryEdges: [...edgeMap.values()],
     unknownLocationSamples: unknownSamples,
+    unknownCountryCandidates,
     error: null,
   };
 }

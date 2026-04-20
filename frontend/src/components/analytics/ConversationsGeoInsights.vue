@@ -11,7 +11,17 @@
  * "Unknown" bucket and unparseable samples are surfaced for data-quality hinting.
  */
 import { computed, onMounted, ref, watch } from "vue";
-import { NCard, NAlert, NSpin, NText, NDataTable, NTag, NEmpty, NInputNumber } from "naive-ui";
+import {
+  NCard,
+  NAlert,
+  NSpin,
+  NText,
+  NDataTable,
+  NTag,
+  NEmpty,
+  NInputNumber,
+  NSelect,
+} from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { useDark } from "@vueuse/core";
 import { use, registerMap } from "echarts/core";
@@ -28,6 +38,7 @@ import {
 } from "echarts/components";
 import type { EChartsOption } from "echarts";
 import VChart from "vue-echarts";
+import EntityTagPicker from "./EntityTagPicker.vue";
 
 use([
   CanvasRenderer,
@@ -84,8 +95,30 @@ interface GeoPayload {
   byCountry: GeoCountryRow[];
   flowCountryEdges: GeoFlowEdge[];
   unknownLocationSamples: string[];
+  unknownCountryCandidates: Array<{ token: string; count: number }>;
   error: string | null;
 }
+
+interface GeoFlowOption {
+  flowUuid: string;
+  flowName: string;
+  conversations: number;
+}
+
+const FLOW_TAG_EMOJIS = [
+  "📨",
+  "📬",
+  "🎯",
+  "🌊",
+  "⚡",
+  "🔁",
+  "✉️",
+  "🧭",
+  "📣",
+  "🚀",
+  "💬",
+  "🔔",
+] as const;
 
 const isDark = useDark();
 
@@ -93,6 +126,15 @@ const loading = ref(false);
 const error = ref("");
 const data = ref<GeoPayload | null>(null);
 const limitSelf = ref<number>(500);
+const topCountriesLimit = ref<number>(15);
+const topCountriesSortKey = ref<
+  "conversations" | "positiveReplies" | "messagesIn" | "messagesOut" | "replyRate"
+>("conversations");
+const topCountriesSortDir = ref<"desc" | "asc">("desc");
+const sankeyTopFlows = ref<number>(8);
+const sankeyTopCountries = ref<number>(10);
+const selectedFlowUuids = ref<string[]>([]);
+const knownFlowOptions = ref<Map<string, GeoFlowOption>>(new Map());
 
 function clampScanLimit(n: unknown): number {
   const v = Math.floor(Number(n) || 500);
@@ -133,9 +175,14 @@ async function loadData(): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    const url = `/api/project-conversation-geo?projectId=${encodeURIComponent(pid)}&limit=${encodeURIComponent(
-      String(scanLimit.value)
-    )}`;
+    const urlParams = new URLSearchParams({
+      projectId: pid,
+      limit: String(scanLimit.value),
+    });
+    if (selectedFlowUuids.value.length > 0) {
+      urlParams.set("flowUuids", selectedFlowUuids.value.join(","));
+    }
+    const url = `/api/project-conversation-geo?${urlParams.toString()}`;
     const r = await fetch(url);
     const body = (await r.json()) as GeoPayload & { error?: string };
     if (!r.ok) {
@@ -144,6 +191,19 @@ async function loadData(): Promise<void> {
       return;
     }
     data.value = body;
+    const nextKnown = new Map(knownFlowOptions.value);
+    const flowAgg = new Map<string, GeoFlowOption>();
+    for (const e of body.flowCountryEdges ?? []) {
+      const cur = flowAgg.get(e.flowUuid) ?? {
+        flowUuid: e.flowUuid,
+        flowName: e.flowName,
+        conversations: 0,
+      };
+      cur.conversations += e.conversations;
+      flowAgg.set(e.flowUuid, cur);
+    }
+    for (const [k, v] of flowAgg) nextKnown.set(k, v);
+    knownFlowOptions.value = nextKnown;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to load geo data";
     data.value = null;
@@ -158,7 +218,7 @@ onMounted(() => {
 });
 
 watch(
-  () => [props.projectId, scanLimit.value] as const,
+  () => [props.projectId, scanLimit.value, selectedFlowUuids.value.join("|")] as const,
   () => void loadData()
 );
 
@@ -170,7 +230,76 @@ const unknownRow = computed((): GeoCountryRow | null =>
   (data.value?.byCountry ?? []).find((r) => r.country === "Unknown") ?? null
 );
 
-const topCountriesForBar = computed(() => [...mappedRows.value].slice(0, 15).reverse());
+const topCountriesLimitClamped = computed(() =>
+  Math.max(1, Math.min(250, Math.floor(Number(topCountriesLimit.value) || 15)))
+);
+
+const topCountriesSortOptions = [
+  { label: "Conversations", value: "conversations" },
+  { label: "Positive replies", value: "positiveReplies" },
+  { label: "Reply rate %", value: "replyRate" },
+  { label: "Messages in", value: "messagesIn" },
+  { label: "Messages out", value: "messagesOut" },
+];
+
+const topCountriesSortDirOptions = [
+  { label: "High → low", value: "desc" },
+  { label: "Low → high", value: "asc" },
+];
+
+const topCountriesCardTitle = computed(() => {
+  const metricLabel =
+    topCountriesSortOptions.find((x) => x.value === topCountriesSortKey.value)?.label ??
+    "Conversations";
+  return `Top ${topCountriesLimitClamped.value} countries (${metricLabel}, ${topCountriesSortDir.value === "desc" ? "high → low" : "low → high"})`;
+});
+
+const sankeyTopFlowsClamped = computed(() =>
+  Math.max(1, Math.min(30, Math.floor(Number(sankeyTopFlows.value) || 8)))
+);
+const sankeyTopCountriesClamped = computed(() =>
+  Math.max(1, Math.min(50, Math.floor(Number(sankeyTopCountries.value) || 10)))
+);
+
+const sankeyCardTitle = computed(
+  () =>
+    `Flow → Country → Reply (top ${sankeyTopFlowsClamped.value} flows × top ${sankeyTopCountriesClamped.value} countries)`
+);
+
+const topCountriesForBar = computed(() => {
+  const sorted = [...mappedRows.value].sort((a, b) => {
+    const metricOf = (row: GeoCountryRow): number => {
+      if (topCountriesSortKey.value === "replyRate") {
+        if (row.conversations <= 0) return 0;
+        return (100 * row.positiveReplies) / row.conversations;
+      }
+      return Number(row[topCountriesSortKey.value]);
+    };
+    const av = metricOf(a);
+    const bv = metricOf(b);
+    const cmp = Number(av) - Number(bv);
+    if (cmp !== 0) return topCountriesSortDir.value === "desc" ? -cmp : cmp;
+    return a.country.localeCompare(b.country, undefined, { sensitivity: "base" });
+  });
+  return sorted.slice(0, topCountriesLimitClamped.value);
+});
+
+const flowFilterRows = computed(() =>
+  [...knownFlowOptions.value.values()]
+    .sort(
+      (a, b) =>
+        b.conversations - a.conversations ||
+        a.flowName.localeCompare(b.flowName, undefined, { sensitivity: "base" })
+    )
+);
+const flowFilterItems = computed(() =>
+  flowFilterRows.value.map((f, idx) => ({
+    id: f.flowUuid,
+    label: `${FLOW_TAG_EMOJIS[idx % FLOW_TAG_EMOJIS.length]!} ${f.flowName}`,
+    meta: `· ${f.conversations.toLocaleString()} conversations`,
+    tooltip: `${f.flowName} · ${f.conversations.toLocaleString()} conversations`,
+  }))
+);
 
 function chartTextColor(dark: boolean): string {
   return dark ? "rgba(255, 255, 255, 0.78)" : "rgba(0, 0, 0, 0.72)";
@@ -196,6 +325,7 @@ const topCountriesOption = computed((): EChartsOption => {
     yAxis: {
       type: "category",
       data: rows.map((r) => r.country),
+      inverse: true,
       axisLabel: { color: text },
     },
     series: [
@@ -301,9 +431,6 @@ const sankeyOption = computed((): EChartsOption | null => {
   const edges = data.value?.flowCountryEdges ?? [];
   if (edges.length === 0) return null;
 
-  const MAX_FLOWS = 8;
-  const MAX_COUNTRIES = 10;
-
   const flowTotals = new Map<string, { name: string; total: number }>();
   const countryTotals = new Map<string, number>();
   for (const e of edges) {
@@ -315,13 +442,13 @@ const sankeyOption = computed((): EChartsOption | null => {
   const topFlowUuids = new Set(
     [...flowTotals.entries()]
       .sort((a, b) => b[1].total - a[1].total)
-      .slice(0, MAX_FLOWS)
+      .slice(0, sankeyTopFlowsClamped.value)
       .map(([uuid]) => uuid)
   );
   const topCountries = new Set(
     [...countryTotals.entries()]
       .sort((a, b) => b[1] - a[1])
-      .slice(0, MAX_COUNTRIES)
+      .slice(0, sankeyTopCountriesClamped.value)
       .map(([name]) => name)
   );
 
@@ -451,6 +578,19 @@ const mapCoverageText = computed(() => {
   const mappedPct = Math.round((t.conversationsMapped / scanned) * 100);
   return `${t.conversationsMapped} of ${scanned} conversations (${mappedPct}%) resolved to a country across ${t.countries} countries.`;
 });
+
+const unknownCountriesSummaryText = computed(() => {
+  const list = data.value?.unknownCountryCandidates ?? [];
+  if (list.length === 0) return "";
+  const names = list.map((x) => x.token).join(", ");
+  return `${list.length} countries not found. Countries: ${names}`;
+});
+
+const unknownContactsSummaryText = computed(() => {
+  const contacts = unknownRow.value?.contacts ?? 0;
+  const verb = contacts === 1 ? "has" : "have";
+  return `${contacts} contacts ${verb} no country in data`;
+});
 </script>
 
 <template>
@@ -461,21 +601,23 @@ const mapCoverageText = computed(() => {
     <template v-else>
       <NCard size="small" title="Conversation coverage" class="cg-insights__card">
         <template #header-extra>
-          <div v-if="!hideLimitControl" class="cg-insights__limit">
-            <NText depth="3" class="cg-insights__limit-label">Scan recent</NText>
-            <NInputNumber
-              v-model:value="limitSelf"
-              size="small"
-              :min="50"
-              :max="2000"
-              :step="50"
-              :disabled="loading"
-              :show-button="false"
-              class="cg-insights__limit-input"
-              @blur="loadData"
-              @keydown.enter="loadData"
-            />
-            <NText depth="3">conversations</NText>
+          <div class="cg-insights__header-filters">
+            <div v-if="!hideLimitControl" class="cg-insights__limit">
+              <NText depth="3" class="cg-insights__limit-label">Scan recent</NText>
+              <NInputNumber
+                v-model:value="limitSelf"
+                size="small"
+                :min="50"
+                :max="2000"
+                :step="50"
+                :disabled="loading"
+                :show-button="false"
+                class="cg-insights__limit-input"
+                @blur="loadData"
+                @keydown.enter="loadData"
+              />
+              <NText depth="3">conversations</NText>
+            </div>
           </div>
         </template>
 
@@ -483,12 +625,36 @@ const mapCoverageText = computed(() => {
           <NAlert v-if="error" type="error" :title="error" class="cg-insights__alert" />
           <template v-else-if="totals">
             <NText class="cg-insights__coverage">{{ mapCoverageText }}</NText>
+            <EntityTagPicker
+              v-if="flowFilterItems.length > 0"
+              v-model:model-value="selectedFlowUuids"
+              :items="flowFilterItems"
+              title="Flows (charts & matrix)"
+              :loading="loading"
+              :badge-limit="25"
+              class="cg-insights__flow-tags-wrap"
+            />
             <div v-if="unknownRow && unknownRow.conversations > 0" class="cg-insights__unknown">
               <NTag type="warning" size="small" :bordered="false">Unknown</NTag>
-              <NText depth="3">
-                {{ unknownRow.conversations }} conversations have an unparseable or missing
-                <code>location</code>.
-              </NText>
+              <div class="cg-insights__unknown-lines">
+                <NText depth="3">
+                  {{ unknownRow.conversations }} conversations have an unparseable or missing
+                  <code>location</code>.
+                </NText>
+                <NText depth="3" v-if="unknownCountriesSummaryText">{{ unknownCountriesSummaryText }}</NText>
+                <NText depth="3">{{ unknownContactsSummaryText }}</NText>
+              </div>
+            </div>
+            <div
+              v-if="(data?.unknownCountryCandidates?.length ?? 0) > 0"
+              class="cg-insights__samples"
+            >
+              <NText depth="3" class="cg-insights__samples-label">Not found country candidates:</NText>
+              <span
+                v-for="(c, i) in data!.unknownCountryCandidates"
+                :key="`uc-${i}`"
+                class="cg-insights__sample-chip"
+              >{{ c.token }} ({{ c.count }})</span>
             </div>
             <div
               v-if="(data?.unknownLocationSamples?.length ?? 0) > 0"
@@ -531,7 +697,33 @@ const mapCoverageText = computed(() => {
         </NSpin>
       </NCard>
 
-      <NCard size="small" title="Top 15 countries (conversations vs positive replies)" class="cg-insights__card">
+      <NCard size="small" :title="topCountriesCardTitle" class="cg-insights__card">
+        <template #header-extra>
+          <div class="cg-insights__top-controls">
+            <NText depth="3">Top</NText>
+            <NInputNumber
+              v-model:value="topCountriesLimit"
+              size="small"
+              :min="1"
+              :max="250"
+              :step="1"
+              :show-button="false"
+              class="cg-insights__top-count"
+            />
+            <NSelect
+              v-model:value="topCountriesSortKey"
+              size="small"
+              :options="topCountriesSortOptions"
+              class="cg-insights__top-sort"
+            />
+            <NSelect
+              v-model:value="topCountriesSortDir"
+              size="small"
+              :options="topCountriesSortDirOptions"
+              class="cg-insights__top-dir"
+            />
+          </div>
+        </template>
         <NSpin :show="loading">
           <NEmpty v-if="mappedRows.length === 0 && !loading" description="No country data in range." />
           <div v-else class="cg-insights__bar-host">
@@ -548,9 +740,33 @@ const mapCoverageText = computed(() => {
       <NCard
         v-if="sankeyOption"
         size="small"
-        title="Flow → Country → Reply (top 8 flows × top 10 countries)"
+        :title="sankeyCardTitle"
         class="cg-insights__card"
       >
+        <template #header-extra>
+          <div class="cg-insights__sankey-controls">
+            <NText depth="3">Top flows</NText>
+            <NInputNumber
+              v-model:value="sankeyTopFlows"
+              size="small"
+              :min="1"
+              :max="30"
+              :step="1"
+              :show-button="false"
+              class="cg-insights__sankey-count"
+            />
+            <NText depth="3">Top countries</NText>
+            <NInputNumber
+              v-model:value="sankeyTopCountries"
+              size="small"
+              :min="1"
+              :max="50"
+              :step="1"
+              :show-button="false"
+              class="cg-insights__sankey-count"
+            />
+          </div>
+        </template>
         <NText depth="3" class="cg-insights__hint">
           Edge thickness = conversation count. Colors on the right stream group conversations by reply status
           (green = got response, yellow = waiting, red = no response).
@@ -601,9 +817,15 @@ const mapCoverageText = computed(() => {
 
 .cg-insights__unknown {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   margin-top: 4px;
+}
+
+.cg-insights__unknown-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .cg-insights__samples {
@@ -632,12 +854,12 @@ const mapCoverageText = computed(() => {
 }
 
 .cg-insights__bar-host {
-  height: 420px;
+  height: 720px;
   width: 100%;
 }
 
 .cg-insights__sankey-host {
-  height: 520px;
+  height: 800px;
   width: 100%;
 }
 
@@ -652,6 +874,14 @@ const mapCoverageText = computed(() => {
   gap: 8px;
 }
 
+.cg-insights__header-filters {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .cg-insights__limit-label {
   font-size: 12px;
 }
@@ -660,9 +890,41 @@ const mapCoverageText = computed(() => {
   width: 96px;
 }
 
+.cg-insights__flow-tags-wrap {
+  margin-bottom: 8px;
+}
+
 .cg-insights__hint {
   display: block;
   margin-bottom: 8px;
   font-size: 12px;
+}
+
+.cg-insights__top-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cg-insights__top-count {
+  width: 72px;
+}
+
+.cg-insights__top-sort {
+  width: 170px;
+}
+
+.cg-insights__top-dir {
+  width: 125px;
+}
+
+.cg-insights__sankey-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cg-insights__sankey-count {
+  width: 72px;
 }
 </style>

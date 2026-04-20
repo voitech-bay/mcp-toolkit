@@ -15,6 +15,10 @@ import {
   getHypothesisTagContacts,
 } from "./supabase.js";
 
+function logAnalyticsPerf(message: string): void {
+  console.info(`[analytics-perf] ${message}`);
+}
+
 export interface FunnelMetrics {
   /** LinkedIn messages sent (`linkedin_sent_count`), typically ≥ connection requests. */
   messages_sent: number;
@@ -106,9 +110,13 @@ export async function aggregateMetricsByFlow(
   dateFrom: string,
   dateTo: string
 ): Promise<{ data: Map<string, FunnelMetrics>; error: string | null }> {
+  const startedAt = Date.now();
   const metricsByFlow = new Map<string, FunnelMetrics>();
   const pageSize = 1000;
+  let pages = 0;
+  let rowsRead = 0;
   for (let offset = 0; ; offset += pageSize) {
+    pages += 1;
     const { data, error } = await client
       .from(ANALYTICS_SNAPSHOTS_TABLE)
       .select("flow_uuid, metrics")
@@ -120,6 +128,7 @@ export async function aggregateMetricsByFlow(
       .range(offset, offset + pageSize - 1);
     if (error) return { data: metricsByFlow, error: error.message };
     const rows = (data ?? []) as Array<Record<string, unknown>>;
+    rowsRead += rows.length;
     if (rows.length === 0) break;
     for (const row of rows) {
       const fu = row.flow_uuid as string | null;
@@ -133,6 +142,9 @@ export async function aggregateMetricsByFlow(
     }
     if (rows.length < pageSize) break;
   }
+  logAnalyticsPerf(
+    `aggregateMetricsByFlow project=${projectId} from=${dateFrom} to=${dateTo} pages=${pages} rows=${rowsRead} flows=${metricsByFlow.size} elapsedMs=${Date.now() - startedAt}`
+  );
   return { data: metricsByFlow, error: null };
 }
 
@@ -312,12 +324,15 @@ async function getFlowPipelineStageBreakdown(
   projectId: string,
   flowUuids: string[]
 ): Promise<{ data: Map<string, FlowStageBreakdown[]>; error: string | null }> {
+  const startedAt = Date.now();
   const out = new Map<string, FlowStageBreakdown[]>();
   if (flowUuids.length === 0) return { data: out, error: null };
   try {
     const leadsByFlow = new Map<string, Set<string>>();
     const leadAll = new Set<string>();
     const flowChunks = chunkIds(flowUuids, 80);
+    let flowLeadRowsRead = 0;
+    let contactRowsRead = 0;
     for (const chunk of flowChunks) {
       const pageSize = 1000;
       for (let offset = 0; ; offset += pageSize) {
@@ -329,6 +344,7 @@ async function getFlowPipelineStageBreakdown(
           .range(offset, offset + pageSize - 1);
         if (error) return { data: out, error: error.message };
         const rows = (data ?? []) as Array<Record<string, unknown>>;
+        flowLeadRowsRead += rows.length;
         if (rows.length === 0) break;
         for (const row of rows) {
           const flow = typeof row.flow_uuid === "string" ? row.flow_uuid : "";
@@ -345,17 +361,28 @@ async function getFlowPipelineStageBreakdown(
     if (leadAll.size === 0) return { data: out, error: null };
 
     const contactToStage = new Map<string, string>();
-    for (const ids of chunkIds([...leadAll], 80)) {
-      const { data, error } = await client
-        .from(CONTACTS_TABLE)
-        .select("uuid, pipeline_stage_uuid")
-        .eq("project_id", projectId)
-        .in("uuid", ids);
-      if (error) return { data: out, error: error.message };
-      for (const row of (data ?? []) as Array<Record<string, unknown>>) {
-        const uuid = typeof row.uuid === "string" ? row.uuid : "";
-        const stage = typeof row.pipeline_stage_uuid === "string" ? row.pipeline_stage_uuid : "";
-        if (uuid && stage) contactToStage.set(uuid, stage);
+    const contactIdChunks = chunkIds([...leadAll], 300);
+    const contactChunkBatchSize = 6;
+    for (let i = 0; i < contactIdChunks.length; i += contactChunkBatchSize) {
+      const batch = contactIdChunks.slice(i, i + contactChunkBatchSize);
+      const batchResults = await Promise.all(
+        batch.map(async (ids) =>
+          client
+            .from(CONTACTS_TABLE)
+            .select("uuid, pipeline_stage_uuid")
+            .eq("project_id", projectId)
+            .in("uuid", ids)
+        )
+      );
+      for (const result of batchResults) {
+        if (result.error) return { data: out, error: result.error.message };
+        const rows = (result.data ?? []) as Array<Record<string, unknown>>;
+        contactRowsRead += rows.length;
+        for (const row of rows) {
+          const uuid = typeof row.uuid === "string" ? row.uuid : "";
+          const stage = typeof row.pipeline_stage_uuid === "string" ? row.pipeline_stage_uuid : "";
+          if (uuid && stage) contactToStage.set(uuid, stage);
+        }
       }
     }
 
@@ -412,6 +439,9 @@ async function getFlowPipelineStageBreakdown(
       if (arr.length > 0) out.set(flow, arr);
     }
 
+    logAnalyticsPerf(
+      `getFlowPipelineStageBreakdown project=${projectId} flowInputs=${flowUuids.length} leads=${leadAll.size} flowLeadRows=${flowLeadRowsRead} contactRows=${contactRowsRead} contactChunks=${contactIdChunks.length} flowsWithStages=${out.size} elapsedMs=${Date.now() - startedAt}`
+    );
     return { data: out, error: null };
   } catch (error) {
     return {
@@ -470,7 +500,8 @@ export async function getProjectAnalyticsDashboard(
   projectId: string,
   dateFrom: string,
   dateTo: string,
-  groupBy: "flow" | "hypothesis"
+  groupBy: "flow" | "hypothesis",
+  opts?: { totalsOnly?: boolean }
 ): Promise<{
   flows: ProjectAnalyticsDashboardFlow[];
   pipelineStages: ProjectAnalyticsPipelineStage[];
@@ -478,6 +509,8 @@ export async function getProjectAnalyticsDashboard(
   warnings: string[];
   error: string | null;
 }> {
+  const totalsOnly = opts?.totalsOnly === true;
+  const startedAt = Date.now();
   const agg = await aggregateMetricsByFlow(client, projectId, dateFrom, dateTo);
   if (agg.error) {
     return {
@@ -489,6 +522,22 @@ export async function getProjectAnalyticsDashboard(
     };
   }
   const metricsByFlow = agg.data;
+  const afterAggAt = Date.now();
+
+  const projectTotals = totalsFromFunnelMetrics(sumAllFlowMetrics(metricsByFlow));
+  if (totalsOnly) {
+    logAnalyticsPerf(
+      `dashboard totals-only project=${projectId} groupBy=${groupBy} from=${dateFrom} to=${dateTo} flowsWithMetrics=${metricsByFlow.size} tAggMs=${afterAggAt - startedAt} tTotalMs=${Date.now() - startedAt}`
+    );
+    return {
+      flows: [],
+      pipelineStages: [],
+      projectTotals,
+      warnings: [],
+      error: null,
+    };
+  }
+
   const flowNames = await getFlowNameMap(client, projectId);
   if (flowNames.error) {
     return {
@@ -500,10 +549,11 @@ export async function getProjectAnalyticsDashboard(
     };
   }
   const flowNameByUuid = flowNames.data;
+  const afterFlowNamesAt = Date.now();
 
-  const projectTotals = totalsFromFunnelMetrics(sumAllFlowMetrics(metricsByFlow));
   const warnings: string[] = [];
   const pipelineStages: ProjectAnalyticsPipelineStage[] = [];
+  const stageListStartedAt = Date.now();
   const { data: stageRows, error: stageErr } = await client
     .from(PIPELINE_STAGES_TABLE)
     .select("uuid, name, stage_order")
@@ -533,8 +583,13 @@ export async function getProjectAnalyticsDashboard(
       return ao - bo || a.stageName.localeCompare(b.stageName);
     });
   }
+  const afterStageListAt = Date.now();
+  logAnalyticsPerf(
+    `dashboard base project=${projectId} groupBy=${groupBy} from=${dateFrom} to=${dateTo} flowsWithMetrics=${metricsByFlow.size} pipelineStages=${pipelineStages.length} tAggMs=${afterAggAt - startedAt} tFlowNamesMs=${afterFlowNamesAt - afterAggAt} tStageListMs=${afterStageListAt - stageListStartedAt}`
+  );
 
   if (groupBy === "flow") {
+    const flowBranchStartedAt = Date.now();
     const flowIds = [...new Set<string>([...metricsByFlow.keys(), ...flowNameByUuid.keys()])];
     const stageRes = await getFlowPipelineStageBreakdown(client, projectId, flowIds);
     // Keep funnel payload clean if optional pipeline enrichment fails.
@@ -553,9 +608,13 @@ export async function getProjectAnalyticsDashboard(
         b.connectionSent - a.connectionSent ||
         a.flowName.localeCompare(b.flowName, undefined, { sensitivity: "base" })
     );
+    logAnalyticsPerf(
+      `dashboard flow branch project=${projectId} from=${dateFrom} to=${dateTo} flowIds=${flowIds.length} rows=${flows.length} tFlowBranchMs=${Date.now() - flowBranchStartedAt} tTotalMs=${Date.now() - startedAt}`
+    );
     return { flows, pipelineStages, projectTotals, warnings, error: null };
   }
 
+  const hypBranchStartedAt = Date.now();
   const hypsRes = await resolveHypothesisFlows(client, projectId);
   if (hypsRes.error) {
     return { flows: [], pipelineStages, projectTotals, warnings: [], error: hypsRes.error };
@@ -621,6 +680,9 @@ export async function getProjectAnalyticsDashboard(
     (a, b) =>
       b.connectionSent - a.connectionSent ||
       a.flowName.localeCompare(b.flowName, undefined, { sensitivity: "base" })
+  );
+  logAnalyticsPerf(
+    `dashboard hypothesis branch project=${projectId} from=${dateFrom} to=${dateTo} hypotheses=${hypsRes.data.length} hypFlows=${allHypFlowUuids.length} rows=${flows.length} tHypBranchMs=${Date.now() - hypBranchStartedAt} tTotalMs=${Date.now() - startedAt}`
   );
   return { flows, pipelineStages, projectTotals, warnings, error: null };
 }

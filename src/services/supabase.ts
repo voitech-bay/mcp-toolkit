@@ -3816,8 +3816,8 @@ export async function getConversationsList(
     filtered = filtered.filter((c) => c.receiverPipelineStageUuid === pipelineStageUuid);
   }
 
-  const offset = options?.offset ?? 0;
-  const limit = Math.min(options?.limit ?? 50, 200);
+  const offset = Math.max(0, options?.offset ?? 0);
+  const limit = Math.min(Math.max(options?.limit ?? 50, 1), 2000);
   const total = filtered.length;
   return { data: filtered.slice(offset, offset + limit), total, error: null };
 }

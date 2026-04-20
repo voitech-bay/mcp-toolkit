@@ -6,3 +6,4 @@ charts-public/
 *.log
 .vercel/
 supabase/
+public/assets/

@@ -590,29 +590,27 @@ export async function handleProjectAnalytics(
     return;
   }
 
-  const dash = await getProjectAnalyticsDashboard(client, projectId, dateFrom, dateTo, groupBy);
+  const windowDays = funnelInclusiveDayCount(dateFrom, dateTo);
+  const previousTo = funnelAddDaysYmd(dateFrom, -1);
+  const previousFrom = funnelAddDaysYmd(previousTo, -(windowDays - 1));
+  const requestStartedAt = Date.now();
+  const [dash, prevDash] = await Promise.all([
+    getProjectAnalyticsDashboard(client, projectId, dateFrom, dateTo, groupBy),
+    getProjectAnalyticsDashboard(client, projectId, previousFrom, previousTo, groupBy, {
+      totalsOnly: true,
+    }),
+  ]);
   if (dash.error) {
     res.writeHead(500);
     res.end(JSON.stringify({ error: dash.error }));
     return;
   }
-
-  const windowDays = funnelInclusiveDayCount(dateFrom, dateTo);
-  const previousTo = funnelAddDaysYmd(dateFrom, -1);
-  const previousFrom = funnelAddDaysYmd(previousTo, -(windowDays - 1));
   const mergedWarnings = [...dash.warnings];
   let comparison: {
     previousDateFrom: string;
     previousDateTo: string;
     totals: ReturnType<typeof projectAnalyticsTotalsToJson>;
   } | null = null;
-  const prevDash = await getProjectAnalyticsDashboard(
-    client,
-    projectId,
-    previousFrom,
-    previousTo,
-    groupBy
-  );
   if (prevDash.error) {
     mergedWarnings.push(
       `Previous window (${previousFrom}…${previousTo}): ${prevDash.error}`
@@ -625,6 +623,10 @@ export async function handleProjectAnalytics(
       totals: projectAnalyticsTotalsToJson(prevDash.projectTotals),
     };
   }
+  const elapsedMs = Date.now() - requestStartedAt;
+  console.info(
+    `[project-analytics] project=${projectId} groupBy=${groupBy} from=${dateFrom} to=${dateTo} elapsedMs=${elapsedMs}`
+  );
 
   res.writeHead(200);
   res.end(
@@ -2635,7 +2637,14 @@ export async function handleProjectConversationGeo(
     Math.max(parseInt(params.get("limit") ?? "500", 10) || 500, 1),
     2000
   );
-  const result = await getProjectConversationGeoAggregates(client, projectId, { limit });
+  const flowUuids = (params.get("flowUuids") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter((id) => PROJECT_ID_RE.test(id));
+  const result = await getProjectConversationGeoAggregates(client, projectId, {
+    limit,
+    flowUuids,
+  });
   if (result.error) {
     res.writeHead(500);
     res.end(JSON.stringify({ error: result.error }));

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref, watch, onBeforeUnmount } from "vue";
 import {
   NCard,
   NSpin,
@@ -7,9 +7,6 @@ import {
   NText,
   NDatePicker,
   NSelect,
-  NButton,
-  NTag,
-  NTooltip,
   NTabs,
   NTabPane,
   NRadioGroup,
@@ -35,6 +32,7 @@ import FlowAnalyticsTotalsSection from "../components/analytics/FlowAnalyticsTot
 import FlowAnalyticsFunnelSection from "../components/analytics/FlowAnalyticsFunnelSection.vue";
 import FlowAnalyticsDailySection from "../components/analytics/FlowAnalyticsDailySection.vue";
 import FlowAnalyticsGeoPanel from "../components/analytics/FlowAnalyticsGeoPanel.vue";
+import EntityTagPicker from "../components/analytics/EntityTagPicker.vue";
 import type {
   FlowFunnelRow,
   FlowFunnelProjectTotalsPayload,
@@ -58,6 +56,15 @@ import {
   type DailyHeatmapMetricId,
 } from "../components/analytics/flowAnalyticsDailyCharts.js";
 import { useProjectStore } from "../stores/project";
+
+type FlowFunnelRowUi = FlowFunnelRow & {
+  pipelineStageBreakdown?: Array<{
+    stageUuid: string;
+    stageName: string;
+    stageOrder: number | null;
+    contactsCount: number;
+  }>;
+};
 
 use([
   CanvasRenderer,
@@ -118,7 +125,7 @@ const collectingDays = ref(false);
 const loading = ref(false);
 const loadError = ref("");
 const warnings = ref<string[]>([]);
-const flows = ref<FlowFunnelRow[]>([]);
+const flows = ref<FlowFunnelRowUi[]>([]);
 
 const groupEntityTitle = computed(() =>
   analyticsGroupBy.value === "hypothesis" ? "Hypotheses" : "Flows"
@@ -153,8 +160,8 @@ const selectedFlowUuids = ref<string[]>([]);
 const dateRange = ref<[number, number] | null>(null);
 
 function compareFlowRowsByConnectionsSentDesc(
-  a: FlowFunnelRow,
-  b: FlowFunnelRow
+  a: FlowFunnelRowUi,
+  b: FlowFunnelRowUi
 ): number {
   return (
     b.connectionSent - a.connectionSent ||
@@ -167,60 +174,17 @@ const flowsSortedForPicker = computed(() =>
   [...flows.value].sort(compareFlowRowsByConnectionsSentDesc)
 );
 
-const FLOW_PICKER_BADGE_LIMIT = 25;
-
-/** Expanded tag strip shows every flow/hypothesis; collapsed shows first N (by volume). */
-const flowPickerExpanded = ref(false);
-
-const flowsPickerRows = computed(() =>
-  flowsSortedForPicker.value.map((f, i) => ({ flow: f, idx: i }))
+const flowPickerItems = computed(() =>
+  flowsSortedForPicker.value.map((f, idx) => ({
+    id: f.flowUuid,
+    label: `${FLOW_TAG_EMOJIS[idx % FLOW_TAG_EMOJIS.length]!} ${f.flowName}`,
+    meta: flowPickerTagCountsSuffix(f),
+    tooltip: flowPickerTagTooltip(f, selectedFlowUuids.value.includes(f.flowUuid)),
+  }))
 );
-
-const flowsPickerRowsShown = computed(() => {
-  const rows = flowsPickerRows.value;
-  if (flowPickerExpanded.value || rows.length <= FLOW_PICKER_BADGE_LIMIT) return rows;
-  return rows.slice(0, FLOW_PICKER_BADGE_LIMIT);
-});
-
-const flowPickerHasOverflow = computed(
-  () => flowsPickerRows.value.length > FLOW_PICKER_BADGE_LIMIT
-);
-
-watch(
-  () => flowsPickerRows.value.length,
-  (n) => {
-    if (n <= FLOW_PICKER_BADGE_LIMIT) flowPickerExpanded.value = false;
-  }
-);
-
-function flowPickerEmoji(index: number): string {
-  return FLOW_TAG_EMOJIS[index % FLOW_TAG_EMOJIS.length]!;
-}
-
-function isFlowUuidSelected(flowUuid: string): boolean {
-  return selectedFlowUuids.value.includes(flowUuid);
-}
-
-function toggleFlowSelection(flowUuid: string): void {
-  const cur = selectedFlowUuids.value;
-  const i = cur.indexOf(flowUuid);
-  if (i >= 0) {
-    selectedFlowUuids.value = cur.filter((id) => id !== flowUuid);
-  } else {
-    selectedFlowUuids.value = [...cur, flowUuid];
-  }
-}
-
-function selectAllPickerFlows(): void {
-  selectedFlowUuids.value = flows.value.map((f) => f.flowUuid);
-}
-
-function clearPickerFlows(): void {
-  selectedFlowUuids.value = [];
-}
 
 /** When >4 flows, default charts to top-N by connection sent (volume). */
-function defaultSelectedUuidsForCharts(list: FlowFunnelRow[]): string[] {
+function defaultSelectedUuidsForCharts(list: FlowFunnelRowUi[]): string[] {
   if (list.length <= DEFAULT_CHART_FLOW_COUNT) {
     return list.map((f) => f.flowUuid);
   }
@@ -1927,6 +1891,10 @@ const dailyByEntity = ref<Array<{ entityId: string; entityName: string; series: 
 const dailyLoading = ref(false);
 const dailyError = ref("");
 const dailyWarnings = ref<string[]>([]);
+let analyticsAbortController: AbortController | null = null;
+let dailyAbortController: AbortController | null = null;
+let analyticsReloadTimer: ReturnType<typeof setTimeout> | null = null;
+const ANALYTICS_RELOAD_DEBOUNCE_MS = 180;
 /** Combined funnel chart: lines vs stacked area. */
 const dailyFunnelDisplay = ref<"lines" | "stacked">("lines");
 /** 7-day rolling funnel chart: lines vs stacked (independent of primary funnel chart). */
@@ -1946,6 +1914,9 @@ async function loadDailyMetrics() {
   dailyLoading.value = true;
   dailyError.value = "";
   dailyWarnings.value = [];
+  dailyAbortController?.abort();
+  const controller = new AbortController();
+  dailyAbortController = controller;
   try {
     const from = tsToYmdLocal(dr[0]!);
     const to = tsToYmdLocal(dr[1]!);
@@ -1958,7 +1929,9 @@ async function loadDailyMetrics() {
       entityIds: sel.join(","),
     });
     if (sel.length >= 1 && sel.length <= 2) q.set("perEntity", "1");
-    const r = await fetch(`/api/project-analytics-daily?${q.toString()}`);
+    const r = await fetch(`/api/project-analytics-daily?${q.toString()}`, {
+      signal: controller.signal,
+    });
     const data = (await r.json()) as {
       series?: DailyMetricPoint[];
       byEntity?: Array<{ entityId: string; entityName: string; series: DailyMetricPoint[] }>;
@@ -1975,11 +1948,15 @@ async function loadDailyMetrics() {
     dailyByEntity.value = data.byEntity ?? [];
     dailyWarnings.value = data.warnings ?? [];
   } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") return;
     dailyError.value = e instanceof Error ? e.message : "Failed to load daily metrics";
     dailySeries.value = [];
     dailyByEntity.value = [];
   } finally {
-    dailyLoading.value = false;
+    if (dailyAbortController === controller) {
+      dailyLoading.value = false;
+      dailyAbortController = null;
+    }
   }
 }
 
@@ -2451,7 +2428,7 @@ watch(
   }
 );
 
-function normalizeFlowRow(raw: Record<string, unknown>): FlowFunnelRow {
+function normalizeFlowRow(raw: Record<string, unknown>): FlowFunnelRowUi {
   const ps = Array.isArray(raw.pipelineStageBreakdown)
     ? (raw.pipelineStageBreakdown as Array<Record<string, unknown>>)
     : [];
@@ -2522,6 +2499,9 @@ async function loadAnalytics(projectId: string, from: string, to: string) {
   loading.value = true;
   loadError.value = "";
   warnings.value = [];
+  analyticsAbortController?.abort();
+  const controller = new AbortController();
+  analyticsAbortController = controller;
   try {
     const q = new URLSearchParams({
       projectId,
@@ -2529,7 +2509,9 @@ async function loadAnalytics(projectId: string, from: string, to: string) {
       dateTo: to,
       groupBy: analyticsGroupBy.value,
     });
-    const r = await fetch(`/api/project-analytics?${q.toString()}`);
+    const r = await fetch(`/api/project-analytics?${q.toString()}`, {
+      signal: controller.signal,
+    });
     const data = (await r.json()) as {
       flows?: Record<string, unknown>[];
       pipelineStages?: Record<string, unknown>[];
@@ -2568,14 +2550,31 @@ async function loadAnalytics(projectId: string, from: string, to: string) {
     funnelProjectTotals.value = data.projectTotals ?? null;
     funnelComparison.value = data.comparison ?? null;
   } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") return;
     loadError.value = e instanceof Error ? e.message : "Failed to load analytics";
     flows.value = [];
     availablePipelineStages.value = [];
     funnelProjectTotals.value = null;
     funnelComparison.value = null;
   } finally {
-    loading.value = false;
+    if (analyticsAbortController === controller) {
+      loading.value = false;
+      analyticsAbortController = null;
+    }
   }
+}
+
+function scheduleAnalyticsLoad(): void {
+  if (analyticsReloadTimer != null) {
+    clearTimeout(analyticsReloadTimer);
+  }
+  analyticsReloadTimer = setTimeout(() => {
+    analyticsReloadTimer = null;
+    const pid = projectStore.selectedProjectId;
+    const val = dateRange.value;
+    if (!pid || !val || val.length !== 2) return;
+    void loadAnalytics(pid, tsToYmdLocal(val[0]), tsToYmdLocal(val[1]));
+  }, ANALYTICS_RELOAD_DEBOUNCE_MS);
 }
 
 watch(
@@ -2635,7 +2634,7 @@ watch(
       if (!val) flows.value = [];
       return;
     }
-    void loadAnalytics(pid, tsToYmdLocal(val[0]), tsToYmdLocal(val[1]));
+    scheduleAnalyticsLoad();
   },
   { deep: true }
 );
@@ -2644,7 +2643,7 @@ watch(analyticsGroupBy, () => {
   const pid = projectStore.selectedProjectId;
   const val = dateRange.value;
   if (!pid || !val || val.length !== 2) return;
-  void loadAnalytics(pid, tsToYmdLocal(val[0]), tsToYmdLocal(val[1]));
+  scheduleAnalyticsLoad();
 });
 
 watch(statsWindowDays, (wd) => {
@@ -2654,6 +2653,15 @@ watch(statsWindowDays, (wd) => {
   if (dr) {
     dateRange.value = dr;
   }
+});
+
+onBeforeUnmount(() => {
+  if (analyticsReloadTimer != null) {
+    clearTimeout(analyticsReloadTimer);
+    analyticsReloadTimer = null;
+  }
+  analyticsAbortController?.abort();
+  dailyAbortController?.abort();
 });
 </script>
 
@@ -2722,38 +2730,13 @@ watch(statsWindowDays, (wd) => {
               </div>
 
               <div v-if="flows.length > 0" class="flow-dash__filters-block flow-dash__filters-block--ruled">
-                <div class="flow-dash__filters-section-head">
-                  <span class="flow-dash__filters-title">{{ groupEntityTitle }} (charts & matrix)</span>
-                  <div class="flow-dash__flow-tag-actions">
-                    <NButton
-                      v-if="flowPickerHasOverflow"
-                      size="tiny"
-                      quaternary
-                      :disabled="loading"
-                      @click="flowPickerExpanded = !flowPickerExpanded"
-                    >
-                      {{ flowPickerExpanded ? "Show less" : `Show all (${flowsPickerRows.length})` }}
-                    </NButton>
-                    <NButton size="tiny" quaternary :disabled="loading" @click="selectAllPickerFlows">All</NButton>
-                    <NButton size="tiny" quaternary :disabled="loading" @click="clearPickerFlows">Clear</NButton>
-                  </div>
-                </div>
-                <div class="flow-dash__flow-tags">
-                  <NTooltip v-for="{ flow: f, idx } in flowsPickerRowsShown" :key="`flow-tag-${f.flowUuid}`" placement="top">
-                    <template #trigger>
-                      <NTag size="small" :type="isFlowUuidSelected(f.flowUuid) ? 'primary' : 'default'"
-                        :bordered="isFlowUuidSelected(f.flowUuid)" round :class="[
-                          'flow-dash__flow-tag',
-                          { 'flow-dash__flow-tag--active': isFlowUuidSelected(f.flowUuid) },
-                        ]" :disabled="loading" @click="toggleFlowSelection(f.flowUuid)">
-                        <span class="flow-dash__flow-tag-name">{{ flowPickerEmoji(idx) }} {{ f.flowName }}</span><span
-                          class="flow-dash__flow-tag-counts"
-                        >{{ flowPickerTagCountsSuffix(f) }}</span>
-                      </NTag>
-                    </template>
-                    {{ flowPickerTagTooltip(f, isFlowUuidSelected(f.flowUuid)) }}
-                  </NTooltip>
-                </div>
+                <EntityTagPicker
+                  v-model:model-value="selectedFlowUuids"
+                  :items="flowPickerItems"
+                  :title="`${groupEntityTitle} (charts & matrix)`"
+                  :loading="loading"
+                  :badge-limit="25"
+                />
               </div>
             </NCard>
 
@@ -2996,59 +2979,6 @@ watch(statsWindowDays, (wd) => {
   justify-content: space-between;
   gap: 0.35rem 0.75rem;
   margin-bottom: 0.35rem;
-}
-
-.flow-dash .flow-dash__flow-tag-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.15rem;
-}
-
-.flow-dash .flow-dash__flow-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.flow-dash .flow-dash__flow-tag {
-  cursor: pointer;
-  user-select: none;
-  max-width: 100%;
-}
-
-.flow-dash .flow-dash__flow-tag:not(.flow-dash__flow-tag--active) {
-  opacity: 0.78;
-}
-
-.flow-dash .flow-dash__flow-tag--active {
-  opacity: 1;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22) inset;
-}
-
-.flow-dash .flow-dash__flow-tag .n-tag__content {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-  display: inline-flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 0 0.15em;
-}
-
-.flow-dash .flow-dash__flow-tag-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.flow-dash .flow-dash__flow-tag-counts {
-  flex: 0 0 auto;
-  font-size: 0.7rem;
-  font-weight: 600;
-  opacity: 0.82;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
 }
 
 .flow-dash .flow-dash__filters-dp {
