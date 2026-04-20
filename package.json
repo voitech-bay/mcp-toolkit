@@ -17,6 +17,7 @@
     "dev:api": "tsx src/api-server.ts",
     "dev:frontend": "cd frontend && npm run dev",
     "dev:client-frontend": "cd client_frontend && npm run dev",
+    "start:client-frontend": "cd client_frontend && npm run preview",
     "dev:enrichment-worker": "tsx src/workers/enrichment-worker.ts",
     "start:worker": "node dist/workers/enrichment-worker.js",
     "start": "node dist/api-server.js"
