@@ -34,4 +34,7 @@ export default defineConfig({
       },
     },
   },
+  preview: {
+    allowedHosts: ["voitech-client-portal.up.railway.app"],
+  },
 });
