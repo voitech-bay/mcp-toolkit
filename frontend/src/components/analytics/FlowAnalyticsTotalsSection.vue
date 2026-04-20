@@ -10,6 +10,7 @@ import type {
 type DeltaTag = { text: string; type: "default" | "success" | "error" } | null;
 
 defineProps<{
+  projectId: string | null;
   groupEntityPlural: string;
   groupEntityTitle: string;
   groupEntitySingular: string;
@@ -113,6 +114,7 @@ function formatInt(n: number): string {
       </NCard>
 
       <AnalyticsMetricMatrix
+        :project-id="projectId"
         section="performance"
         :flows="flows"
         :selected-flow-uuids="selectedFlowUuids"

@@ -39,6 +39,8 @@ import {
 import type { EChartsOption } from "echarts";
 import VChart from "vue-echarts";
 import EntityTagPicker from "./EntityTagPicker.vue";
+import worldGeoJson from "../../../../maps/world.json";
+import { trackAnalyticsEvent } from "../../lib/mixpanel-tracking";
 
 use([
   CanvasRenderer,
@@ -105,6 +107,9 @@ interface GeoFlowOption {
   conversations: number;
 }
 
+const UNKNOWN_COUNTRY_BUCKET = "Unknown country";
+const NOT_SET_COUNTRY_BUCKET = "Not set country";
+
 const FLOW_TAG_EMOJIS = [
   "📨",
   "📬",
@@ -153,11 +158,8 @@ async function ensureWorldMap(): Promise<void> {
   if (mapState.value === "ready" || mapState.value === "loading") return;
   mapState.value = "loading";
   try {
-    const r = await fetch("/maps/world.json", { cache: "force-cache" });
-    if (!r.ok) throw new Error(`status ${r.status}`);
-    const geo = (await r.json()) as unknown;
     if (!worldMapRegistered) {
-      registerMap("world", geo as Parameters<typeof registerMap>[1]);
+      registerMap("world", worldGeoJson as Parameters<typeof registerMap>[1]);
       worldMapRegistered = true;
     }
     mapState.value = "ready";
@@ -222,12 +224,48 @@ watch(
   () => void loadData()
 );
 
+watch(scanLimit, (limit) => {
+  if (!props.projectId) return;
+  trackAnalyticsEvent("analytics_geo_change_recent_conversations_limit", {
+    projectId: props.projectId,
+    tab: "geo",
+    limit,
+  });
+});
+
+watch(selectedFlowUuids, (selected) => {
+  if (!props.projectId) return;
+  trackAnalyticsEvent("analytics_geo_change_flows_filter", {
+    projectId: props.projectId,
+    tab: "geo",
+    selectedFlowUuids: [...selected],
+    selectedFlowsCount: selected.length,
+  });
+});
+
+watch([topCountriesLimit, topCountriesSortKey, topCountriesSortDir], ([limit, sortKey, sortDir]) => {
+  if (!props.projectId) return;
+  trackAnalyticsEvent("analytics_geo_change_top_countries_filters", {
+    projectId: props.projectId,
+    tab: "geo",
+    topCountriesLimit: Number(limit),
+    sortBy: sortKey,
+    sortDirection: sortDir,
+  });
+});
+
 const mappedRows = computed((): GeoCountryRow[] =>
-  (data.value?.byCountry ?? []).filter((r) => r.country !== "Unknown")
+  (data.value?.byCountry ?? []).filter(
+    (r) => r.country !== UNKNOWN_COUNTRY_BUCKET && r.country !== NOT_SET_COUNTRY_BUCKET
+  )
 );
 
-const unknownRow = computed((): GeoCountryRow | null =>
-  (data.value?.byCountry ?? []).find((r) => r.country === "Unknown") ?? null
+const unknownCountryRow = computed((): GeoCountryRow | null =>
+  (data.value?.byCountry ?? []).find((r) => r.country === UNKNOWN_COUNTRY_BUCKET) ?? null
+);
+
+const notSetCountryRow = computed((): GeoCountryRow | null =>
+  (data.value?.byCountry ?? []).find((r) => r.country === NOT_SET_COUNTRY_BUCKET) ?? null
 );
 
 const topCountriesLimitClamped = computed(() =>
@@ -451,6 +489,9 @@ const sankeyOption = computed((): EChartsOption | null => {
       .slice(0, sankeyTopCountriesClamped.value)
       .map(([name]) => name)
   );
+  // Always keep explicit unknown/not-set buckets visible when present.
+  if (countryTotals.has(UNKNOWN_COUNTRY_BUCKET)) topCountries.add(UNKNOWN_COUNTRY_BUCKET);
+  if (countryTotals.has(NOT_SET_COUNTRY_BUCKET)) topCountries.add(NOT_SET_COUNTRY_BUCKET);
 
   const flowPrefix = "flow:";
   const countryPrefix = "country:";
@@ -586,10 +627,16 @@ const unknownCountriesSummaryText = computed(() => {
   return `${list.length} countries not found. Countries: ${names}`;
 });
 
-const unknownContactsSummaryText = computed(() => {
-  const contacts = unknownRow.value?.contacts ?? 0;
+const unknownCountryContactsSummaryText = computed(() => {
+  const contacts = unknownCountryRow.value?.contacts ?? 0;
   const verb = contacts === 1 ? "has" : "have";
-  return `${contacts} contacts ${verb} no country in data`;
+  return `${contacts} contacts ${verb} unparseable country in data`;
+});
+
+const notSetCountryContactsSummaryText = computed(() => {
+  const contacts = notSetCountryRow.value?.contacts ?? 0;
+  const verb = contacts === 1 ? "has" : "have";
+  return `${contacts} contacts ${verb} no location/country set`;
 });
 </script>
 
@@ -634,15 +681,33 @@ const unknownContactsSummaryText = computed(() => {
               :badge-limit="25"
               class="cg-insights__flow-tags-wrap"
             />
-            <div v-if="unknownRow && unknownRow.conversations > 0" class="cg-insights__unknown">
-              <NTag type="warning" size="small" :bordered="false">Unknown</NTag>
+            <div
+              v-if="(unknownCountryRow && unknownCountryRow.conversations > 0) || (notSetCountryRow && notSetCountryRow.conversations > 0)"
+              class="cg-insights__unknown"
+            >
+              <NTag
+                v-if="unknownCountryRow && unknownCountryRow.conversations > 0"
+                type="warning"
+                size="small"
+                :bordered="false"
+              >Unknown country</NTag>
+              <NTag
+                v-if="notSetCountryRow && notSetCountryRow.conversations > 0"
+                type="info"
+                size="small"
+                :bordered="false"
+              >Not set country</NTag>
               <div class="cg-insights__unknown-lines">
-                <NText depth="3">
-                  {{ unknownRow.conversations }} conversations have an unparseable or missing
+                <NText depth="3" v-if="unknownCountryRow && unknownCountryRow.conversations > 0">
+                  {{ unknownCountryRow.conversations }} conversations have an unparseable country from
                   <code>location</code>.
                 </NText>
-                <NText depth="3" v-if="unknownCountriesSummaryText">{{ unknownCountriesSummaryText }}</NText>
-                <NText depth="3">{{ unknownContactsSummaryText }}</NText>
+                <NText depth="3" v-if="unknownCountryRow && unknownCountryRow.conversations > 0 && unknownCountriesSummaryText">{{ unknownCountriesSummaryText }}</NText>
+                <NText depth="3" v-if="unknownCountryRow && unknownCountryRow.conversations > 0">{{ unknownCountryContactsSummaryText }}</NText>
+                <NText depth="3" v-if="notSetCountryRow && notSetCountryRow.conversations > 0">
+                  {{ notSetCountryRow.conversations }} conversations have no <code>location/country</code> set.
+                </NText>
+                <NText depth="3" v-if="notSetCountryRow && notSetCountryRow.conversations > 0">{{ notSetCountryContactsSummaryText }}</NText>
               </div>
             </div>
             <div

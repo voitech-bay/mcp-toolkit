@@ -27,6 +27,7 @@ import {
 } from "echarts/components";
 import type { EChartsOption } from "echarts";
 import VChart from "vue-echarts";
+import { trackAnalyticsEvent } from "../../lib/mixpanel-tracking";
 
 use([CanvasRenderer, BarChart, LineChart, GridComponent, TooltipComponent, LegendComponent]);
 
@@ -56,6 +57,7 @@ interface RankedFlow extends AnalyticsMatrixFlowRow {
 }
 
 const props = defineProps<{
+  projectId: string | null;
   /** Rankings tab card vs Totals tab baseline matrix card. */
   section: "rankings" | "performance";
   flows: AnalyticsMatrixFlowRow[];
@@ -523,12 +525,27 @@ function toggleMetricRow(key: string, columnFlows: RankedFlow[], tableId: Metric
   selectedMetricKeysByTable.value = { ...selectedMetricKeysByTable.value, [tableId]: next };
   chartColumnFlows.value = columnFlows;
   chartSourceTable.value = tableId;
+  if (!props.projectId) return;
+  trackAnalyticsEvent("analytics_select_chart_metrics", {
+    projectId: props.projectId,
+    section: props.section,
+    tableId,
+    metricKey: key,
+    selectedMetricKeys: [...next],
+    selectedFlowUuids: columnFlows.map((f) => f.flowUuid),
+    selectedFlowNames: columnFlows.map((f) => f.flowName),
+  });
 }
 
 function clearMetricSelection() {
   selectedMetricKeysByTable.value = emptyMetricSelections();
   chartColumnFlows.value = [];
   chartSourceTable.value = defaultChartSourceTable();
+  if (!props.projectId) return;
+  trackAnalyticsEvent("analytics_clear_chart_metrics", {
+    projectId: props.projectId,
+    section: props.section,
+  });
 }
 
 function matrixRowClassNameForTable(tableId: MetricMatrixTableId) {
@@ -720,6 +737,18 @@ const matrixBarChartOption = computed((): EChartsOption => {
 
 function openMetricChartDrawer() {
   if (chartActiveKeys.value.length === 0 || chartColumnFlows.value.length === 0) return;
+  if (props.projectId) {
+    trackAnalyticsEvent("analytics_generate_chart_from_table", {
+      projectId: props.projectId,
+      section: props.section,
+      tableId: chartSourceTable.value,
+      selectedMetricKeys: [...chartActiveKeys.value],
+      selectedMetricLabels: selectedRowDefs.value.map((r) => r.label),
+      selectedFlowUuids: chartColumnFlows.value.map((f) => f.flowUuid),
+      selectedFlowNames: chartColumnFlows.value.map((f) => f.flowName),
+      baselineFlowUuid: baselineFlowUuid.value,
+    });
+  }
   chartDrawerOpen.value = true;
 }
 
@@ -741,6 +770,25 @@ watch(
   },
   { deep: true }
 );
+
+watch(rankSortMetric, (metric) => {
+  if (!props.projectId) return;
+  trackAnalyticsEvent("analytics_change_rank_tables_by_filter", {
+    projectId: props.projectId,
+    section: props.section,
+    metric,
+  });
+});
+
+watch(baselineFlowUuid, (baseline) => {
+  if (!props.projectId || props.section !== "performance") return;
+  trackAnalyticsEvent("analytics_change_selected_flows_vs_baseline", {
+    projectId: props.projectId,
+    section: props.section,
+    baselineFlowUuid: baseline,
+    selectedFlowUuids: [...props.selectedFlowUuids],
+  });
+});
 </script>
 
 <template>

@@ -9,6 +9,7 @@ const dateRange = defineModel<[number, number] | null>("dateRange", { required: 
 const statsWindowDays = defineModel<number>("statsWindowDays", { required: true });
 
 const props = defineProps<{
+  projectId: string | null;
   flows: FlowFunnelRow[];
   statsWindowOptions: SelectOption[];
   groupEntityTitle: string;
@@ -60,6 +61,7 @@ const allEntityUuids = computed(() => props.flows.map((f) => f.flowUuid));
     <NSpin :show="collectingDays || loading">
       <template v-if="flows.length > 0">
         <AnalyticsMetricMatrix
+          :project-id="projectId"
           section="rankings"
           :flows="flows"
           :selected-flow-uuids="allEntityUuids"

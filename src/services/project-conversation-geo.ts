@@ -58,6 +58,9 @@ export interface ProjectConversationGeoResult {
   error: string | null;
 }
 
+const UNKNOWN_COUNTRY_BUCKET = "Unknown country";
+const NOT_SET_COUNTRY_BUCKET = "Not set country";
+
 interface CountryAlias {
   name: string;
   iso2: string | null;
@@ -512,17 +515,22 @@ export async function getProjectConversationGeoAggregates(
       continue;
     }
     const rawLocation = lead ? locationByLead.get(lead) ?? null : null;
-    const country = extractCountryFromLocation(rawLocation);
-    if (!country && rawLocation && unknownSamples.length < 20 && !unknownSamples.includes(rawLocation)) {
+    const locationMissing = typeof rawLocation !== "string" || rawLocation.trim() === "";
+    const country = locationMissing ? null : extractCountryFromLocation(rawLocation);
+    if (!country && !locationMissing && rawLocation && unknownSamples.length < 20 && !unknownSamples.includes(rawLocation)) {
       unknownSamples.push(rawLocation);
     }
-    if (!country) {
+    if (!country && !locationMissing) {
       const token = extractUnknownCountryCandidate(rawLocation);
       if (token) {
         unknownCandidateCounts.set(token, (unknownCandidateCounts.get(token) ?? 0) + 1);
       }
     }
-    const key = country ? country.name : "Unknown";
+    const key = country
+      ? country.name
+      : locationMissing
+        ? NOT_SET_COUNTRY_BUCKET
+        : UNKNOWN_COUNTRY_BUCKET;
     const iso2 = country ? country.iso2 : null;
 
     let bucket = byCountry.get(key);
@@ -590,7 +598,9 @@ export async function getProjectConversationGeoAggregates(
   }
   rows.sort((a, b) => b.conversations - a.conversations);
 
-  const knownCountryRows = rows.filter((r) => r.country !== "Unknown");
+  const knownCountryRows = rows.filter(
+    (r) => r.country !== UNKNOWN_COUNTRY_BUCKET && r.country !== NOT_SET_COUNTRY_BUCKET
+  );
   const unknownCountryCandidates = [...unknownCandidateCounts.entries()]
     .map(([token, count]) => ({ token, count }))
     .sort((a, b) => b.count - a.count || a.token.localeCompare(b.token))

@@ -56,6 +56,7 @@ import {
   type DailyHeatmapMetricId,
 } from "../components/analytics/flowAnalyticsDailyCharts.js";
 import { useProjectStore } from "../stores/project";
+import { trackAnalyticsEvent } from "../lib/mixpanel-tracking";
 
 type FlowFunnelRowUi = FlowFunnelRow & {
   pipelineStageBreakdown?: Array<{
@@ -85,6 +86,17 @@ const chartUpdateOptions = { notMerge: true as const };
 
 const projectStore = useProjectStore();
 const isDark = useDark();
+
+function normalizeProjectId(raw: unknown): string | null {
+  if (typeof raw === "string") return raw.length > 0 ? raw : null;
+  if (raw && typeof raw === "object" && "value" in raw) {
+    const maybeValue = (raw as { value?: unknown }).value;
+    return typeof maybeValue === "string" && maybeValue.length > 0 ? maybeValue : null;
+  }
+  return null;
+}
+
+const selectedProjectId = computed(() => normalizeProjectId(projectStore.selectedProjectId));
 
 const analyticsMainTab = ref<"rankings" | "funnelsDaily" | "geo">("rankings");
 
@@ -159,6 +171,11 @@ const selectedFlowUuids = ref<string[]>([]);
 /** Naive UI daterange: [startMs, endMs] */
 const dateRange = ref<[number, number] | null>(null);
 
+function isoDateFromTs(ts: number | null | undefined): string | null {
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return null;
+  return tsToYmdLocal(ts);
+}
+
 function compareFlowRowsByConnectionsSentDesc(
   a: FlowFunnelRowUi,
   b: FlowFunnelRowUi
@@ -208,6 +225,74 @@ watch(
   },
   { deep: true }
 );
+
+watch(
+  analyticsMainTab,
+  (tab, prev) => {
+    const projectId = selectedProjectId.value;
+    if (!projectId) return;
+    trackAnalyticsEvent("analytics_active_tab", {
+      projectId,
+      tab,
+      previousTab: prev ?? null,
+      action: prev == null ? "initial" : "change",
+    });
+    if (prev != null && prev !== tab) {
+      trackAnalyticsEvent("analytics_change_tab", {
+        projectId,
+        tab,
+        previousTab: prev,
+      });
+    }
+  },
+  { immediate: true }
+);
+
+watch(selectedFlowUuids, (selected) => {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  trackAnalyticsEvent("analytics_change_flows_filter", {
+    projectId,
+    tab: analyticsMainTab.value,
+    selectedFlowUuids: [...selected],
+    selectedFlowsCount: selected.length,
+    groupBy: analyticsGroupBy.value,
+  });
+});
+
+watch(dateRange, (next) => {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  trackAnalyticsEvent("analytics_change_date_range", {
+    projectId,
+    tab: analyticsMainTab.value,
+    rangeFrom: isoDateFromTs(next?.[0]),
+    rangeTo: isoDateFromTs(next?.[1]),
+    statsWindowDays: Number(statsWindowDays.value),
+  });
+});
+
+watch(statsWindowDays, (windowDays) => {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  trackAnalyticsEvent("analytics_change_date_window", {
+    projectId,
+    tab: analyticsMainTab.value,
+    statsWindowDays: Number(windowDays),
+    rangeFrom: isoDateFromTs(dateRange.value?.[0]),
+    rangeTo: isoDateFromTs(dateRange.value?.[1]),
+  });
+});
+
+watch(analyticsGroupBy, (groupBy) => {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  trackAnalyticsEvent("analytics_change_group_by", {
+    projectId,
+    tab: analyticsMainTab.value,
+    groupBy,
+  });
+});
 
 const filteredFlows = computed(() =>
   flows.value.filter((f) => selectedFlowUuids.value.includes(f.flowUuid))
@@ -362,6 +447,27 @@ type PipelineStageOptionLite = { stageUuid: string; stageName: string; stageOrde
 const availablePipelineStages = ref<PipelineStageOptionLite[]>([]);
 const selectedPipelineStageUuids = ref<string[]>([]);
 const pipelineStagePositions = ref<Record<string, number>>({});
+watch(funnelSankeyMode, (mode) => {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  trackAnalyticsEvent("analytics_change_funnel_alluvial_type", {
+    projectId,
+    tab: analyticsMainTab.value,
+    mode,
+    groupBy: analyticsGroupBy.value,
+  });
+});
+watch(selectedPipelineStageUuids, (stageUuids) => {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  trackAnalyticsEvent("analytics_change_funnel_pipeline_stages", {
+    projectId,
+    tab: analyticsMainTab.value,
+    stageUuids: [...stageUuids],
+    stageCount: stageUuids.length,
+    groupBy: analyticsGroupBy.value,
+  });
+});
 const pipelineStageNameByUuid = computed(() => {
   const out: Record<string, string> = {};
   for (const s of availablePipelineStages.value) out[s.stageUuid] = s.stageName;
@@ -1904,7 +2010,7 @@ const dailyHeatmapMetric = ref<DailyHeatmapMetricId>("connectionSent");
 
 async function loadDailyMetrics() {
   if (analyticsMainTab.value !== "funnelsDaily") return;
-  const pid = projectStore.selectedProjectId;
+  const pid = selectedProjectId.value;
   const dr = dateRange.value;
   if (!pid || !dr || dr.length !== 2) {
     dailySeries.value = [];
@@ -2417,7 +2523,7 @@ const dailyMessagesSentOption = computed((): EChartsOption => {
 watch(
   () => [
     analyticsMainTab.value,
-    projectStore.selectedProjectId,
+    selectedProjectId.value,
     dateRange.value?.[0],
     dateRange.value?.[1],
     selectedFlowUuids.value.join("|"),
@@ -2570,7 +2676,7 @@ function scheduleAnalyticsLoad(): void {
   }
   analyticsReloadTimer = setTimeout(() => {
     analyticsReloadTimer = null;
-    const pid = projectStore.selectedProjectId;
+    const pid = selectedProjectId.value;
     const val = dateRange.value;
     if (!pid || !val || val.length !== 2) return;
     void loadAnalytics(pid, tsToYmdLocal(val[0]), tsToYmdLocal(val[1]));
@@ -2578,7 +2684,7 @@ function scheduleAnalyticsLoad(): void {
 }
 
 watch(
-  () => projectStore.selectedProjectId,
+  () => selectedProjectId.value,
   async (projectId) => {
     loadError.value = "";
     warnings.value = [];
@@ -2629,7 +2735,7 @@ watch(
 watch(
   dateRange,
   (val) => {
-    const pid = projectStore.selectedProjectId;
+    const pid = selectedProjectId.value;
     if (!pid || !val || val.length !== 2) {
       if (!val) flows.value = [];
       return;
@@ -2640,7 +2746,7 @@ watch(
 );
 
 watch(analyticsGroupBy, () => {
-  const pid = projectStore.selectedProjectId;
+  const pid = selectedProjectId.value;
   const val = dateRange.value;
   if (!pid || !val || val.length !== 2) return;
   scheduleAnalyticsLoad();
@@ -2667,7 +2773,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="flow-dash">
-    <NAlert v-if="!projectStore.selectedProjectId" type="info" title="Select a project" class="flow-dash__alert">
+    <NAlert v-if="!selectedProjectId" type="info" title="Select a project" class="flow-dash__alert">
       Choose a project in the header to load funnel data.
     </NAlert>
     <template v-else>
@@ -2683,6 +2789,7 @@ onBeforeUnmount(() => {
         <NTabs v-model:value="analyticsMainTab" type="segment" size="medium" class="flow-dash__main-tabs">
           <NTabPane name="rankings" tab="Top & least">
             <FlowAnalyticsRankingsPanel
+              :project-id="selectedProjectId"
               v-model:date-range="dateRange"
               v-model:stats-window-days="statsWindowDays"
               :stats-window-options="statsWindowOptions"
@@ -2749,6 +2856,7 @@ onBeforeUnmount(() => {
 
             <template v-else-if="flows.length > 0">
               <FlowAnalyticsTotalsSection
+                :project-id="selectedProjectId"
                 :group-entity-plural="groupEntityPlural"
                 :group-entity-title="groupEntityTitle"
                 :group-entity-singular="groupEntitySingular"
@@ -2807,7 +2915,7 @@ onBeforeUnmount(() => {
           </NTabPane>
 
           <NTabPane name="geo" tab="Geo">
-            <FlowAnalyticsGeoPanel :project-id="projectStore.selectedProjectId" />
+            <FlowAnalyticsGeoPanel :project-id="selectedProjectId" />
           </NTabPane>
         </NTabs>
       </NSpin>
