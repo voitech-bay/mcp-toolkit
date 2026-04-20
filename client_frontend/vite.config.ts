@@ -10,6 +10,7 @@ const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${
 export default defineConfig({
   plugins: [vue()],
   resolve: {
+    dedupe: ["vue", "pinia", "naive-ui", "@vueuse/core", "vue-router", "vue-echarts", "echarts"],
     alias: {
       "@": resolve(__dirname, "src"),
       "@shared": resolve(__dirname, "../frontend/src"),
