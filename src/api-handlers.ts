@@ -2803,7 +2803,7 @@ export async function handleGetCompanyHypotheses(
   res.end(JSON.stringify({ data: result.data, projectCompanyId: result.projectCompanyId }));
 }
 
-/** GET /api/contacts/by-list?listUuid=&projectId= — all Contacts on a list (`list_uuid`). projectId optional. */
+/** GET /api/contacts/by-list?listUuid=&projectId= — all Contacts on a list (`list_uuid`). projectId optional. Each row includes company `domain`, `company_description` (from companies.about), `company_employees` (from companies.employees_range) when company_uuid resolves. */
 export async function handleGetContactsByList(
   req: IncomingMessage,
   res: ServerResponse
