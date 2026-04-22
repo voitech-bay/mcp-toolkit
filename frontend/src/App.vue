@@ -11,6 +11,9 @@ import {
   NCard,
   NDropdown,
   NAlert,
+  NModal,
+  NInput,
+  NText,
 } from "naive-ui";
 import type { SelectOption, DropdownOption } from "naive-ui";
 import { darkTheme, lightTheme } from "naive-ui";
@@ -33,6 +36,7 @@ import {
   Link2Icon,  
   BarChart3Icon,
   CopyIcon,
+  LayersIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 
@@ -48,6 +52,8 @@ const isHome = computed(() => route.path === "/");
 const isFlowDashboard = computed(
   () => route.path === "/flow-dashboard" || route.path === "/analytics"
 );
+
+const isDifyRoute = computed(() => route.path.startsWith("/dify"));
 
 /** Grouped routes — highlight parent when any child is active. */
 const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
@@ -242,6 +248,7 @@ interface HeaderDashboardPayload {
   lastSyncFinishedAt: string | null;
   firstAnalyticsDate: string | null;
   lastAnalyticsDate: string | null;
+  imageUrl: string | null;
 }
 
 const headerDashboard = ref<HeaderDashboardPayload | null>(null);
@@ -261,10 +268,14 @@ async function loadHeaderDashboard() {
       headerDashboard.value = null;
       return;
     }
+    const rawImg = data.imageUrl;
+    const imageUrl =
+      typeof rawImg === "string" && rawImg.trim().length > 0 ? rawImg.trim() : null;
     headerDashboard.value = {
       lastSyncFinishedAt: data.lastSyncFinishedAt ?? null,
       firstAnalyticsDate: data.firstAnalyticsDate ?? null,
       lastAnalyticsDate: data.lastAnalyticsDate ?? null,
+      imageUrl,
     };
   } catch {
     headerDashboard.value = null;
@@ -280,6 +291,109 @@ watch(
   },
   { immediate: true }
 );
+
+const headerImageBroken = ref(false);
+watch(
+  () => headerDashboard.value?.imageUrl,
+  () => {
+    headerImageBroken.value = false;
+  }
+);
+
+const headerBrandImageUrl = computed(() => {
+  const u = headerDashboard.value?.imageUrl;
+  if (typeof u !== "string" || u.length === 0) return null;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === "https:" || parsed.protocol === "http:" ? u : null;
+  } catch {
+    return null;
+  }
+});
+
+const imageModalOpen = ref(false);
+const imageUrlDraft = ref("");
+const imageSaveLoading = ref(false);
+const imageSaveError = ref("");
+
+function openHeaderImageModal() {
+  if (!selectedProjectId.value) return;
+  imageSaveError.value = "";
+  const current =
+    headerDashboard.value?.imageUrl?.trim() ??
+    projectStore.selectedProject?.image_url?.trim() ??
+    "";
+  imageUrlDraft.value = current;
+  imageModalOpen.value = true;
+}
+
+async function saveHeaderImage() {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  const trimmed = imageUrlDraft.value.trim();
+  if (trimmed.length > 0) {
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+        imageSaveError.value = "URL must start with http:// or https://";
+        return;
+      }
+    } catch {
+      imageSaveError.value = "Enter a valid URL";
+      return;
+    }
+  }
+  imageSaveLoading.value = true;
+  imageSaveError.value = "";
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/image-url`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_url: trimmed.length > 0 ? trimmed : null }),
+    });
+    const j = (await r.json()) as { error?: string };
+    if (!r.ok) {
+      imageSaveError.value = j.error ?? "Save failed";
+      return;
+    }
+    imageModalOpen.value = false;
+    await projectStore.loadProjects();
+    await loadHeaderDashboard();
+    headerImageBroken.value = false;
+  } catch {
+    imageSaveError.value = "Save failed";
+  } finally {
+    imageSaveLoading.value = false;
+  }
+}
+
+async function removeHeaderImage() {
+  const projectId = selectedProjectId.value;
+  if (!projectId) return;
+  imageSaveLoading.value = true;
+  imageSaveError.value = "";
+  try {
+    const r = await fetch(`/api/projects/${encodeURIComponent(projectId)}/image-url`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image_url: null }),
+    });
+    const j = (await r.json()) as { error?: string };
+    if (!r.ok) {
+      imageSaveError.value = j.error ?? "Remove failed";
+      return;
+    }
+    imageModalOpen.value = false;
+    imageUrlDraft.value = "";
+    await projectStore.loadProjects();
+    await loadHeaderDashboard();
+    headerImageBroken.value = false;
+  } catch {
+    imageSaveError.value = "Remove failed";
+  } finally {
+    imageSaveLoading.value = false;
+  }
+}
 
 function formatHeaderDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -323,6 +437,26 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
               <NSelect v-model:value="selectedProjectId" :options="projectOptions" :loading="projectStore.loading"
                 :render-label="renderProjectLabel" placeholder="Select project…" clearable size="small"
                 style="width: 220px" />
+              <template v-if="selectedProjectId">
+                <button
+                  v-if="headerBrandImageUrl && !headerImageBroken"
+                  type="button"
+                  class="header-brand-img-btn"
+                  title="Change header image"
+                  @click="openHeaderImageModal"
+                >
+                  <img
+                    :src="headerBrandImageUrl"
+                    alt=""
+                    class="header-brand-img"
+                    referrerpolicy="no-referrer"
+                    @error="headerImageBroken = true"
+                  />
+                </button>
+                <NButton v-else size="small" secondary @click="openHeaderImageModal">
+                  Set header image
+                </NButton>
+              </template>
               <NSpace
                 v-if="selectedProjectId"
                 size="small"
@@ -378,6 +512,16 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   Analytics
                 </NButton>
 
+                <NButton
+                  quaternary
+                  :type="isDifyRoute ? 'primary' : undefined"
+                  size="small"
+                  @click="router.push('/dify/batches')"
+                >
+                  <LayersIcon :size="14" style="margin-right: 4px" />
+                  Dify batches
+                </NButton>
+
                 <NDropdown trigger="hover" placement="bottom-start" :options="dataMenuOptions" :show-arrow="true"
                   @select="onNavSelect">
                   <NButton quaternary size="small" :type="isDataGroupActive ? 'primary' : undefined"
@@ -414,8 +558,44 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
           </header>
         </NCard>
 
+        <NModal
+          v-model:show="imageModalOpen"
+          preset="card"
+          title="Project header image"
+          :style="{ width: 'min(520px, 92vw)' }"
+          :mask-closable="false"
+        >
+          <NText depth="3" style="display: block; margin-bottom: 10px">
+            Shown next to the project picker and on the client analytics portal. Use a direct image URL
+            (https recommended).
+          </NText>
+          <NInput
+            v-model:value="imageUrlDraft"
+            type="text"
+            placeholder="https://example.com/logo.png"
+            clearable
+          />
+          <NAlert v-if="imageSaveError" type="error" style="margin-top: 12px" :show-icon="false">
+            {{ imageSaveError }}
+          </NAlert>
+          <template #footer>
+            <NSpace justify="end" style="width: 100%">
+              <NButton quaternary :disabled="imageSaveLoading" @click="imageModalOpen = false">Cancel</NButton>
+              <NButton
+                quaternary
+                type="error"
+                :disabled="imageSaveLoading || !headerBrandImageUrl"
+                @click="removeHeaderImage"
+              >
+                Remove
+              </NButton>
+              <NButton type="primary" :loading="imageSaveLoading" @click="saveHeaderImage">Save</NButton>
+            </NSpace>
+          </template>
+        </NModal>
+
         <main class="main">
-          <template v-if="!projectStore.selectedProjectId">
+          <template v-if="!projectStore.selectedProjectId && !isDifyRoute">
             <div class="no-project-orbit-wrap" :style="noProjectOrbitStageStyle">
               <img
                 class="no-project-orbit-img"
@@ -429,7 +609,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
             </NAlert>
           </template>
           <template v-else>
-            <div v-if="isFlowDashboard" class="main-portal-cta">
+            <div v-if="isFlowDashboard && projectStore.selectedProjectId" class="main-portal-cta">
               <NButton
                 type="primary"
                 size="small"
@@ -482,6 +662,29 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
   gap: 0.5rem;
   flex-wrap: wrap;
   min-width: 0;
+}
+
+.header-brand-img-btn {
+  border: none;
+  padding: 0;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  line-height: 0;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.header-brand-img-btn:focus-visible {
+  outline: 2px solid var(--n-color-target);
+  outline-offset: 2px;
+}
+
+.header-brand-img {
+  display: block;
+  max-height: 48px;
+  width: auto;
+  height: auto;
 }
 
 .header-dash-btns {

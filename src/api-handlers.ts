@@ -17,6 +17,7 @@ import {
   getProjects,
   getProjectById,
   updateProjectCredentials,
+  updateProjectImageUrl,
   getProjectEntityCounts,
   getProjectLatestRows,
   getActiveSyncRun,
@@ -84,6 +85,9 @@ import {
   PROJECT_COMPANIES_TABLE,
   COMPANIES_TABLE,
   CONTACTS_TABLE,
+  getContactsByUuidsForProject,
+  getCompaniesByIdsForProject,
+  getContactsForListUuid,
 } from "./services/supabase.js";
 import {
   getProjectAnalyticsDashboard,
@@ -154,6 +158,17 @@ import {
   buildContextAgentJob,
   isTranscriptReadyEvent,
 } from "./services/fireflies-webhook.js";
+import {
+  listDifyApiKeysFromEnv,
+  difyFetchAppInfo,
+  difyFetchAllWorkflowLogs,
+  normalizeDifyRunRow,
+  getDifyLogMaxPages,
+  difyFetchWorkflowRunDetail,
+  difyFetchManyRunDetails,
+  getDifyRunDetailConcurrency,
+  getDifyRunDetailBatchMax,
+} from "./services/dify.js";
 import {
   cancelBatchWorkerJob,
   createBatchWorkerJobFromEnrichment,
@@ -1897,6 +1912,69 @@ export async function handleUpdateProjectCredentials(
   res.end(JSON.stringify({ ok: true }));
 }
 
+function isValidProjectImageHttpUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" || u.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/** PUT /api/projects/:id/image-url — JSON body `{ image_url: string | null }` (empty string clears). */
+export async function handleUpdateProjectImageUrl(
+  req: IncomingMessage,
+  res: ServerResponse,
+  projectId: string
+): Promise<void> {
+  if (req.method !== "PUT") {
+    res.writeHead(405, { Allow: "PUT" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const { data: project } = await getProjectById(client, projectId);
+  if (!project) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: `Project not found: ${projectId}` }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { image_url?: string | null } | undefined;
+  if (!body || !("image_url" in body)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body must include image_url (string or null)" }));
+    return;
+  }
+  const raw = body.image_url;
+  if (raw !== null && raw !== undefined && typeof raw !== "string") {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "image_url must be a string or null" }));
+    return;
+  }
+  const normalized =
+    raw === null || raw === undefined ? null : raw.trim().length === 0 ? null : raw.trim();
+  if (normalized !== null && !isValidProjectImageHttpUrl(normalized)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "image_url must be an http(s) URL or empty/null" }));
+    return;
+  }
+  const result = await updateProjectImageUrl(client, projectId, normalized);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true }));
+}
+
 export async function handleSourceApiCheck(
   req: IncomingMessage,
   res: ServerResponse
@@ -2723,6 +2801,42 @@ export async function handleGetCompanyHypotheses(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data, projectCompanyId: result.projectCompanyId }));
+}
+
+/** GET /api/contacts/by-list?listUuid=&projectId= — all Contacts on a list (`list_uuid`). projectId optional. */
+export async function handleGetContactsByList(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const listUuid = params.get("listUuid")?.trim();
+  if (!listUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: listUuid" }));
+    return;
+  }
+  const projectId = params.get("projectId")?.trim() ?? "";
+  const result = await getContactsForListUuid(client, listUuid, projectId || null);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
 }
 
 // ── Contacts by company ───────────────────────────────────────────────────────
@@ -4305,4 +4419,370 @@ export async function handleFirefliesWebhook(
       event: normalized.eventType,
     });
   }
+}
+
+/** GET /api/dify/workflows — list configured Dify apps (one API key per workflow app). */
+export async function handleGetDifyWorkflows(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const keys = listDifyApiKeysFromEnv();
+  if (!keys.length) {
+    res.writeHead(200);
+    res.end(
+      JSON.stringify({
+        workflows: [] as { id: string; name: string; mode: string | null; description: string | null; infoError: string | null }[],
+        error:
+          "No Dify keys configured. Set DIFY_API_KEY, or DIFY_API_KEYS (comma-separated), or DIFY_API_KEYS_JSON (JSON array of strings).",
+      })
+    );
+    return;
+  }
+
+  const workflows: {
+    id: string;
+    name: string;
+    mode: string | null;
+    description: string | null;
+    infoError: string | null;
+  }[] = [];
+
+  for (let i = 0; i < keys.length; i++) {
+    const { info, error } = await difyFetchAppInfo(keys[i]);
+    workflows.push({
+      id: String(i),
+      name: (info?.name && info.name.trim()) || `App ${i + 1}`,
+      mode: info?.mode ?? null,
+      description: info?.description?.trim() || null,
+      infoError: error ?? null,
+    });
+  }
+
+  res.writeHead(200);
+  res.end(JSON.stringify({ workflows }));
+}
+
+/** GET /api/dify/workflows/:workflowId/runs — paginated workflow logs for the app at that index. */
+export async function handleGetDifyWorkflowRuns(
+  req: IncomingMessage,
+  res: ServerResponse,
+  workflowId: string
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+
+  const idx = Number.parseInt(workflowId, 10);
+  if (!Number.isFinite(idx) || idx < 0) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Invalid workflow id" }));
+    return;
+  }
+
+  const keys = listDifyApiKeysFromEnv();
+  const apiKey = keys[idx];
+  if (!apiKey) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Workflow not found" }));
+    return;
+  }
+
+  const maxPages = getDifyLogMaxPages();
+  const { items, pagesFetched, truncated, totalReported, error } = await difyFetchAllWorkflowLogs(
+    apiKey,
+    maxPages
+  );
+
+  const runs = [];
+  for (const item of items) {
+    const row = normalizeDifyRunRow(item);
+    if (row) runs.push(row);
+  }
+
+  runs.sort((a, b) => a.createdAtMs - b.createdAtMs);
+
+  if (error && runs.length === 0) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error, runs: [], pagesFetched, truncated, totalReported }));
+    return;
+  }
+
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      runs,
+      pagesFetched,
+      truncated,
+      totalReported,
+      ...(error ? { warning: error } : {}),
+    })
+  );
+}
+
+function difyApiKeyForWorkflowIndex(workflowId: string): { apiKey: string } | { error: string; status: number } {
+  const idx = Number.parseInt(workflowId, 10);
+  if (!Number.isFinite(idx) || idx < 0) {
+    return { error: "Invalid workflow id", status: 400 };
+  }
+  const keys = listDifyApiKeysFromEnv();
+  const apiKey = keys[idx];
+  if (!apiKey) {
+    return { error: "Workflow not found", status: 404 };
+  }
+  return { apiKey };
+}
+
+/** GET /api/dify/workflows/:workflowId/runs/:runId/detail */
+export async function handleGetDifyWorkflowRunDetail(
+  req: IncomingMessage,
+  res: ServerResponse,
+  workflowId: string,
+  runId: string
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+
+  const keyRes = difyApiKeyForWorkflowIndex(workflowId);
+  if ("error" in keyRes) {
+    res.writeHead(keyRes.status);
+    res.end(JSON.stringify({ error: keyRes.error }));
+    return;
+  }
+
+  const rid = decodeURIComponent(runId).trim();
+  if (!rid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing run id" }));
+    return;
+  }
+
+  const { ok, status, body, rawText } = await difyFetchWorkflowRunDetail(keyRes.apiKey, rid);
+  if (!ok || !body) {
+    const hint = rawText.length > 240 ? `${rawText.slice(0, 240)}…` : rawText;
+    res.writeHead(status >= 400 && status < 600 ? status : 502);
+    res.end(JSON.stringify({ error: hint || `Dify run detail failed (HTTP ${status})` }));
+    return;
+  }
+
+  const outputs = "outputs" in body ? body.outputs : null;
+  const inputs = "inputs" in body ? body.inputs : null;
+  const st = typeof body.status === "string" ? body.status : null;
+  const err = body.error != null ? String(body.error) : null;
+
+  res.writeHead(200);
+  res.end(JSON.stringify({ outputs, inputs, status: st, error: err }));
+}
+
+/** POST /api/dify/workflows/:workflowId/runs/batch-detail body: { runIds: string[] } */
+export async function handlePostDifyWorkflowRunsBatchDetail(
+  req: IncomingMessage,
+  res: ServerResponse,
+  workflowId: string
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+
+  const keyRes = difyApiKeyForWorkflowIndex(workflowId);
+  if ("error" in keyRes) {
+    res.writeHead(keyRes.status);
+    res.end(JSON.stringify({ error: keyRes.error }));
+    return;
+  }
+
+  const raw = await getRawBody(req);
+  let parsed: unknown;
+  try {
+    parsed = raw.trim() ? (JSON.parse(raw) as unknown) : null;
+  } catch {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Invalid JSON body" }));
+    return;
+  }
+
+  if (!isRecord(parsed) || !Array.isArray(parsed.runIds)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must be an object with runIds: string[]" }));
+    return;
+  }
+
+  const runIds = parsed.runIds
+    .map((x) => (typeof x === "string" ? x.trim() : ""))
+    .filter(Boolean);
+
+  const max = getDifyRunDetailBatchMax();
+  const capped = runIds.slice(0, max);
+  const truncated = runIds.length > capped.length;
+
+  const concurrency = getDifyRunDetailConcurrency();
+  const rows = await difyFetchManyRunDetails(keyRes.apiKey, capped, concurrency);
+
+  const results = rows.map((r) => {
+    if (r.ok) {
+      return {
+        runId: r.runId,
+        ok: true as const,
+        outputs: r.outputs,
+        inputs: r.inputs,
+        status: r.status,
+        error: r.error,
+      };
+    }
+    return {
+      runId: r.runId,
+      ok: false as const,
+      error: r.error ?? `HTTP ${r.httpStatus}`,
+      httpStatus: r.httpStatus,
+    };
+  });
+
+  res.writeHead(200);
+  res.end(JSON.stringify({ results, truncated, requested: runIds.length, fetched: capped.length }));
+}
+
+/** POST /api/dify/contacts-lookup body: { projectId, uuids?: string[], companyIds?: string[] } — Contacts + project companies. */
+export async function handlePostDifyContactsLookup(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+
+  const raw = await getRawBody(req);
+  let parsed: unknown;
+  try {
+    parsed = raw.trim() ? (JSON.parse(raw) as unknown) : null;
+  } catch {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Invalid JSON body" }));
+    return;
+  }
+
+  if (!isRecord(parsed)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must be a JSON object" }));
+    return;
+  }
+
+  const projectId =
+    typeof parsed.projectId === "string" ? parsed.projectId.trim() : "";
+  const uuidsRaw = Array.isArray(parsed.uuids) ? parsed.uuids : [];
+  const uuids = uuidsRaw
+    .map((x) => (typeof x === "string" ? x.trim() : ""))
+    .filter(Boolean);
+  const companyIdsRaw = Array.isArray(parsed.companyIds) ? parsed.companyIds : [];
+  const companyIds = companyIdsRaw
+    .map((x) => (typeof x === "string" ? x.trim() : ""))
+    .filter(Boolean);
+
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required" }));
+    return;
+  }
+  if (!uuids.length && !companyIds.length) {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "Provide non-empty uuids (contact lead UUIDs) and/or companyIds (companies.id).",
+      })
+    );
+    return;
+  }
+
+  const max = 300;
+  const cappedUuids = uuids.slice(0, max);
+  const cappedCompanyIds = companyIds.slice(0, max);
+  const truncatedContacts = uuids.length > cappedUuids.length;
+  const truncatedCompanies = companyIds.length > cappedCompanyIds.length;
+
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  const { data: proj, error: projErr } = await getProjectById(client, projectId);
+  if (projErr) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: projErr }));
+    return;
+  }
+  if (!proj) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Project not found" }));
+    return;
+  }
+
+  let contacts: Record<string, Record<string, unknown>> = {};
+  let companies: Record<string, Record<string, unknown>> = {};
+
+  if (cappedUuids.length > 0) {
+    const { contacts: cMap, error } = await getContactsByUuidsForProject(
+      client,
+      projectId,
+      cappedUuids
+    );
+    if (error) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error }));
+      return;
+    }
+    contacts = cMap;
+  }
+
+  if (cappedCompanyIds.length > 0) {
+    const { companies: coMap, error: coErr } = await getCompaniesByIdsForProject(
+      client,
+      projectId,
+      cappedCompanyIds
+    );
+    if (coErr) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: coErr }));
+      return;
+    }
+    companies = coMap;
+  }
+
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      contacts,
+      companies,
+      truncated: truncatedContacts || truncatedCompanies,
+      truncatedContacts,
+      truncatedCompanies,
+      requestedContacts: uuids.length,
+      requestedCompanies: companyIds.length,
+      fetchedContacts: cappedUuids.length,
+      fetchedCompanies: cappedCompanyIds.length,
+    })
+  );
 }

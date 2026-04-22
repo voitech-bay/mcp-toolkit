@@ -8,7 +8,7 @@ import { getSupabase, getProjects } from "../services/supabase.js";
 export function registerFindProjectsTool(server: McpServer): void {
   server.tool(
     "find_projects",
-    "List all projects in Supabase. Returns id, name, description, created_at, api_key_set, source_api_base_url. Use the returned id as projectId for other find_project_* tools.",
+    "List all projects in Supabase. Returns id, name, description, created_at, api_key_set, source_api_base_url, image_url. Use the returned id as projectId for other find_project_* tools.",
     {},
     async () => {
       const client = getSupabase();
@@ -41,6 +41,7 @@ export function registerFindProjectsTool(server: McpServer): void {
           created_at: p.created_at,
           api_key_set: p.api_key_set,
           source_api_base_url: p.source_api_base_url,
+          image_url: p.image_url,
         })),
       };
       return {

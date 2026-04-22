@@ -62,6 +62,7 @@ exports.parseCompanyTagsColumn = parseCompanyTagsColumn;
 exports.getProjects = getProjects;
 exports.getProjectById = getProjectById;
 exports.updateProjectCredentials = updateProjectCredentials;
+exports.updateProjectImageUrl = updateProjectImageUrl;
 exports.getProjectEntityCounts = getProjectEntityCounts;
 exports.getProjectLatestRows = getProjectLatestRows;
 exports.getActiveSyncRun = getActiveSyncRun;
@@ -149,6 +150,8 @@ function parseCompanyTagsColumn(raw) {
 // --- Projects (table: Projects) ---
 exports.PROJECTS_TABLE = "Projects";
 function toProjectSummary(row) {
+    var rawImage = row.image_url;
+    var image_url = typeof rawImage === "string" && rawImage.trim().length > 0 ? rawImage.trim() : null;
     return {
         id: row.id,
         name: row.name,
@@ -156,6 +159,7 @@ function toProjectSummary(row) {
         api_key_set: row.source_api_key != null && row.source_api_key.length > 0,
         source_api_base_url: row.source_api_base_url,
         created_at: row.created_at,
+        image_url: image_url,
     };
 }
 /**
@@ -226,6 +230,23 @@ function updateProjectCredentials(client, id, credentials) {
                             .from(exports.PROJECTS_TABLE)
                             .update(update)
                             .eq("id", id)];
+                case 1:
+                    error = (_b.sent()).error;
+                    return [2 /*return*/, { error: (_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : null }];
+            }
+        });
+    });
+}
+function updateProjectImageUrl(client, id, imageUrl) {
+    return __awaiter(this, void 0, void 0, function () {
+        var error;
+        var _a;
+        return __generator(this, function (_b) {
+            switch (_b.label) {
+                case 0: return [4 /*yield*/, client
+                        .from(exports.PROJECTS_TABLE)
+                        .update({ image_url: imageUrl })
+                        .eq("id", id)];
                 case 1:
                     error = (_b.sent()).error;
                     return [2 /*return*/, { error: (_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : null }];

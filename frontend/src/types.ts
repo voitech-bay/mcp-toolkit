@@ -81,6 +81,8 @@ export interface Project {
   api_key_set: boolean;
   source_api_base_url: string | null;
   created_at: string;
+  /** From `Projects.image_url`; null or omitted when unset. */
+  image_url?: string | null;
 }
 
 export interface SyncLogEntry {

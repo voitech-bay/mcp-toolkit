@@ -45,6 +45,8 @@ export interface ProjectRow {
   description: string | null;
   source_api_key: string | null;
   source_api_base_url: string | null;
+  /** Present after migration `20260420120000_projects_image_url`; optional for older rows. */
+  image_url?: string | null;
 }
 
 /** Sanitised project returned by listing endpoints (hides actual API key). */
@@ -55,9 +57,13 @@ export interface ProjectSummary {
   api_key_set: boolean;
   source_api_base_url: string | null;
   created_at: string;
+  image_url: string | null;
 }
 
 function toProjectSummary(row: ProjectRow): ProjectSummary {
+  const rawImage = row.image_url;
+  const image_url =
+    typeof rawImage === "string" && rawImage.trim().length > 0 ? rawImage.trim() : null;
   return {
     id: row.id,
     name: row.name,
@@ -65,6 +71,7 @@ function toProjectSummary(row: ProjectRow): ProjectSummary {
     api_key_set: row.source_api_key != null && row.source_api_key.length > 0,
     source_api_base_url: row.source_api_base_url,
     created_at: row.created_at,
+    image_url,
   };
 }
 
@@ -116,6 +123,19 @@ export async function updateProjectCredentials(
   const { error } = await client
     .from(PROJECTS_TABLE)
     .update(update)
+    .eq("id", id);
+  return { error: error?.message ?? null };
+}
+
+/** Set or clear `Projects.image_url` (public branding URL). */
+export async function updateProjectImageUrl(
+  client: SupabaseClient,
+  id: string,
+  imageUrl: string | null
+): Promise<{ error: string | null }> {
+  const { error } = await client
+    .from(PROJECTS_TABLE)
+    .update({ image_url: imageUrl })
     .eq("id", id);
   return { error: error?.message ?? null };
 }
@@ -1639,6 +1659,37 @@ export async function getContacts(
 }
 
 /**
+ * All `Contacts` rows for a GetSales list (`list_uuid`), full columns (`select("*")`).
+ * Optional `projectId` scopes to that project. Paginates in 1000-row chunks.
+ */
+export async function getContactsForListUuid(
+  client: SupabaseClient,
+  listUuid: string,
+  projectId?: string | null
+): Promise<{ data: Record<string, unknown>[]; error: string | null }> {
+  const list = listUuid.trim();
+  if (!list) return { data: [], error: null };
+  const proj = projectId?.trim() ?? "";
+  const pageSize = 1000;
+  const all: Record<string, unknown>[] = [];
+  for (let offset = 0; ; offset += pageSize) {
+    let q = client
+      .from(CONTACTS_TABLE)
+      .select("*")
+      .eq("list_uuid", list)
+      .order("created_at", { ascending: false })
+      .order("uuid", { ascending: true });
+    if (proj) q = q.eq("project_id", proj);
+    const { data, error } = await q.range(offset, offset + pageSize - 1);
+    if (error) return { data: all, error: error.message };
+    const rows = (data ?? []) as Record<string, unknown>[];
+    all.push(...rows);
+    if (rows.length < pageSize) break;
+  }
+  return { data: all, error: null };
+}
+
+/**
  * Find contacts in a project. Non-empty filters are combined with AND.
  * Supply at least one of `nameLike`, `contactUuids`, or `companyNameLike`.
  */
@@ -1687,6 +1738,87 @@ export async function findContactsForProject(
   const { data, error } = await query;
   if (error) return { data: [], error: error.message };
   return { data: (data ?? []) as Array<Record<string, unknown>>, error: null };
+}
+
+/**
+ * Load Contacts rows for a project by uuid (same as GetSales lead_uuid / Contacts.uuid).
+ * Chunks `.in("uuid", …)` for large lists.
+ */
+export async function getContactsByUuidsForProject(
+  client: SupabaseClient,
+  projectId: string,
+  uuids: string[],
+  opts?: { chunkSize?: number }
+): Promise<{ contacts: Record<string, Record<string, unknown>>; error: string | null }> {
+  const chunkSize = Math.min(Math.max(opts?.chunkSize ?? 80, 1), 100);
+  const unique = [
+    ...new Set(
+      uuids
+        .map((u) => (typeof u === "string" ? u.trim() : ""))
+        .filter((u) => u.length > 0)
+    ),
+  ];
+  const out: Record<string, Record<string, unknown>> = {};
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const { data, error } = await client
+      .from(CONTACTS_TABLE)
+      .select(
+        "uuid, name, first_name, last_name, company_name, company_uuid, position, linkedin, work_email"
+      )
+      .eq("project_id", projectId)
+      .in("uuid", chunk);
+    if (error) return { contacts: out, error: error.message };
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const u = typeof row.uuid === "string" ? row.uuid : "";
+      if (u) out[u] = row;
+    }
+  }
+  return { contacts: out, error: null };
+}
+
+/**
+ * Load `companies` rows that are linked to the project via `project_companies`.
+ * `companyIds` are `companies.id` (same as `Contacts.company_uuid` in the app).
+ */
+export async function getCompaniesByIdsForProject(
+  client: SupabaseClient,
+  projectId: string,
+  companyIds: string[],
+  opts?: { chunkSize?: number }
+): Promise<{ companies: Record<string, Record<string, unknown>>; error: string | null }> {
+  const chunkSize = Math.min(Math.max(opts?.chunkSize ?? 80, 1), 100);
+  const unique = [
+    ...new Set(
+      companyIds
+        .map((u) => (typeof u === "string" ? u.trim() : ""))
+        .filter((u) => u.length > 0)
+    ),
+  ];
+  const out: Record<string, Record<string, unknown>> = {};
+  for (let i = 0; i < unique.length; i += chunkSize) {
+    const chunk = unique.slice(i, i + chunkSize);
+    const { data: pcData, error: pcErr } = await client
+      .from(PROJECT_COMPANIES_TABLE)
+      .select("company_id")
+      .eq("project_id", projectId)
+      .in("company_id", chunk);
+    if (pcErr) return { companies: out, error: pcErr.message };
+    const inProject = (pcData ?? [])
+      .map((r) => (r as Record<string, unknown>).company_id as string)
+      .filter((id) => typeof id === "string" && id.length > 0);
+    if (inProject.length === 0) continue;
+    const { data: rows, error } = await client
+      .from(COMPANIES_TABLE)
+      .select("id, name, domain, linkedin")
+      .in("id", inProject);
+    if (error) return { companies: out, error: error.message };
+    for (const row of (rows ?? []) as Array<Record<string, unknown>>) {
+      const id = typeof row.id === "string" ? row.id : "";
+      if (id) out[id] = row;
+    }
+  }
+  return { companies: out, error: null };
 }
 
 // --- Table counts (for /api/supabase-state) ---
@@ -1969,6 +2101,8 @@ export interface ProjectDashboardSnapshot {
   counts: TableCounts;
   hypothesesTotal: number;
   conversationsTotal: number | null;
+  /** Public HTTPS image URL for client header branding (from `Projects.image_url`). */
+  imageUrl: string | null;
   /** Non-fatal issues (e.g. optional RPC missing before migration). */
   warnings: string[];
 }
@@ -1983,6 +2117,7 @@ export async function getProjectDashboardSnapshot(
     syncRes,
     hypRes,
     convRes,
+    projectRowRes,
   ] = await Promise.all([
     getProjectEntityCounts(client, projectId),
     getCollectedAnalyticsDays(client, projectId),
@@ -2001,6 +2136,7 @@ export async function getProjectDashboardSnapshot(
     client.rpc("count_distinct_linkedin_conversations_for_project", {
       p_project_id: projectId,
     }),
+    client.from(PROJECTS_TABLE).select("image_url").eq("id", projectId).maybeSingle(),
   ]);
 
   if (countsResult.error) {
@@ -2013,6 +2149,7 @@ export async function getProjectDashboardSnapshot(
         counts: { ...ZERO_COUNTS },
         hypothesesTotal: 0,
         conversationsTotal: null,
+        imageUrl: null,
         warnings: [],
       },
       error: countsResult.error,
@@ -2023,6 +2160,7 @@ export async function getProjectDashboardSnapshot(
   if (analyticsResult.error) warnings.push(`Analytics days: ${analyticsResult.error}`);
   if (syncRes.error) warnings.push(`Last sync: ${syncRes.error.message}`);
   if (hypRes.error) warnings.push(`Hypotheses count: ${hypRes.error.message}`);
+  if (projectRowRes.error) warnings.push(`Project: ${projectRowRes.error.message}`);
 
   const analyticsDates = analyticsResult.error ? [] : analyticsResult.dates;
   const firstAnalyticsDate =
@@ -2048,6 +2186,18 @@ export async function getProjectDashboardSnapshot(
 
   const hypothesesTotal = hypRes.error ? 0 : hypRes.count ?? 0;
 
+  let imageUrl: string | null = null;
+  if (!projectRowRes.error && projectRowRes.data) {
+    const raw = (projectRowRes.data as { image_url?: string | null }).image_url;
+    const trimmed = typeof raw === "string" ? raw.trim() : "";
+    if (
+      trimmed.length > 0 &&
+      (trimmed.startsWith("https://") || trimmed.startsWith("http://"))
+    ) {
+      imageUrl = trimmed;
+    }
+  }
+
   return {
     snapshot: {
       lastSyncFinishedAt,
@@ -2057,6 +2207,7 @@ export async function getProjectDashboardSnapshot(
       counts: countsResult.counts,
       hypothesesTotal,
       conversationsTotal,
+      imageUrl,
       warnings,
     },
     error: null,

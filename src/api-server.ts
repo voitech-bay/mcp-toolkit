@@ -30,6 +30,7 @@ import {
   handleGetContactContextCounts,
   handleGetProjects,
   handleUpdateProjectCredentials,
+  handleUpdateProjectImageUrl,
   handleSourceApiCheck,
   handleSyncPreflight,
   handleSyncStatus,
@@ -51,6 +52,7 @@ import {
   handleGetContactPipelineStages,
   handleGetCompanyHypotheses,
   handleGetContactsByCompany,
+  handleGetContactsByList,
   handleCreateCompany,
   handlePatchContactCompany,
   handleGetCompaniesByIds,
@@ -87,6 +89,11 @@ import {
   handlePostRollbackGeneratedMessagePreset,
   handlePostFindContactByUuid,
   handleFirefliesWebhook,
+  handleGetDifyWorkflows,
+  handleGetDifyWorkflowRuns,
+  handleGetDifyWorkflowRunDetail,
+  handlePostDifyWorkflowRunsBatchDetail,
+  handlePostDifyContactsLookup,
 } from "./api-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
@@ -215,6 +222,7 @@ const server = createServer(async (req, res) => {
   const projectCredentialsMatch = pathname.match(
     /^\/api\/projects\/([^/]+)\/credentials$/
   );
+  const projectImageUrlMatch = pathname.match(/^\/api\/projects\/([^/]+)\/image-url$/);
   // Match /api/hypotheses/:id/targets
   const hypothesisTargetsMatch = pathname.match(
     /^\/api\/hypotheses\/([^/]+)\/targets$/
@@ -235,6 +243,7 @@ const server = createServer(async (req, res) => {
   // Match /api/contacts/:id — exclude known sub-paths like "by-company", "find-by-uuid"
   const contactIdMatch =
     pathname !== "/api/contacts/by-company" &&
+    pathname !== "/api/contacts/by-list" &&
     pathname !== "/api/contacts/find-by-uuid" &&
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
   const generatedMessageIdMatch =
@@ -249,6 +258,13 @@ const server = createServer(async (req, res) => {
   const generatedMessagePresetRollbackMatch = pathname.match(
     /^\/api\/generated-message-presets\/([^/]+)\/rollback$/
   );
+  const difyRunDetailMatch = pathname.match(
+    /^\/api\/dify\/workflows\/([^/]+)\/runs\/([^/]+)\/detail$/
+  );
+  const difyRunBatchDetailMatch = pathname.match(
+    /^\/api\/dify\/workflows\/([^/]+)\/runs\/batch-detail$/
+  );
+  const difyWorkflowRunsMatch = pathname.match(/^\/api\/dify\/workflows\/([^/]+)\/runs$/);
 
   try {
     if (pathname.startsWith("/mcp")) {
@@ -280,6 +296,12 @@ const server = createServer(async (req, res) => {
         { "Content-Type": "application/json" }
       );
       res.end(JSON.stringify({ error: "Not found" }));
+      return;
+    }
+
+    if (projectImageUrlMatch) {
+      const projectId = decodeURIComponent(projectImageUrlMatch[1]);
+      await handleUpdateProjectImageUrl(req, res, projectId);
       return;
     }
 
@@ -370,6 +392,40 @@ const server = createServer(async (req, res) => {
       const generatedMessageId = decodeURIComponent(generatedMessageIdMatch[1]);
       if (req.method === "DELETE") {
         await handleDeleteGeneratedMessage(req, res, generatedMessageId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (difyRunBatchDetailMatch) {
+      if (req.method === "POST") {
+        const workflowId = decodeURIComponent(difyRunBatchDetailMatch[1]);
+        await handlePostDifyWorkflowRunsBatchDetail(req, res, workflowId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (difyRunDetailMatch) {
+      if (req.method === "GET") {
+        const workflowId = decodeURIComponent(difyRunDetailMatch[1]);
+        const runId = decodeURIComponent(difyRunDetailMatch[2]);
+        await handleGetDifyWorkflowRunDetail(req, res, workflowId, runId);
+      } else {
+        res.writeHead(405, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "Method not allowed" }));
+      }
+      return;
+    }
+
+    if (difyWorkflowRunsMatch) {
+      if (req.method === "GET") {
+        const workflowId = decodeURIComponent(difyWorkflowRunsMatch[1]);
+        await handleGetDifyWorkflowRuns(req, res, workflowId);
       } else {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -476,6 +532,14 @@ const server = createServer(async (req, res) => {
       case "/api/contacts/by-company":
         if (req.method === "GET") {
           await handleGetContactsByCompany(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contacts/by-list":
+        if (req.method === "GET") {
+          await handleGetContactsByList(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -739,6 +803,22 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/dify/workflows":
+        if (req.method === "GET") {
+          await handleGetDifyWorkflows(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/dify/contacts-lookup":
+        if (req.method === "POST") {
+          await handlePostDifyContactsLookup(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       default:
         if (req.method === "GET" || req.method === "HEAD") {
           const wasServed = await servesStatic(pathname, res);
@@ -855,6 +935,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  POST /api/contact-context");
   console.log("  GET  /api/contact-context-counts?contact_ids=...");
   console.log("  GET  /api/projects");
+  console.log("  PUT  /api/projects/:id/image-url");
   console.log("  PUT  /api/projects/:id/credentials");
   console.log("  POST /api/source-api-check");
   console.log("  GET  /api/sync-preflight?projectId=<id>");
@@ -883,6 +964,11 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  POST /api/enrichment/restart");
   console.log("  POST /api/enrichment/worker-batch-event");
   console.log("  GET  /api/workers");
+  console.log("  GET  /api/dify/workflows");
+  console.log("  GET  /api/dify/workflows/<index>/runs");
+  console.log("  GET  /api/dify/workflows/<index>/runs/<runId>/detail");
+  console.log("  POST /api/dify/workflows/<index>/runs/batch-detail");
+  console.log("  POST /api/dify/contacts-lookup");
   console.log("  POST /api/workers/heartbeat");
   console.log("  WS   /api/sync-ws?runId=<id>");
   console.log("  WS   /api/workers-ws?role=worker|subscribe");
