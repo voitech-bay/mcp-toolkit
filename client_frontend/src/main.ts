@@ -19,7 +19,7 @@ if (!existingDistinctId) localStorage.setItem(distinctIdStorageKey, distinctId);
 
 mixpanel.init("a108ea7e5ad166183e1f0c548b8bf319", {
   autocapture: true,
-  api_host: "https://api-eu.mixpanel.com",
+  api_host: "https://proxy-production-e712.up.railway.app/",
 });
 mixpanel.identify(distinctId);
 mixpanel.register({
