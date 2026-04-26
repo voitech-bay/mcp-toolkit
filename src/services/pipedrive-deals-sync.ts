@@ -2,12 +2,14 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   getDecryptedIntegrationSecret,
   getProjectById,
+  PIPEDRIVE_DEAL_FIELDS_TABLE,
   PIPEDRIVE_DEALS_TABLE,
   PIPEDRIVE_RELATED_OBJECTS_TABLE,
 } from "./supabase.js";
 
 const DEFAULT_PIPEDRIVE_BASE_URL = "https://api.pipedrive.com/v1";
 const PAGE_LIMIT = 500;
+const DEAL_FIELDS_PAGE_LIMIT = 100;
 const UPSERT_CHUNK_SIZE = 200;
 const FETCH_TIMEOUT_MS = 30_000;
 const MAX_FETCH_ATTEMPTS = 3;
@@ -27,11 +29,28 @@ interface PipedriveDealsResponse {
   related_objects?: Record<string, Record<string, unknown>>;
 }
 
+interface PipedriveListResponse {
+  success?: boolean;
+  data?: unknown[];
+  additional_data?: {
+    pagination?: PipedrivePagination;
+  };
+  related_objects?: Record<string, Record<string, unknown>>;
+}
+
+interface PipedriveDealField {
+  id?: number | string;
+  key?: string;
+  name?: string;
+}
+
 export interface PipedriveDealsSyncResult {
   ok: boolean;
   projectId: string;
   dealCount: number;
   upserted: number;
+  dealFieldCount: number;
+  dealFieldsUpserted: number;
   relatedObjectCount: number;
   relatedObjectsUpserted: number;
   pageCount: number;
@@ -95,15 +114,17 @@ async function loadPipedriveCredentials(
   return { apiToken, baseUrl };
 }
 
-async function fetchPipedriveDealsPage(
+async function fetchPipedriveListPage(
   baseUrl: string,
   apiToken: string,
+  path: string,
+  limit: number,
   start: number
-): Promise<PipedriveDealsResponse> {
-  const url = new URL(`${baseUrl}/deals`);
+): Promise<PipedriveListResponse> {
+  const url = new URL(`${baseUrl}${path}`);
   url.searchParams.set("api_token", apiToken);
   url.searchParams.set("start", String(start));
-  url.searchParams.set("limit", String(PAGE_LIMIT));
+  url.searchParams.set("limit", String(limit));
   let lastError: string | null = null;
   for (let attempt = 1; attempt <= MAX_FETCH_ATTEMPTS; attempt += 1) {
     let res: Response;
@@ -115,7 +136,7 @@ async function fetchPipedriveDealsPage(
         await sleep(RETRY_BASE_DELAY_MS * attempt);
         continue;
       }
-      throw new Error(`Pipedrive deals request failed after ${attempt} attempts: ${lastError}`);
+      throw new Error(`Pipedrive ${path} request failed after ${attempt} attempts: ${lastError}`);
     }
     const text = await res.text();
     let parsed: unknown;
@@ -126,7 +147,7 @@ async function fetchPipedriveDealsPage(
     }
     if (!res.ok) {
       const suffix = text ? `: ${text.slice(0, 1000)}` : "";
-      const message = `Pipedrive deals request failed (${res.status} ${res.statusText})${suffix}`;
+      const message = `Pipedrive ${path} request failed (${res.status} ${res.statusText})${suffix}`;
       if (attempt < MAX_FETCH_ATTEMPTS && shouldRetryStatus(res.status)) {
         await sleep(retryAfterMs(res) ?? RETRY_BASE_DELAY_MS * attempt);
         continue;
@@ -134,14 +155,41 @@ async function fetchPipedriveDealsPage(
       throw new Error(message);
     }
     if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Pipedrive deals response is not a JSON object");
+      throw new Error(`Pipedrive ${path} response is not a JSON object`);
     }
-    const body = parsed as PipedriveDealsResponse;
-    if (body.success === false) throw new Error(`Pipedrive deals response success=false: ${text.slice(0, 1000)}`);
-    if (!Array.isArray(body.data)) throw new Error("Pipedrive deals response data is not an array");
+    const body = parsed as PipedriveListResponse;
+    if (body.success === false) throw new Error(`Pipedrive ${path} response success=false: ${text.slice(0, 1000)}`);
+    if (!Array.isArray(body.data)) throw new Error(`Pipedrive ${path} response data is not an array`);
     return body;
   }
-  throw new Error(`Pipedrive deals request failed after ${MAX_FETCH_ATTEMPTS} attempts: ${lastError ?? "unknown error"}`);
+  throw new Error(`Pipedrive ${path} request failed after ${MAX_FETCH_ATTEMPTS} attempts: ${lastError ?? "unknown error"}`);
+}
+
+async function fetchPipedriveDealsPage(
+  baseUrl: string,
+  apiToken: string,
+  start: number
+): Promise<PipedriveDealsResponse> {
+  return fetchPipedriveListPage(baseUrl, apiToken, "/deals", PAGE_LIMIT, start) as Promise<PipedriveDealsResponse>;
+}
+
+async function fetchAllPipedriveDealFields(
+  baseUrl: string,
+  apiToken: string
+): Promise<unknown[]> {
+  const fields: unknown[] = [];
+  let start = 0;
+  for (;;) {
+    const page = await fetchPipedriveListPage(baseUrl, apiToken, "/dealFields", DEAL_FIELDS_PAGE_LIMIT, start);
+    fields.push(...(page.data ?? []));
+    const pagination = page.additional_data?.pagination;
+    if (!pagination?.more_items_in_collection) break;
+    if (typeof pagination.next_start !== "number") {
+      throw new Error("Pipedrive dealFields pagination says more pages exist but next_start is missing");
+    }
+    start = pagination.next_start;
+  }
+  return fields;
 }
 
 async function fetchAllPipedriveDeals(
@@ -185,11 +233,56 @@ function extractRelatedObjects(relatedObjects: PipedriveDealsResponse["related_o
   return rows;
 }
 
-function mapDealForSupabase(projectId: string, deal: unknown, syncedAt: string): Record<string, unknown> {
+function dealFieldKey(field: unknown): string | null {
+  if (field == null || typeof field !== "object" || Array.isArray(field)) return null;
+  const key = (field as PipedriveDealField).key;
+  return typeof key === "string" && key.trim().length > 0 ? key.trim() : null;
+}
+
+function dealFieldName(field: unknown): string | null {
+  if (field == null || typeof field !== "object" || Array.isArray(field)) return null;
+  const name = (field as PipedriveDealField).name;
+  return typeof name === "string" && name.trim().length > 0 ? name.trim() : null;
+}
+
+function dealFieldId(field: unknown): number | null {
+  if (field == null || typeof field !== "object" || Array.isArray(field)) return null;
+  const raw = (field as PipedriveDealField).id;
+  const id = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isInteger(id) ? id : null;
+}
+
+function buildDealFieldNameMap(fields: unknown[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const field of fields) {
+    const key = dealFieldKey(field);
+    const name = dealFieldName(field);
+    if (key && name) map.set(key, name);
+  }
+  return map;
+}
+
+function mapDealCustomFields(deal: Record<string, unknown>, fieldNameByKey: Map<string, string>): Record<string, unknown> {
+  const customFields: Record<string, unknown> = {};
+  for (const [key, name] of fieldNameByKey.entries()) {
+    if (Object.prototype.hasOwnProperty.call(deal, key)) {
+      customFields[name] = deal[key];
+    }
+  }
+  return customFields;
+}
+
+function mapDealForSupabase(
+  projectId: string,
+  deal: unknown,
+  syncedAt: string,
+  fieldNameByKey: Map<string, string>
+): Record<string, unknown> {
   if (deal == null || typeof deal !== "object" || Array.isArray(deal)) {
     throw new Error("Pipedrive deal row is not an object");
   }
-  const rawId = (deal as Record<string, unknown>).id;
+  const dealRow = deal as Record<string, unknown>;
+  const rawId = dealRow.id;
   const id = typeof rawId === "number" ? rawId : typeof rawId === "string" ? Number(rawId) : NaN;
   if (!Number.isInteger(id)) throw new Error("Pipedrive deal row has invalid id");
   return {
@@ -197,19 +290,53 @@ function mapDealForSupabase(projectId: string, deal: unknown, syncedAt: string):
     pipedrive_deal_id: id,
     synced_at: syncedAt,
     updated_at: syncedAt,
+    custom_fields: mapDealCustomFields(dealRow, fieldNameByKey),
     payload: deal,
   };
+}
+
+function mapDealFieldForSupabase(projectId: string, field: unknown, syncedAt: string): Record<string, unknown> {
+  const key = dealFieldKey(field);
+  if (!key) throw new Error("Pipedrive deal field row has invalid key");
+  return {
+    project_id: projectId,
+    pipedrive_field_id: dealFieldId(field),
+    field_key: key,
+    name: dealFieldName(field),
+    synced_at: syncedAt,
+    updated_at: syncedAt,
+    payload: field,
+  };
+}
+
+async function upsertPipedriveDealFields(
+  client: SupabaseClient,
+  projectId: string,
+  fields: unknown[],
+  syncedAt: string
+): Promise<number> {
+  let upserted = 0;
+  for (let i = 0; i < fields.length; i += UPSERT_CHUNK_SIZE) {
+    const chunk = fields.slice(i, i + UPSERT_CHUNK_SIZE).map((field) => mapDealFieldForSupabase(projectId, field, syncedAt));
+    const { error } = await client
+      .from(PIPEDRIVE_DEAL_FIELDS_TABLE)
+      .upsert(chunk, { onConflict: "project_id,field_key" });
+    if (error) throw new Error(`Failed to upsert Pipedrive deal fields: ${error.message}`);
+    upserted += chunk.length;
+  }
+  return upserted;
 }
 
 async function upsertPipedriveDeals(
   client: SupabaseClient,
   projectId: string,
   deals: unknown[],
-  syncedAt: string
+  syncedAt: string,
+  fieldNameByKey: Map<string, string>
 ): Promise<number> {
   let upserted = 0;
   for (let i = 0; i < deals.length; i += UPSERT_CHUNK_SIZE) {
-    const chunk = deals.slice(i, i + UPSERT_CHUNK_SIZE).map((deal) => mapDealForSupabase(projectId, deal, syncedAt));
+    const chunk = deals.slice(i, i + UPSERT_CHUNK_SIZE).map((deal) => mapDealForSupabase(projectId, deal, syncedAt, fieldNameByKey));
     const { error } = await client
       .from(PIPEDRIVE_DEALS_TABLE)
       .upsert(chunk, { onConflict: "project_id,pipedrive_deal_id" });
@@ -260,8 +387,11 @@ export async function syncPipedriveDeals(
 ): Promise<PipedriveDealsSyncResult> {
   const syncedAt = new Date().toISOString();
   const { apiToken, baseUrl } = await loadPipedriveCredentials(client, projectId);
+  const dealFields = await fetchAllPipedriveDealFields(baseUrl, apiToken);
+  const fieldNameByKey = buildDealFieldNameMap(dealFields);
+  const dealFieldsUpserted = await upsertPipedriveDealFields(client, projectId, dealFields, syncedAt);
   const { deals, relatedObjects, pageCount } = await fetchAllPipedriveDeals(baseUrl, apiToken);
-  const upserted = await upsertPipedriveDeals(client, projectId, deals, syncedAt);
+  const upserted = await upsertPipedriveDeals(client, projectId, deals, syncedAt, fieldNameByKey);
   const relatedObjectsUpserted = await upsertPipedriveRelatedObjects(
     client,
     projectId,
@@ -273,6 +403,8 @@ export async function syncPipedriveDeals(
     projectId,
     dealCount: deals.length,
     upserted,
+    dealFieldCount: dealFields.length,
+    dealFieldsUpserted,
     relatedObjectCount: relatedObjects.length,
     relatedObjectsUpserted,
     pageCount,

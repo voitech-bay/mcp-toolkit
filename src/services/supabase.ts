@@ -27,6 +27,7 @@ export const FIREFLIES_WEBHOOK_EVENTS_TABLE = "fireflies_webhook_events";
 export const PROJECT_INTEGRATION_SECRETS_TABLE = "ProjectIntegrationSecrets";
 export const PIPEDRIVE_DEALS_TABLE = "PipedriveDeals";
 export const PIPEDRIVE_RELATED_OBJECTS_TABLE = "PipedriveRelatedObjects";
+export const PIPEDRIVE_DEAL_FIELDS_TABLE = "PipedriveDealFields";
 
 /** Parse `companies.tags` jsonb (array of tag strings, or legacy numeric values) from PostgREST/JSON. */
 export function parseCompanyTagsColumn(raw: unknown): string[] {
