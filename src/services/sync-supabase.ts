@@ -15,6 +15,7 @@ import {
   getLatestCreatedAt,
   getLatestUpdatedAt,
   getProjectById,
+  getGetSalesCredentials,
   getActiveSyncRun,
   CONTACTS_TABLE,
   LINKEDIN_MESSAGES_TABLE,
@@ -1022,7 +1023,7 @@ export async function syncSupabaseFromSource(
     }
   }
 
-  // Resolve project credentials (fall back to env vars)
+  // Resolve project credentials (encrypted project secret first, then legacy/env fallback)
   let credentials: ApiCredentials | undefined;
   if (projectId) {
     const { data: project, error: projectError } = await getProjectById(client, projectId);
@@ -1034,11 +1035,12 @@ export async function syncSupabaseFromSource(
       result.error = `Project not found: ${projectId}`;
       return result;
     }
-    const baseUrl = project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL;
-    const apiKey = project.source_api_key ?? process.env.SOURCE_API_KEY;
-    if (baseUrl && apiKey) {
-      credentials = { baseUrl, apiKey };
+    const credentialsResult = await getGetSalesCredentials(client, projectId);
+    if (credentialsResult.error) {
+      result.error = `Failed to load GetSales credentials: ${credentialsResult.error}`;
+      return result;
     }
+    credentials = credentialsResult.credentials ?? undefined;
   }
 
   let runId: string | null = existingRunId ?? null;
@@ -1768,15 +1770,17 @@ export async function syncAnalyticsSnapshots(
     return { ...empty(), error: `Project not found: ${projectId}` };
   }
 
-  const baseUrl = project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL;
-  const apiKey = project.source_api_key ?? process.env.SOURCE_API_KEY;
-  if (!baseUrl || !apiKey) {
+  const credentialsResult = await getGetSalesCredentials(client, projectId);
+  if (credentialsResult.error) {
+    return { ...empty(), error: `Failed to load GetSales credentials: ${credentialsResult.error}` };
+  }
+  const credentials = credentialsResult.credentials;
+  if (!credentials) {
     return {
       ...empty(),
       error: "SOURCE_API_BASE_URL and SOURCE_API_KEY (or project credentials) are required",
     };
   }
-  const credentials: ApiCredentials = { baseUrl, apiKey };
 
   const { dates: collected, error: colErr } = await getCollectedAnalyticsDays(client, projectId);
   if (colErr) {

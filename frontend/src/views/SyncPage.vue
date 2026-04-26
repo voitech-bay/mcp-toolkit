@@ -355,6 +355,21 @@ async function loadPreflight() {
   }
 }
 
+async function loadCredentialsMeta() {
+  if (!selectedProjectId.value) return;
+  try {
+    const r = await fetch(
+      `/api/projects/${selectedProjectId.value}/integration-secrets/meta?provider=getsales`
+    );
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error ?? "Failed to load credential metadata");
+    credBaseUrl.value = data.source_api_base_url ?? "";
+  } catch (e) {
+    console.error("[sync-page] load credential metadata:", e instanceof Error ? e.message : e);
+    credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
+  }
+}
+
 async function testSourceApiConnection() {
   if (!selectedProjectId.value) return;
   testingSourceApi.value = true;
@@ -402,7 +417,7 @@ async function saveCredentials() {
     if (!r.ok) throw new Error(data.error ?? "Failed to save credentials");
     message.success("Credentials saved");
     credApiKey.value = "";
-    await loadPreflight();
+    await Promise.all([projectStore.loadProjects(), loadCredentialsMeta(), loadPreflight()]);
   } catch (e) {
     message.error(e instanceof Error ? e.message : "Failed to save credentials");
   } finally {
@@ -635,13 +650,13 @@ watch(selectedProjectId, async (id) => {
   if (!id) return;
   credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
   credApiKey.value = "";
-  await Promise.all([loadPreflight(), loadHistory(), loadAnalyticsCollectedDays()]);
+  await Promise.all([loadCredentialsMeta(), loadPreflight(), loadHistory(), loadAnalyticsCollectedDays()]);
 });
 
 onMounted(async () => {
   if (selectedProjectId.value) {
     credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
-    await Promise.all([loadPreflight(), loadHistory(), loadAnalyticsCollectedDays()]);
+    await Promise.all([loadCredentialsMeta(), loadPreflight(), loadHistory(), loadAnalyticsCollectedDays()]);
   }
 });
 onUnmounted(() => {

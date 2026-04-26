@@ -30,7 +30,10 @@ import {
   handleGetContactContextCounts,
   handleGetProjects,
   handleUpdateProjectCredentials,
+  handleGetProjectIntegrationSecretMeta,
+  handleUpdateProjectIntegrationSecret,
   handleUpdateProjectImageUrl,
+  handlePipedriveDealsSync,
   handleSourceApiCheck,
   handleSyncPreflight,
   handleSyncStatus,
@@ -222,6 +225,12 @@ const server = createServer(async (req, res) => {
   const projectCredentialsMatch = pathname.match(
     /^\/api\/projects\/([^/]+)\/credentials$/
   );
+  const projectIntegrationSecretMetaMatch = pathname.match(
+    /^\/api\/projects\/([^/]+)\/integration-secrets\/meta$/
+  );
+  const projectIntegrationSecretMatch = pathname.match(
+    /^\/api\/projects\/([^/]+)\/integration-secrets$/
+  );
   const projectImageUrlMatch = pathname.match(/^\/api\/projects\/([^/]+)\/image-url$/);
   // Match /api/hypotheses/:id/targets
   const hypothesisTargetsMatch = pathname.match(
@@ -308,6 +317,18 @@ const server = createServer(async (req, res) => {
     if (projectCredentialsMatch) {
       const projectId = decodeURIComponent(projectCredentialsMatch[1]);
       await handleUpdateProjectCredentials(req, res, projectId);
+      return;
+    }
+
+    if (projectIntegrationSecretMetaMatch) {
+      const projectId = decodeURIComponent(projectIntegrationSecretMetaMatch[1]);
+      await handleGetProjectIntegrationSecretMeta(req, res, projectId);
+      return;
+    }
+
+    if (projectIntegrationSecretMatch) {
+      const projectId = decodeURIComponent(projectIntegrationSecretMatch[1]);
+      await handleUpdateProjectIntegrationSecret(req, res, projectId);
       return;
     }
 
@@ -447,6 +468,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/supabase-sync-cancel":
         await handleSupabaseSyncCancel(req, res);
+        return;
+      case "/api/pipedrive-deals-sync":
+        await handlePipedriveDealsSync(req, res);
         return;
       case "/api/project-dashboard":
         if (req.method === "GET") {
@@ -916,6 +940,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /api/supabase-state");
   console.log("  POST /api/supabase-sync");
   console.log("  POST /api/supabase-sync-cancel");
+  console.log("  POST /api/pipedrive-deals-sync");
   console.log("  GET  /api/project-dashboard?projectId=<id>");
   console.log("  GET  /api/flow-funnel?projectId=<id>&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD");
   console.log(
@@ -937,6 +962,8 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /api/projects");
   console.log("  PUT  /api/projects/:id/image-url");
   console.log("  PUT  /api/projects/:id/credentials");
+  console.log("  PUT  /api/projects/:id/integration-secrets");
+  console.log("  GET  /api/projects/:id/integration-secrets/meta?provider=getsales");
   console.log("  POST /api/source-api-check");
   console.log("  GET  /api/sync-preflight?projectId=<id>");
   console.log("  GET  /api/sync-status");

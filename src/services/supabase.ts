@@ -1,5 +1,7 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { COMPANY_SELECT_FOR_CONTACT_LLM } from "./prompt-resolver.js";
+import type { ApiCredentials } from "./source-api.js";
+import { decryptSecretPayload, encryptSecretPayload } from "./integration-secrets-crypto.js";
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_KEY;
@@ -22,6 +24,9 @@ export const CONTEXT_SNAPSHOTS_TABLE = "ContextSnapshots";
 export const GENERATED_MESSAGES_TABLE = "generated_messages";
 export const GENERATED_MESSAGE_PRESETS_TABLE = "generated_message_presets";
 export const FIREFLIES_WEBHOOK_EVENTS_TABLE = "fireflies_webhook_events";
+export const PROJECT_INTEGRATION_SECRETS_TABLE = "ProjectIntegrationSecrets";
+export const PIPEDRIVE_DEALS_TABLE = "PipedriveDeals";
+export const PIPEDRIVE_RELATED_OBJECTS_TABLE = "PipedriveRelatedObjects";
 
 /** Parse `companies.tags` jsonb (array of tag strings, or legacy numeric values) from PostgREST/JSON. */
 export function parseCompanyTagsColumn(raw: unknown): string[] {
@@ -37,6 +42,17 @@ export function parseCompanyTagsColumn(raw: unknown): string[] {
 // --- Projects (table: Projects) ---
 
 export const PROJECTS_TABLE = "Projects";
+
+export type IntegrationProvider = "getsales" | "pipedrive";
+
+export interface ProjectIntegrationSecretRow {
+  id: string;
+  project_id: string;
+  provider: IntegrationProvider;
+  ciphertext: string;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface ProjectRow {
   id: string;
@@ -60,7 +76,7 @@ export interface ProjectSummary {
   image_url: string | null;
 }
 
-function toProjectSummary(row: ProjectRow): ProjectSummary {
+function toProjectSummary(row: ProjectRow, hasGetSalesSecret = false): ProjectSummary {
   const rawImage = row.image_url;
   const image_url =
     typeof rawImage === "string" && rawImage.trim().length > 0 ? rawImage.trim() : null;
@@ -68,8 +84,8 @@ function toProjectSummary(row: ProjectRow): ProjectSummary {
     id: row.id,
     name: row.name,
     description: row.description,
-    api_key_set: row.source_api_key != null && row.source_api_key.length > 0,
-    source_api_base_url: row.source_api_base_url,
+    api_key_set: hasGetSalesSecret || (row.source_api_key != null && row.source_api_key.length > 0),
+    source_api_base_url: row.source_api_base_url ?? null,
     created_at: row.created_at,
     image_url,
   };
@@ -86,10 +102,19 @@ export async function getProjects(
     .select("*")
     .order("name", { ascending: true });
   if (error) return { data: [], error: error.message };
-  return {
-    data: ((data ?? []) as ProjectRow[]).map(toProjectSummary),
-    error: null,
-  };
+  const rows = (data ?? []) as ProjectRow[];
+  const ids = rows.map((row) => row.id);
+  let secretProjectIds = new Set<string>();
+  if (ids.length > 0) {
+    const { data: secrets, error: secretsError } = await client
+      .from(PROJECT_INTEGRATION_SECRETS_TABLE)
+      .select("project_id")
+      .eq("provider", "getsales")
+      .in("project_id", ids);
+    if (secretsError) return { data: [], error: secretsError.message };
+    secretProjectIds = new Set((secrets ?? []).map((row) => String(row.project_id)));
+  }
+  return { data: rows.map((row) => toProjectSummary(row, secretProjectIds.has(row.id))), error: null };
 }
 
 /**
@@ -108,6 +133,142 @@ export async function getProjectById(
   return { data: (data as ProjectRow) ?? null, error: null };
 }
 
+export async function getProjectIntegrationSecret(
+  client: SupabaseClient,
+  projectId: string,
+  provider: IntegrationProvider
+): Promise<{ data: ProjectIntegrationSecretRow | null; error: string | null }> {
+  const { data, error } = await client
+    .from(PROJECT_INTEGRATION_SECRETS_TABLE)
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("provider", provider)
+    .maybeSingle();
+  if (error) return { data: null, error: error.message };
+  return { data: (data as ProjectIntegrationSecretRow) ?? null, error: null };
+}
+
+export async function upsertProjectIntegrationSecret(
+  client: SupabaseClient,
+  projectId: string,
+  provider: IntegrationProvider,
+  plaintextPayload: Record<string, unknown>
+): Promise<{ error: string | null }> {
+  let ciphertext: string;
+  try {
+    ciphertext = encryptSecretPayload(JSON.stringify(plaintextPayload));
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+  const { error } = await client.from(PROJECT_INTEGRATION_SECRETS_TABLE).upsert(
+    {
+      project_id: projectId,
+      provider,
+      ciphertext,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "project_id,provider" }
+  );
+  return { error: error?.message ?? null };
+}
+
+export async function getDecryptedIntegrationSecret(
+  client: SupabaseClient,
+  projectId: string,
+  provider: IntegrationProvider
+): Promise<{ data: Record<string, unknown> | null; error: string | null }> {
+  const { data: row, error } = await getProjectIntegrationSecret(client, projectId, provider);
+  if (error) return { data: null, error };
+  if (!row) return { data: null, error: null };
+  try {
+    const plaintext = decryptSecretPayload(row.ciphertext);
+    const parsed = JSON.parse(plaintext);
+    if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { data: null, error: `${provider} credentials are not a JSON object` };
+    }
+    return { data: parsed as Record<string, unknown>, error: null };
+  } catch (e) {
+    return { data: null, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+function pickSecretString(payload: Record<string, unknown> | null, ...keys: string[]): string | null {
+  if (!payload) return null;
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
+export async function getGetSalesCredentials(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ credentials: ApiCredentials | null; error: string | null }> {
+  const { data: secret, error: secretError } = await getDecryptedIntegrationSecret(
+    client,
+    projectId,
+    "getsales"
+  );
+  if (secretError) return { credentials: null, error: secretError };
+  const secretBaseUrl = pickSecretString(secret, "base_url", "baseUrl");
+  const secretApiKey = pickSecretString(secret, "api_key", "apiKey");
+  if (secretBaseUrl && secretApiKey) {
+    return { credentials: { baseUrl: secretBaseUrl.replace(/\/$/, ""), apiKey: secretApiKey }, error: null };
+  }
+
+  const { data: project, error: projectError } = await getProjectById(client, projectId);
+  if (projectError) return { credentials: null, error: projectError };
+  if (!project) return { credentials: null, error: `Project not found: ${projectId}` };
+
+  const legacyBaseUrl = project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL;
+  const legacyApiKey = project.source_api_key ?? process.env.SOURCE_API_KEY;
+  if (!legacyBaseUrl || !legacyApiKey) return { credentials: null, error: null };
+  return {
+    credentials: { baseUrl: legacyBaseUrl.replace(/\/$/, ""), apiKey: legacyApiKey },
+    error: null,
+  };
+}
+
+export async function getGetSalesCredentialsMeta(
+  client: SupabaseClient,
+  projectId: string
+): Promise<{ data: { api_key_set: boolean; source_api_base_url: string | null }; error: string | null }> {
+  const { data: secret, error: secretError } = await getDecryptedIntegrationSecret(
+    client,
+    projectId,
+    "getsales"
+  );
+  if (secretError) return { data: { api_key_set: false, source_api_base_url: null }, error: secretError };
+  const secretBaseUrl = pickSecretString(secret, "base_url", "baseUrl");
+  const secretApiKey = pickSecretString(secret, "api_key", "apiKey");
+  if (secretBaseUrl || secretApiKey) {
+    return {
+      data: {
+        api_key_set: Boolean(secretApiKey),
+        source_api_base_url: secretBaseUrl ?? null,
+      },
+      error: null,
+    };
+  }
+
+  const { data: project, error: projectError } = await getProjectById(client, projectId);
+  if (projectError) return { data: { api_key_set: false, source_api_base_url: null }, error: projectError };
+  if (!project) {
+    return {
+      data: { api_key_set: false, source_api_base_url: null },
+      error: `Project not found: ${projectId}`,
+    };
+  }
+  return {
+    data: {
+      api_key_set: Boolean(project.source_api_key),
+      source_api_base_url: project.source_api_base_url ?? null,
+    },
+    error: null,
+  };
+}
+
 /**
  * Update project API credentials. Only updates the provided fields.
  */
@@ -116,15 +277,35 @@ export async function updateProjectCredentials(
   id: string,
   credentials: { apiKey?: string | null; baseUrl?: string | null }
 ): Promise<{ error: string | null }> {
-  const update: Record<string, unknown> = {};
-  if (credentials.apiKey !== undefined) update.source_api_key = credentials.apiKey;
-  if (credentials.baseUrl !== undefined) update.source_api_base_url = credentials.baseUrl;
-  if (Object.keys(update).length === 0) return { error: null };
-  const { error } = await client
-    .from(PROJECTS_TABLE)
-    .update(update)
-    .eq("id", id);
-  return { error: error?.message ?? null };
+  const { data: secret, error: secretError } = await getDecryptedIntegrationSecret(client, id, "getsales");
+  if (secretError) return { error: secretError };
+  const { data: project, error: projectError } = await getProjectById(client, id);
+  if (projectError) return { error: projectError };
+  if (!project) return { error: `Project not found: ${id}` };
+
+  const existingApiKey =
+    pickSecretString(secret, "api_key", "apiKey") ?? project.source_api_key ?? null;
+  const existingBaseUrl =
+    pickSecretString(secret, "base_url", "baseUrl") ?? project.source_api_base_url ?? null;
+  const apiKey =
+    credentials.apiKey === undefined
+      ? existingApiKey
+      : credentials.apiKey == null || credentials.apiKey.trim() === ""
+        ? null
+        : credentials.apiKey.trim();
+  const baseUrl =
+    credentials.baseUrl === undefined
+      ? existingBaseUrl
+      : credentials.baseUrl == null || credentials.baseUrl.trim() === ""
+        ? null
+        : credentials.baseUrl.trim().replace(/\/$/, "");
+  if (!apiKey || !baseUrl) {
+    return { error: "GetSales base URL and API key are required" };
+  }
+  return upsertProjectIntegrationSecret(client, id, "getsales", {
+    api_key: apiKey,
+    base_url: baseUrl,
+  });
 }
 
 /** Set or clear `Projects.image_url` (public branding URL). */

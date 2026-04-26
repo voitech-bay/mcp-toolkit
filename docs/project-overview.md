@@ -21,7 +21,7 @@ Historical note: README still documents Vercel-style deploy for MCP over HTTP; p
 
 - **MCP server** (`src/server.ts`, `src/stdio.ts`): tools for LinkedIn conversations, contacts, senders, company context, Apollo/Ocean search, enrichment helpers.
 - **HTTP API** (`src/api-server.ts`, `src/api-handlers.ts`): REST used by the **Vue 3 frontend** (`frontend/`) — table browser, sync UI, companies/contacts/hypotheses, enrichment queue, worker presence, etc.
-- **Sync layer** (`src/services/sync-supabase.ts`, `src/services/source-api.ts`): pulls **GetSales-style** data (contacts, messages, sender profiles, flows, flow leads, companies, analytics/metrics) into **Supabase Postgres** using `SOURCE_API_BASE_URL`, `SOURCE_API_KEY`, optional `SOURCE_TEAM_ID`, plus per-project credentials on `Projects`.
+- **Sync layer** (`src/services/sync-supabase.ts`, `src/services/source-api.ts`): pulls **GetSales-style** data (contacts, messages, sender profiles, flows, flow leads, companies, analytics/metrics) into **Supabase Postgres** using encrypted per-project credentials in `ProjectIntegrationSecrets` (fallback env: `SOURCE_API_BASE_URL`, `SOURCE_API_KEY`, optional `SOURCE_TEAM_ID`).
 
 ---
 
@@ -31,7 +31,8 @@ Data lives in **Supabase** (managed Postgres). The app treats it as the operatio
 
 ### Core entities
 
-- **`Projects`** — workspace scope; `id` (uuid), optional `source_api_base_url` / `source_api_key` for sync.
+- **`Projects`** — workspace scope; `id` (uuid), metadata only.
+- **`ProjectIntegrationSecrets`** — encrypted per-project provider credentials (`getsales`, `pipedrive`); requires `INTEGRATION_SECRETS_MASTER_KEY`.
 - **`companies`** — company records; **`id` is the GetSales company uuid** (not domain-keyed); domain nullable with partial unique index where present.
 - **`Contacts`** — people; `uuid` PK, `company_uuid` / FK relationships to companies, `project_id`, profile fields, `list_uuid`, etc.
 - **`Senders`** — LinkedIn sender profiles used in automation.

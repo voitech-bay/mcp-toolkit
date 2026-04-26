@@ -17,6 +17,11 @@ import {
   getProjects,
   getProjectById,
   updateProjectCredentials,
+  getProjectIntegrationSecret,
+  getGetSalesCredentials,
+  getGetSalesCredentialsMeta,
+  upsertProjectIntegrationSecret,
+  type IntegrationProvider,
   updateProjectImageUrl,
   getProjectEntityCounts,
   getProjectLatestRows,
@@ -113,6 +118,7 @@ import {
   type SyncEntityKey,
 } from "./services/sync-supabase.js";
 import { fetchContactByUuid, verifyGetSalesCredentials } from "./services/source-api.js";
+import { syncPipedriveDeals } from "./services/pipedrive-deals-sync.js";
 import { listOpenRouterModels, generateOpenRouterMessage } from "./services/openrouter.js";
 import {
   buildGeneratedMessagePrompt,
@@ -1908,8 +1914,181 @@ export async function handleUpdateProjectCredentials(
     res.end(JSON.stringify({ error: result.error }));
     return;
   }
+  const meta = await getGetSalesCredentialsMeta(client, projectId);
   res.writeHead(200);
-  res.end(JSON.stringify({ ok: true }));
+  res.end(JSON.stringify({ ok: true, ...(meta.error ? {} : meta.data) }));
+}
+
+function parseIntegrationProvider(raw: unknown): IntegrationProvider | null {
+  if (raw === "getsales" || raw === "pipedrive") return raw;
+  return null;
+}
+
+/** GET /api/projects/:id/integration-secrets/meta?provider=getsales — safe credential metadata. */
+export async function handleGetProjectIntegrationSecretMeta(
+  req: IncomingMessage,
+  res: ServerResponse,
+  projectId: string
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const provider = parseIntegrationProvider(getQueryParams(req).get("provider") ?? "getsales");
+  if (!provider) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "provider must be getsales or pipedrive" }));
+    return;
+  }
+  const { data: project } = await getProjectById(client, projectId);
+  if (!project) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: `Project not found: ${projectId}` }));
+    return;
+  }
+  if (provider === "getsales") {
+    const result = await getGetSalesCredentialsMeta(client, projectId);
+    if (result.error) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: result.error }));
+      return;
+    }
+    res.writeHead(200);
+    res.end(JSON.stringify({ provider, ...result.data }));
+    return;
+  }
+  const secret = await getProjectIntegrationSecret(client, projectId, "pipedrive");
+  if (secret.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: secret.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ provider, configured: secret.data != null }));
+}
+
+/** PUT /api/projects/:id/integration-secrets — encrypted provider credentials. */
+export async function handleUpdateProjectIntegrationSecret(
+  req: IncomingMessage,
+  res: ServerResponse,
+  projectId: string
+): Promise<void> {
+  if (req.method !== "PUT") {
+    res.writeHead(405, { Allow: "PUT" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const { data: project } = await getProjectById(client, projectId);
+  if (!project) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: `Project not found: ${projectId}` }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        provider?: string;
+        apiToken?: string | null;
+        apiBaseUrl?: string | null;
+        apiKey?: string | null;
+        baseUrl?: string | null;
+      }
+    | undefined;
+  if (!body) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "JSON body required" }));
+    return;
+  }
+  const provider = parseIntegrationProvider(body.provider);
+  if (!provider) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "provider must be getsales or pipedrive" }));
+    return;
+  }
+  if (provider === "getsales") {
+    const result = await updateProjectCredentials(client, projectId, {
+      apiKey: body.apiKey ?? body.apiToken,
+      baseUrl: body.baseUrl ?? body.apiBaseUrl,
+    });
+    if (result.error) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: result.error }));
+      return;
+    }
+    const meta = await getGetSalesCredentialsMeta(client, projectId);
+    res.writeHead(200);
+    res.end(JSON.stringify({ ok: true, provider, ...(meta.error ? {} : meta.data) }));
+    return;
+  }
+  const apiToken = body.apiToken?.trim() || body.apiKey?.trim() || "";
+  if (!apiToken) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "apiToken is required for pipedrive" }));
+    return;
+  }
+  const apiBaseUrl = body.apiBaseUrl?.trim() || body.baseUrl?.trim() || undefined;
+  const result = await upsertProjectIntegrationSecret(client, projectId, "pipedrive", {
+    api_token: apiToken,
+    ...(apiBaseUrl ? { api_base_url: apiBaseUrl.replace(/\/$/, "") } : {}),
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true, provider, configured: true }));
+}
+
+/** POST /api/pipedrive-deals-sync — body: { projectId }. Synchronous for n8n. */
+export async function handlePipedriveDealsSync(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { projectId?: string } | undefined;
+  const projectId = body?.projectId?.trim() ?? "";
+  if (!projectId || !PROJECT_ID_RE.test(projectId)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid projectId" }));
+    return;
+  }
+  try {
+    const result = await syncPipedriveDeals(client, projectId);
+    res.writeHead(200);
+    res.end(JSON.stringify(result));
+  } catch (e) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
+  }
 }
 
 function isValidProjectImageHttpUrl(url: string): boolean {
@@ -2013,12 +2192,18 @@ export async function handleSourceApiCheck(
     res.end(JSON.stringify({ error: "Project not found" }));
     return;
   }
+  const savedCredentials = await getGetSalesCredentials(client, projectId);
+  if (savedCredentials.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: savedCredentials.error }));
+    return;
+  }
   const baseUrl =
-    (b.baseUrl?.trim() || project.source_api_base_url || process.env.SOURCE_API_BASE_URL)?.replace(
+    (b.baseUrl?.trim() || savedCredentials.credentials?.baseUrl || process.env.SOURCE_API_BASE_URL)?.replace(
       /\/$/,
       ""
     ) ?? "";
-  const apiKey = (b.apiKey?.trim() || project.source_api_key || process.env.SOURCE_API_KEY) ?? "";
+  const apiKey = (b.apiKey?.trim() || savedCredentials.credentials?.apiKey || process.env.SOURCE_API_KEY) ?? "";
   if (!baseUrl || !apiKey) {
     res.writeHead(400);
     res.end(
@@ -2057,21 +2242,25 @@ export async function handleSyncPreflight(
     res.end(JSON.stringify({ error: "Missing query param: projectId" }));
     return;
   }
-  const [countsResult, latestResult, activeRunResult, projectResult] = await Promise.all([
+  const [countsResult, latestResult, activeRunResult, projectResult, credentialsResult] = await Promise.all([
     getProjectEntityCounts(client, projectId),
     getProjectLatestRows(client, projectId, 3),
     getActiveSyncRun(client),
     getProjectById(client, projectId),
+    getGetSalesCredentials(client, projectId),
   ]);
   if (projectResult.error || !projectResult.data) {
     res.writeHead(404);
     res.end(JSON.stringify({ error: "Project not found" }));
     return;
   }
-  const project = projectResult.data;
-  const baseUrl =
-    (project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL)?.replace(/\/$/, "") ?? "";
-  const apiKey = project.source_api_key ?? process.env.SOURCE_API_KEY ?? "";
+  if (credentialsResult.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: credentialsResult.error }));
+    return;
+  }
+  const baseUrl = credentialsResult.credentials?.baseUrl ?? "";
+  const apiKey = credentialsResult.credentials?.apiKey ?? "";
   let sourceApiCheck: { ok: boolean; error?: string };
   if (baseUrl && apiKey) {
     const v = await verifyGetSalesCredentials({ baseUrl, apiKey });
@@ -2908,15 +3097,22 @@ export async function handlePostFindContactByUuid(
     res.end(JSON.stringify({ error: "projectId and leadUuid are required." }));
     return;
   }
-  const { data: project, error: projectErr } = await getProjectById(client, projectId);
+  const [{ data: project, error: projectErr }, credentialsResult] = await Promise.all([
+    getProjectById(client, projectId),
+    getGetSalesCredentials(client, projectId),
+  ]);
   if (projectErr || !project) {
     res.writeHead(404);
     res.end(JSON.stringify({ error: projectErr ?? "Project not found" }));
     return;
   }
-  const baseUrl =
-    (project.source_api_base_url ?? process.env.SOURCE_API_BASE_URL)?.replace(/\/$/, "") ?? "";
-  const apiKey = project.source_api_key ?? process.env.SOURCE_API_KEY ?? "";
+  if (credentialsResult.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: credentialsResult.error }));
+    return;
+  }
+  const baseUrl = credentialsResult.credentials?.baseUrl ?? "";
+  const apiKey = credentialsResult.credentials?.apiKey ?? "";
   if (!baseUrl || !apiKey) {
     res.writeHead(400);
     res.end(
