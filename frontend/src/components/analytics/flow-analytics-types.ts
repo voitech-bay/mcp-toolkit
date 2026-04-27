@@ -7,6 +7,12 @@ export interface FlowPipelineStageBreakdownRow {
   contactsCount: number;
 }
 
+export interface FlowPipelineStageOptionRow {
+  stageUuid: string;
+  stageName: string;
+  stageOrder: number | null;
+}
+
 export interface FlowFunnelRow {
   flowUuid: string;
   flowName: string;
@@ -40,6 +46,13 @@ export interface FlowFunnelComparisonPayload {
   previousDateFrom: string;
   previousDateTo: string;
   totals: FlowFunnelProjectTotalsPayload;
+}
+
+export interface FlowTotalAnalyticsPayload {
+  flows: FlowFunnelRow[];
+  pipelineStages: FlowPipelineStageOptionRow[];
+  warnings: string[];
+  error?: string;
 }
 
 export interface DailyMetricPoint {

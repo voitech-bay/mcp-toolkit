@@ -19,6 +19,7 @@ import {
   handleProjectDashboard,
   handleFlowFunnel,
   handleProjectAnalytics,
+  handleProjectAnalyticsTotal,
   handleProjectAnalyticsDaily,
   handleAnalyticsSync,
   handleConversation,
@@ -496,6 +497,14 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/project-analytics-total":
+        if (req.method === "GET") {
+          await handleProjectAnalyticsTotal(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/project-analytics-daily":
         if (req.method === "GET") {
           await handleProjectAnalyticsDaily(req, res);
@@ -945,6 +954,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  GET  /api/flow-funnel?projectId=<id>&dateFrom=YYYY-MM-DD&dateTo=YYYY-MM-DD");
   console.log(
     "  GET  /api/project-analytics?projectId=<id>&dateFrom=...&dateTo=...&groupBy=flow|hypothesis",
+    "  GET  /api/project-analytics-total?projectId=<id>",
     "  GET  /api/project-analytics-daily?projectId=&dateFrom=&dateTo=&groupBy=flow|hypothesis&entityIds=uuid,uuid"
   );
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");

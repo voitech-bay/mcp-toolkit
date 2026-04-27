@@ -99,6 +99,7 @@ import {
   getProjectAnalyticsDailySeries,
   type ProjectAnalyticsDashboardTotals,
 } from "./services/analytics-funnel.js";
+import { getProjectTotalAnalytics } from "./services/analytics-total.js";
 import { getProjectConversationGeoAggregates } from "./services/project-conversation-geo.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
 import {
@@ -660,6 +661,55 @@ export async function handleProjectAnalytics(
       warnings: mergedWarnings,
       projectTotals: projectAnalyticsTotalsToJson(dash.projectTotals),
       comparison,
+    })
+  );
+}
+
+/**
+ * GET /api/project-analytics-total?projectId=
+ * — lifetime Pipedrive deal stage distribution grouped by campaign-matched flow.
+ */
+export async function handleProjectAnalyticsTotal(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const q = getQueryParams(req);
+  const projectId = q.get("projectId")?.trim() ?? "";
+  if (!projectId || !PROJECT_ID_RE.test(projectId)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid projectId" }));
+    return;
+  }
+
+  const startedAt = Date.now();
+  const result = await getProjectTotalAnalytics(client, projectId);
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: result.error, warnings: result.warnings }));
+    return;
+  }
+  console.info(
+    `[project-analytics-total] project=${projectId} flows=${result.flows.length} stages=${result.pipelineStages.length} elapsedMs=${Date.now() - startedAt}`
+  );
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      flows: result.flows,
+      pipelineStages: result.pipelineStages,
+      warnings: result.warnings,
     })
   );
 }

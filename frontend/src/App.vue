@@ -36,7 +36,6 @@ import {
   Link2Icon,  
   BarChart3Icon,
   CopyIcon,
-  LayersIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 
@@ -49,11 +48,9 @@ const route = useRoute();
 const router = useRouter();
 
 const isHome = computed(() => route.path === "/");
-const isFlowDashboard = computed(
-  () => route.path === "/flow-dashboard" || route.path === "/analytics"
+const isAnalyticsGroupActive = computed(
+  () => route.path === "/flow-dashboard" || route.path.startsWith("/analytics")
 );
-
-const isDifyRoute = computed(() => route.path.startsWith("/dify"));
 
 /** Grouped routes — highlight parent when any child is active. */
 const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
@@ -134,6 +131,19 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "Enrichment jobs",
     key: "/enrichment/jobs",
     icon: () => h(ClipboardListIcon, { size: 14 }),
+  },
+];
+
+const analyticsMenuOptions: DropdownOption[] = [
+  {
+    label: "By period",
+    key: "/analytics",
+    icon: () => h(BarChart3Icon, { size: 14 }),
+  },
+  {
+    label: "Total",
+    key: "/analytics/total",
+    icon: () => h(BarChart3Icon, { size: 14 }),
   },
 ];
 
@@ -502,25 +512,14 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   Home
                 </NButton>
 
-                <NButton
-                  quaternary
-                  :type="isFlowDashboard ? 'primary' : undefined"
-                  size="small"
-                  @click="router.push('/analytics')"
-                >
-                  <BarChart3Icon :size="14" style="margin-right: 4px" />
-                  Analytics
-                </NButton>
-
-                <NButton
-                  quaternary
-                  :type="isDifyRoute ? 'primary' : undefined"
-                  size="small"
-                  @click="router.push('/dify/batches')"
-                >
-                  <LayersIcon :size="14" style="margin-right: 4px" />
-                  Dify batches
-                </NButton>
+                <NDropdown trigger="hover" placement="bottom-start" :options="analyticsMenuOptions" :show-arrow="true"
+                  @select="onNavSelect">
+                  <NButton quaternary size="small" :type="isAnalyticsGroupActive ? 'primary' : undefined"
+                    class="nav-dropdown-trigger">
+                    Analytics
+                    <ChevronDownIcon :size="14" class="nav-chevron" />
+                  </NButton>
+                </NDropdown>
 
                 <NDropdown trigger="hover" placement="bottom-start" :options="dataMenuOptions" :show-arrow="true"
                   @select="onNavSelect">
@@ -595,7 +594,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
         </NModal>
 
         <main class="main">
-          <template v-if="!projectStore.selectedProjectId && !isDifyRoute">
+          <template v-if="!projectStore.selectedProjectId">
             <div class="no-project-orbit-wrap" :style="noProjectOrbitStageStyle">
               <img
                 class="no-project-orbit-img"
@@ -609,7 +608,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
             </NAlert>
           </template>
           <template v-else>
-            <div v-if="isFlowDashboard && projectStore.selectedProjectId" class="main-portal-cta">
+            <div v-if="isAnalyticsGroupActive && projectStore.selectedProjectId" class="main-portal-cta">
               <NButton
                 type="primary"
                 size="small"

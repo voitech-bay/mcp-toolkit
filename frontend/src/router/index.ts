@@ -11,6 +11,12 @@ const router = createRouter({
       meta: { title: "Analytics | MCP Toolkit" },
     },
     {
+      path: "/analytics/total",
+      name: "AnalyticsTotal",
+      component: () => import("../views/AnalyticsTotalPage.vue"),
+      meta: { title: "Analytics total | MCP Toolkit" },
+    },
+    {
       path: "/flow-dashboard",
       name: "FlowDashboard",
       component: () => import("../views/FlowDashboardPage.vue"),
@@ -33,12 +39,6 @@ const router = createRouter({
     { path: "/getsales-tags", name: "GetSalesTags", component: () => import("../views/GetSalesTagsPage.vue"), meta: { title: "GetSales tags | MCP Toolkit" } },
     { path: "/enrichment", name: "EnrichmentTable", component: () => import("../views/EnrichmentTablePage.vue"), meta: { title: "Enrichment | MCP Toolkit" } },
     { path: "/enrichment/jobs", name: "EnrichmentJobs", component: () => import("../views/EnrichmentJobsPage.vue"), meta: { title: "Enrichment jobs | MCP Toolkit" } },
-    {
-      path: "/dify/batches",
-      name: "DifyBatches",
-      component: () => import("../views/DifyBatchesPage.vue"),
-      meta: { title: "Dify batches | MCP Toolkit" },
-    },
   ],
 });
 
