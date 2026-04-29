@@ -53,7 +53,7 @@ export const LEADS_METRICS_REQUEST_KEYS = [
 ] as const;
 
 /** GetSales bundled API: list endpoints use `limit` (default 20, max 100). */
-const SOURCE_API_PAGE_SIZE_MAX = 100;
+const SOURCE_API_PAGE_SIZE_MAX = 500;
 /**
  * Elasticsearch `max_result_window` — server maps offset/limit to `from`/`size`;
  * requests with offset + limit > 10000 return HTTP 500 (Result window is too large).
