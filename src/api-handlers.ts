@@ -3250,8 +3250,58 @@ export async function handleGetContactsGsByList(
     res.end(JSON.stringify({ data: gsRes.rows, error: gsRes.error }));
     return;
   }
+
+  const uniqueCompanyIds = [
+    ...new Set(
+      gsRes.rows
+        .map((r) => {
+          const id = r.company_uuid;
+          return typeof id === "string" ? id.trim() : "";
+        })
+        .filter((id) => id.length > 0)
+    ),
+  ];
+  const companyById = new Map<
+    string,
+    { company_description: unknown; company_employees: unknown; domain: unknown }
+  >();
+  const coChunk = 100;
+  for (let i = 0; i < uniqueCompanyIds.length; i += coChunk) {
+    const chunk = uniqueCompanyIds.slice(i, i + coChunk);
+    const { data: coRows, error: coErr } = await client
+      .from(COMPANIES_TABLE)
+      .select("id, about, employees_range, domain")
+      .in("id", chunk);
+    if (coErr) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ data: [], error: coErr.message }));
+      return;
+    }
+    for (const row of (coRows ?? []) as Array<Record<string, unknown>>) {
+      const id = typeof row.id === "string" ? row.id : "";
+      if (!id) continue;
+      companyById.set(id, {
+        company_description: row.about ?? null,
+        company_employees: row.employees_range ?? null,
+        domain: row.domain ?? null,
+      });
+    }
+  }
+
+  const normalized = gsRes.rows.map((row) => {
+    const cid = typeof row.company_uuid === "string" ? row.company_uuid.trim() : "";
+    const co = cid ? companyById.get(cid) : undefined;
+    const linkedinUrlRaw = row.linkedin_url ?? row.linkedin ?? null;
+    return {
+      ...row,
+      linkedin_url: typeof linkedinUrlRaw === "string" ? linkedinUrlRaw : null,
+      company_description: co?.company_description ?? null,
+      company_employees: co?.company_employees ?? null,
+      domain: co?.domain ?? null,
+    };
+  });
   res.writeHead(200);
-  res.end(JSON.stringify({ data: gsRes.rows }));
+  res.end(JSON.stringify({ data: normalized }));
 }
 
 /**
