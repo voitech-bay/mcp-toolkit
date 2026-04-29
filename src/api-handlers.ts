@@ -3214,14 +3214,14 @@ export async function handleGetContactsGsByList(
   if (req.method !== "GET") {
     res.writeHead(405, { Allow: "GET" });
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ error: "Method not allowed" }));
+    res.end(JSON.stringify({ data: [], error: "Method not allowed" }));
     return;
   }
   res.setHeader("Content-Type", "application/json");
   const client = getSupabase();
   if (!client) {
     res.writeHead(500);
-    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    res.end(JSON.stringify({ data: [], error: "Supabase not configured" }));
     return;
   }
   const params = getQueryParams(req);
@@ -3229,44 +3229,29 @@ export async function handleGetContactsGsByList(
   const listUuid = params.get("listUuid")?.trim() ?? "";
   if (!projectId || !listUuid) {
     res.writeHead(400);
-    res.end(JSON.stringify({ error: "projectId and listUuid are required." }));
+    res.end(JSON.stringify({ data: [], error: "projectId and listUuid are required." }));
     return;
   }
   const credRes = await getGetSalesCredentials(client, projectId);
   if (credRes.error) {
     res.writeHead(500);
-    res.end(JSON.stringify({ error: credRes.error }));
+    res.end(JSON.stringify({ data: [], error: credRes.error }));
     return;
   }
   const credentials = credRes.credentials;
   if (!credentials?.baseUrl || !credentials?.apiKey) {
     res.writeHead(400);
-    res.end(JSON.stringify({ error: "GetSales credentials missing on project and environment." }));
+    res.end(JSON.stringify({ data: [], error: "GetSales credentials missing on project and environment." }));
     return;
   }
   const gsRes = await fetchContactsByListUuid(listUuid, credentials);
   if (gsRes.error) {
     res.writeHead(502);
-    res.end(
-      JSON.stringify({
-        error: gsRes.error,
-        errorDetail: gsRes.errorDetail ?? null,
-        total: gsRes.total,
-        data: gsRes.rows,
-      })
-    );
+    res.end(JSON.stringify({ data: gsRes.rows, error: gsRes.error }));
     return;
   }
   res.writeHead(200);
-  res.end(
-    JSON.stringify({
-      projectId,
-      listUuid,
-      total: gsRes.total ?? gsRes.rows.length,
-      fetched: gsRes.rows.length,
-      data: gsRes.rows,
-    })
-  );
+  res.end(JSON.stringify({ data: gsRes.rows }));
 }
 
 /**
