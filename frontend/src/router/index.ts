@@ -24,6 +24,7 @@ const router = createRouter({
     },
     { path: "/tables", name: "Tables", component: () => import("../views/TablesPage.vue"), meta: { title: "Tables | MCP Toolkit" } },
     { path: "/sync", name: "Sync", component: () => import("../views/SyncPage.vue"), meta: { title: "Sync | MCP Toolkit" } },
+    { path: "/lists-checker", name: "ListsChecker", component: () => import("../views/ListsCheckerPage.vue"), meta: { title: "Lists checker | MCP Toolkit" } },
     { path: "/companies", name: "Companies", component: () => import("../views/CompaniesPage.vue"), meta: { title: "Companies | MCP Toolkit" } },
     { path: "/contacts", name: "Contacts", component: () => import("../views/ContactsPage.vue"), meta: { title: "Contacts | MCP Toolkit" } },
     { path: "/hypotheses", name: "Hypotheses", component: () => import("../views/HypothesesPage.vue"), meta: { title: "Hypotheses | MCP Toolkit" } },

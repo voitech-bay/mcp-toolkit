@@ -8,6 +8,7 @@ import {
   NSpace,
   NSelect,
   NMessageProvider,
+  NDialogProvider,
   NCard,
   NDropdown,
   NAlert,
@@ -55,7 +56,7 @@ const isAnalyticsGroupActive = computed(
 /** Grouped routes — highlight parent when any child is active. */
 const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
 const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses", "/hypothesis-tag-contacts"] as const;
-const PIPELINE_PATHS = ["/sync", "/enrichment", "/enrichment/jobs"] as const;
+const PIPELINE_PATHS = ["/sync", "/lists-checker", "/enrichment", "/enrichment/jobs"] as const;
 
 function pathInGroup(path: string, group: readonly string[]): boolean {
   return group.includes(path);
@@ -121,6 +122,11 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "Sync",
     key: "/sync",
     icon: () => h(RefreshCwIcon, { size: 14 }),
+  },
+  {
+    label: "Lists checker",
+    key: "/lists-checker",
+    icon: () => h(ClipboardListIcon, { size: 14 }),
   },
   {
     label: "Enrichment",
@@ -439,6 +445,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
 
 <template>
   <NMessageProvider>
+    <NDialogProvider>
     <NConfigProvider :theme="naiveTheme">
       <div class="app">
         <NCard class="header-card">
@@ -631,6 +638,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
         </main>
       </div>
     </NConfigProvider>
+    </NDialogProvider>
   </NMessageProvider>
 </template>
 

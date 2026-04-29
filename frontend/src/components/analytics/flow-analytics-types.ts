@@ -11,6 +11,7 @@ export interface FlowPipelineStageOptionRow {
   stageUuid: string;
   stageName: string;
   stageOrder: number | null;
+  source?: "getsales" | "pipedrive";
 }
 
 export interface FlowFunnelRow {
@@ -28,6 +29,8 @@ export interface FlowFunnelRow {
   linkedContactsCount?: number;
   linkedFlowsCount?: number;
   pipelineStageBreakdown?: FlowPipelineStageBreakdownRow[];
+  /** Raw Pipedrive deal rows for this flow (Campaign → flow name). */
+  pipedriveDealCount?: number;
 }
 
 export interface FlowFunnelProjectTotalsPayload {

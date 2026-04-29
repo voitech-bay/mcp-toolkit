@@ -21,6 +21,7 @@ import {
 import type {
   FlowFunnelRow,
   FlowPipelineStageBreakdownRow,
+  FlowPipelineStageOptionRow,
   FlowTotalAnalyticsPayload,
 } from "../components/analytics/flow-analytics-types.js";
 import { useProjectStore } from "../stores/project";
@@ -31,6 +32,38 @@ use([CanvasRenderer, CustomChart, GraphicComponent, TitleComponent, TooltipCompo
 type TotalMode = "absolute" | "conversion";
 type FlowRow = FlowFunnelRow & { pipelineStageBreakdown?: FlowPipelineStageBreakdownRow[] };
 type StageRow = FlowPipelineStageBreakdownRow;
+type ColOption = FlowPipelineStageOptionRow;
+
+const GETSALES_ALLUVIAL_IDS = [
+  "__gs:connectionSent",
+  "__gs:connectionAccepted",
+  "__gs:inbox",
+  "__gs:positiveReplies",
+] as const;
+
+function sortCombinedColumnOrder(a: ColOption, b: ColOption): number {
+  const aG = a.source === "pipedrive" ? 1 : 0;
+  const bG = b.source === "pipedrive" ? 1 : 0;
+  if (aG !== bG) return aG - bG;
+  const ao = a.stageOrder ?? Number.MAX_SAFE_INTEGER;
+  const bo = b.stageOrder ?? Number.MAX_SAFE_INTEGER;
+  return ao - bo || a.stageName.localeCompare(b.stageName, undefined, { sensitivity: "base" });
+}
+
+function getSalesValueForKey(flow: FlowRow, id: string): number {
+  switch (id) {
+    case "__gs:connectionSent":
+      return Math.max(0, flow.connectionSent | 0);
+    case "__gs:connectionAccepted":
+      return Math.max(0, flow.connectionAccepted | 0);
+    case "__gs:inbox":
+      return Math.max(0, flow.inbox | 0);
+    case "__gs:positiveReplies":
+      return Math.max(0, flow.positiveReplies | 0);
+    default:
+      return 0;
+  }
+}
 
 const projectStore = useProjectStore();
 const isDark = useDark();
@@ -44,7 +77,7 @@ const loading = ref(false);
 const loadError = ref("");
 const warnings = ref<string[]>([]);
 const flows = ref<FlowRow[]>([]);
-const pipelineStages = ref<StageRow[]>([]);
+const pipelineStages = ref<ColOption[]>([]);
 const selectedFlowUuids = ref<string[]>([]);
 /** Subset of `pipelineStages` to show in the alluvial (order follows API / order_nr). */
 const selectedStageUuids = ref<string[]>([]);
@@ -57,10 +90,15 @@ const totalModeOptions: SelectOption[] = [
   { label: "Conversion (% vs first stage)", value: "conversion" },
 ];
 
-const pipedriveStageOptions = computed((): SelectOption[] =>
+const columnStageOptions = computed((): SelectOption[] =>
   pipelineStages.value.map((s) => ({
     value: s.stageUuid,
-    label: s.stageOrder != null ? `${s.stageName} (#${s.stageOrder})` : s.stageName,
+    label:
+      s.source === "getsales"
+        ? `GetSales: ${s.stageName}`
+        : s.stageOrder != null
+          ? `Pipedrive: ${s.stageName} (#${s.stageOrder})`
+          : `Pipedrive: ${s.stageName}`,
   }))
 );
 
@@ -99,9 +137,22 @@ function uuidsForDefaultStages(stages: StageRow[]): string[] {
   return out;
 }
 
+function asStageNameRows(stages: ColOption[]): StageRow[] {
+  return stages.map((s) => ({
+    stageUuid: s.stageUuid,
+    stageName: s.stageName,
+    stageOrder: s.stageOrder,
+    contactsCount: 0,
+  }));
+}
+
+function flowActivityWeight(f: FlowRow): number {
+  return (f.connectionSent | 0) + (f.pipedriveDealCount ?? 0);
+}
+
 function compareFlowRows(a: FlowRow, b: FlowRow): number {
   return (
-    b.connectionSent - a.connectionSent ||
+    flowActivityWeight(b) - flowActivityWeight(a) ||
     a.flowName.localeCompare(b.flowName, undefined, { sensitivity: "base" })
   );
 }
@@ -112,15 +163,19 @@ const flowPickerItems = computed(() =>
   flowsSortedForPicker.value.map((f, idx) => ({
     id: f.flowUuid,
     label: `${FLOW_TAG_EMOJIS[idx % FLOW_TAG_EMOJIS.length]!} ${f.flowName}`,
-    meta: ` · ${f.connectionSent.toLocaleString()} deals`,
+    meta: ` · ${f.connectionSent.toLocaleString()} conn · ${(f.pipedriveDealCount ?? 0).toLocaleString()} deals`,
     tooltip: selectedFlowUuids.value.includes(f.flowUuid)
       ? "Remove from total alluvial."
       : "Add to total alluvial.",
   }))
 );
 
+function flowHasActivity(f: FlowRow): boolean {
+  return flowActivityWeight(f) > 0 || (f.inbox | 0) > 0 || (f.positiveReplies | 0) > 0;
+}
+
 function defaultSelectedUuids(list: FlowRow[]): string[] {
-  const active = list.filter((f) => f.connectionSent > 0).sort(compareFlowRows);
+  const active = list.filter((f) => flowHasActivity(f)).sort(compareFlowRows);
   return active.slice(0, Math.min(active.length, FUNNEL_SANKEY_FLOW_LIMIT)).map((f) => f.flowUuid);
 }
 
@@ -154,16 +209,19 @@ watch(totalMode, (mode) => {
 });
 
 function syncSelectedStagesFromPipeline(): void {
-  const valid = new Set(pipelineStages.value.map((s) => s.stageUuid));
+  const list = pipelineStages.value;
+  const valid = new Set(list.map((s) => s.stageUuid));
   const kept = selectedStageUuids.value.filter((id) => valid.has(id));
   if (kept.length > 0) {
     selectedStageUuids.value = kept;
     return;
   }
-  if (pipelineStages.value.length > 0) {
-    const preferred = uuidsForDefaultStages(pipelineStages.value);
-    selectedStageUuids.value =
-      preferred.length > 0 ? preferred : pipelineStages.value.map((s) => s.stageUuid);
+  if (list.length > 0) {
+    const getSalesUuids = GETSALES_ALLUVIAL_IDS.filter((id) => valid.has(id));
+    const pdOnly = list.filter((s) => s.source === "pipedrive" || s.source == null);
+    const preferred = uuidsForDefaultStages(asStageNameRows(pdOnly));
+    const pdIds = preferred.length > 0 ? preferred : pdOnly.map((s) => s.stageUuid);
+    selectedStageUuids.value = [...getSalesUuids, ...pdIds];
   } else {
     selectedStageUuids.value = [];
   }
@@ -196,6 +254,20 @@ function normalizeStage(raw: Record<string, unknown>): StageRow {
   };
 }
 
+function normalizeColOptionFromApi(raw: Record<string, unknown>): ColOption {
+  return {
+    stageUuid: String(raw.stageUuid ?? ""),
+    stageName: String(raw.stageName ?? "").trim(),
+    stageOrder:
+      raw.stageOrder == null || raw.stageOrder === ""
+        ? null
+        : Number.isFinite(Number(raw.stageOrder))
+          ? Math.trunc(Number(raw.stageOrder))
+          : null,
+    source: raw.source === "getsales" || raw.source === "pipedrive" ? raw.source : undefined,
+  };
+}
+
 function normalizeFlowRow(raw: Record<string, unknown>): FlowRow {
   const stages = Array.isArray(raw.pipelineStageBreakdown)
     ? (raw.pipelineStageBreakdown as Array<Record<string, unknown>>)
@@ -212,6 +284,7 @@ function normalizeFlowRow(raw: Record<string, unknown>): FlowRow {
     acceptedRatePct: raw.acceptedRatePct == null ? null : Number(raw.acceptedRatePct),
     inboxRatePct: raw.inboxRatePct == null ? null : Number(raw.inboxRatePct),
     positiveRatePct: raw.positiveRatePct == null ? null : Number(raw.positiveRatePct),
+    pipedriveDealCount: Number(raw.pipedriveDealCount ?? 0) || 0,
     pipelineStageBreakdown: stages
       .map(normalizeStage)
       .filter((s) => s.stageUuid.length > 0 && s.stageName.length > 0 && s.contactsCount > 0),
@@ -239,13 +312,9 @@ async function loadTotalAnalytics(projectId: string): Promise<void> {
     }
     flows.value = (data.flows ?? []).map((row) => normalizeFlowRow(row as unknown as Record<string, unknown>));
     pipelineStages.value = (data.pipelineStages ?? [])
-      .map((row) => normalizeStage(row as unknown as Record<string, unknown>))
+      .map((row) => normalizeColOptionFromApi(row as unknown as Record<string, unknown>))
       .filter((s) => s.stageUuid.length > 0 && s.stageName.length > 0)
-      .sort((a, b) => {
-        const ao = a.stageOrder ?? Number.MAX_SAFE_INTEGER;
-        const bo = b.stageOrder ?? Number.MAX_SAFE_INTEGER;
-        return ao - bo || a.stageName.localeCompare(b.stageName);
-      });
+      .sort(sortCombinedColumnOrder);
     warnings.value = data.warnings ?? [];
   } catch (e) {
     if (e instanceof DOMException && e.name === "AbortError") return;
@@ -301,11 +370,14 @@ function flowColor(index: number, dark: boolean, isOther: boolean): string {
 }
 
 const buckets = computed((): Bucket[] => {
-  const list = [...filteredFlows.value].filter((f) => f.connectionSent > 0).sort(compareFlowRows);
+  const list = [...filteredFlows.value].filter((f) => flowHasActivity(f)).sort(compareFlowRows);
   const top = list.slice(0, FUNNEL_SANKEY_FLOW_LIMIT);
   const tail = list.slice(FUNNEL_SANKEY_FLOW_LIMIT);
   const toBucket = (flow: FlowRow, idx: number): Bucket => {
     const counts = new Map<string, number>();
+    for (const id of GETSALES_ALLUVIAL_IDS) {
+      counts.set(id, getSalesValueForKey(flow, id));
+    }
     for (const row of flow.pipelineStageBreakdown ?? []) {
       counts.set(row.stageUuid, (counts.get(row.stageUuid) ?? 0) + Math.max(0, row.contactsCount | 0));
     }
@@ -321,6 +393,9 @@ const buckets = computed((): Bucket[] => {
   if (tail.length > 0) {
     const counts = new Map<string, number>();
     for (const flow of tail) {
+      for (const id of GETSALES_ALLUVIAL_IDS) {
+        counts.set(id, (counts.get(id) ?? 0) + getSalesValueForKey(flow, id));
+      }
       for (const row of flow.pipelineStageBreakdown ?? []) {
         counts.set(row.stageUuid, (counts.get(row.stageUuid) ?? 0) + Math.max(0, row.contactsCount | 0));
       }
@@ -347,6 +422,8 @@ type Slot = {
   y0: number;
   y1: number;
   color: string;
+  /** GetSales: LinkedIn lifetime snapshot; Pipedrive: cumulative deal counts by `order_nr`. */
+  isGetsales: boolean;
 };
 
 type Ribbon = {
@@ -361,6 +438,7 @@ type Ribbon = {
   sourceStageName: string;
   targetStageName: string;
   label: string;
+  targetIsGetsales: boolean;
 };
 
 function makeTotalAlluvialOption(): EChartsOption {
@@ -368,7 +446,9 @@ function makeTotalAlluvialOption(): EChartsOption {
   const tc = chartTextColor(dark);
   const bg = chartSurfaceBg(dark);
   const pick = new Set(selectedStageUuids.value);
-  const stages = pipelineStages.value.filter((stage) => pick.has(stage.stageUuid));
+  const stages = pipelineStages.value
+    .filter((stage) => pick.has(stage.stageUuid))
+    .sort(sortCombinedColumnOrder);
   if (buckets.value.length === 0 || stages.length === 0) {
     return { animation: false, backgroundColor: bg, series: [] };
   }
@@ -394,6 +474,7 @@ function makeTotalAlluvialOption(): EChartsOption {
           y0: y,
           y1: Math.min(1, y + pct),
           color: bucket.color,
+          isGetsales: stage.source === "getsales" || (stage.source == null && stage.stageUuid.startsWith("__gs:")),
         };
         y = slot.y1;
         return slot;
@@ -427,14 +508,17 @@ function makeTotalAlluvialOption(): EChartsOption {
         sourceStageName: sourceStage.stageName,
         targetStageName: targetStage.stageName,
         label: bucket.label,
+        targetIsGetsales:
+          targetStage.source === "getsales" ||
+          (targetStage.source == null && targetStage.stageUuid.startsWith("__gs:")),
       });
     }
   }
 
   const subtext =
     totalMode.value === "conversion"
-      ? "Pipedrive deal distribution by flow and stage; labels show percent vs that flow's first selected stage (with deals in the current flow selection)."
-      : "Pipedrive deal distribution by flow and stage; labels show deal counts.";
+      ? "GetSales: lifetime LinkedIn snapshot metrics. Pipedrive: cumulative deal counts (previous stages in same pipeline get +1). Conversion % is vs first selected column for each flow."
+      : "GetSales: lifetime LinkedIn activity. Pipedrive: deal counts (cumulative by stage order in pipeline).";
   const axisHeaders = stages.map((stage, i) => {
     const last = Math.max(1, stages.length - 1);
     return {
@@ -474,15 +558,19 @@ function makeTotalAlluvialOption(): EChartsOption {
         const data = (params as { data?: Record<string, unknown> } | undefined)?.data;
         if (!data) return "";
         if (data.kind === "ribbon") {
-          return `${data.sourceStageName} → ${data.targetStageName}<br/>${data.label}<br/><strong>${Number(data.raw ?? 0).toLocaleString()}</strong> deals`;
+          const n = Number(data.raw ?? 0);
+          const unit = data.targetIsGetsales ? "LinkedIn (volume)" : "deals";
+          return `${String(data.sourceStageName)} → ${String(data.targetStageName)}<br/>${String(data.label)}<br/><strong>${n.toLocaleString()}</strong> ${unit}`;
         }
         const raw = Number(data.raw ?? 0);
         const pct = Number(data.pct ?? 0) * 100;
+        const isGs = data.isGetsales === true;
+        const countLabel = isGs ? "LinkedIn (lifetime)" : "Pipedrive deals (cumulative)";
         if (totalMode.value === "conversion") {
           const conv = data.conversionPct == null ? null : Number(data.conversionPct);
-          return `${data.stageName} · ${data.label}<br/><strong>${conv == null ? "—" : `${Math.round(conv)}%`}</strong><br/><em>${raw.toLocaleString()} deals · ${pct.toFixed(1)}% of stage</em>`;
+          return `${data.stageName} · ${data.label}<br/><strong>${conv == null ? "—" : `${Math.round(conv)}%`}</strong><br/><em>${raw.toLocaleString()} ${isGs ? "volume" : "deals"} · ${pct.toFixed(1)}% of column · ${countLabel}</em>`;
         }
-        return `${data.stageName} · ${data.label}<br/><strong>${raw.toLocaleString()}</strong> deals<br/><em>${pct.toFixed(1)}% of stage</em>`;
+        return `${data.stageName} · ${data.label}<br/><strong>${raw.toLocaleString()}</strong> ${isGs ? "volume" : "deals"}<br/><em>${pct.toFixed(1)}% of column</em>`;
       },
     },
     series: [
@@ -595,7 +683,7 @@ void [
   EntityTagPicker,
   chartUpdateOptions,
   totalModeOptions,
-  pipedriveStageOptions,
+  columnStageOptions,
   flowPickerItems,
   totalAlluvialOption,
 ];
@@ -626,12 +714,12 @@ void [
             />
           </div>
           <NText v-else depth="3" class="flow-dash__filters-status">
-            {{ loading ? "Loading..." : "No mapped Pipedrive deals" }}
+            {{ loading ? "Loading..." : "No flows" }}
           </NText>
         </NCard>
 
         <NAlert v-if="!loadError && flows.length === 0 && !loading" type="info" title="No total analytics" class="flow-dash__alert flow-dash__card--spaced">
-          No Pipedrive deals matched `payload[Campaign]` to `Flows.name`.
+          No project flows, or the Pipedrive Campaign field could not be resolved.
         </NAlert>
 
         <NAlert v-else-if="selectedFlowUuids.length === 0" type="info" title="No flows selected" class="flow-dash__alert flow-dash__card--spaced">
@@ -641,8 +729,8 @@ void [
         <NCard v-else title="Funnel Alluvial" size="small" class="flow-dash__card flow-dash__card--spaced">
           <div class="flow-dash__sankey-toolbar">
             <NText depth="3" class="flow-dash__hint flow-dash__hint--tight">
-              Lifetime Pipedrive deals grouped by campaign-matched flow. No date filters; stage labels come from Pipedrive related stage objects
-              (ordered by <code>payload.order_nr</code>).
+              GetSales first (lifetime from AnalyticsSnapshots), then Pipedrive. Deal counts are cumulative by <code>order_nr</code> in each
+              Pipedrive pipeline. Columns sort left-to-right: GetSales → Pipedrive.
             </NText>
             <NSelect
               v-model:value="totalMode"
@@ -652,12 +740,12 @@ void [
             />
             <NSelect
               v-model:value="selectedStageUuids"
-              :options="pipedriveStageOptions"
+              :options="columnStageOptions"
               multiple
               filterable
               clearable
               :disabled="pipelineStages.length === 0"
-              placeholder="Pipedrive stages to show"
+              placeholder="GetSales + Pipedrive columns"
               size="small"
               class="flow-dash__sankey-stage-select"
             />

@@ -22,6 +22,7 @@ import {
   handleProjectAnalyticsTotal,
   handleProjectAnalyticsDaily,
   handleAnalyticsSync,
+  handleAnalyticsDayDelete,
   handleConversation,
   handleGetCompanyContext,
   handleSetCompanyContext,
@@ -57,6 +58,8 @@ import {
   handleGetCompanyHypotheses,
   handleGetContactsByCompany,
   handleGetContactsByList,
+  handleGetContactsGsByList,
+  handleGetContactsListSyncCheck,
   handleCreateCompany,
   handlePatchContactCompany,
   handleGetCompaniesByIds,
@@ -92,6 +95,7 @@ import {
   handlePostSetGeneratedMessagePresetDefault,
   handlePostRollbackGeneratedMessagePreset,
   handlePostFindContactByUuid,
+  handlePostContactsListSyncResyncMissing,
   handleFirefliesWebhook,
   handleGetDifyWorkflows,
   handleGetDifyWorkflowRuns,
@@ -254,6 +258,9 @@ const server = createServer(async (req, res) => {
   const contactIdMatch =
     pathname !== "/api/contacts/by-company" &&
     pathname !== "/api/contacts/by-list" &&
+    pathname !== "/api/contacts/gs-by-list" &&
+    pathname !== "/api/contacts/list-sync-check" &&
+    pathname !== "/api/contacts/list-sync-resync-missing" &&
     pathname !== "/api/contacts/find-by-uuid" &&
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
   const generatedMessageIdMatch =
@@ -529,6 +536,14 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/analytics-day":
+        if (req.method === "DELETE") {
+          await handleAnalyticsDayDelete(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/webhooks/fireflies":
         await handleFirefliesWebhook(req, res);
         return;
@@ -573,6 +588,30 @@ const server = createServer(async (req, res) => {
       case "/api/contacts/by-list":
         if (req.method === "GET") {
           await handleGetContactsByList(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contacts/gs-by-list":
+        if (req.method === "GET") {
+          await handleGetContactsGsByList(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contacts/list-sync-check":
+        if (req.method === "GET") {
+          await handleGetContactsListSyncCheck(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/contacts/list-sync-resync-missing":
+        if (req.method === "POST") {
+          await handlePostContactsListSyncResyncMissing(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -958,6 +997,7 @@ server.listen(PORT, "0.0.0.0", () => {
     "  GET  /api/project-analytics-daily?projectId=&dateFrom=&dateTo=&groupBy=flow|hypothesis&entityIds=uuid,uuid"
   );
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");
+  console.log("  DELETE /api/analytics-day?projectId=<id>&date=YYYY-MM-DD");
   console.log("  POST /api/analytics-sync");
   console.log("  POST /api/webhooks/fireflies");
   console.log("  GET  /api/supabase-table-query");

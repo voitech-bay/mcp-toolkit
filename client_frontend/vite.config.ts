@@ -9,6 +9,7 @@ const apiProxyTarget = process.env.VITE_API_PROXY_TARGET ?? `http://localhost:${
 const ALLOWED_ANALYTICS_API_PATHS = new Set([
   "/api/project-dashboard",
   "/api/analytics-collected-days",
+  "/api/analytics-day",
   "/api/project-analytics",
   "/api/project-analytics-daily",
   "/api/project-conversation-geo",

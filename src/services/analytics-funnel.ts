@@ -254,12 +254,16 @@ export interface ProjectAnalyticsDashboardFlow {
     stageOrder: number | null;
     contactsCount: number;
   }>;
+  /** Total Pipedrive deal rows in this project mapped to this flow (not cumulative across stages). */
+  pipedriveDealCount?: number;
 }
 
 export interface ProjectAnalyticsPipelineStage {
   stageUuid: string;
   stageName: string;
   stageOrder: number | null;
+  /** Alluvial total: GetSales (LinkedIn) columns render before Pipedrive when set. */
+  source?: "getsales" | "pipedrive";
 }
 
 /** Project-wide totals (sum of all flow-level snapshot metrics in range). */

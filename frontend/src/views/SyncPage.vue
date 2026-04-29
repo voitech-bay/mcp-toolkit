@@ -5,6 +5,7 @@ import {
   NCollapse, NCollapseItem, NDataTable, NText, NTooltip,
   NDatePicker, NCheckbox,
   useMessage,
+  useDialog,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import {
@@ -20,6 +21,7 @@ import { useProjectStore } from "../stores/project";
 
 // --- State ---
 const message = useMessage();
+const dialog = useDialog();
 const projectStore = useProjectStore();
 
 const selectedProjectId = computed(() => projectStore.selectedProjectId);
@@ -66,11 +68,13 @@ const history = ref<SyncRun[]>([]);
 
 const analyticsCollectedDays = ref<string[]>([]);
 const analyticsDaysLoading = ref(false);
+const analyticsDayDeleting = ref<string | null>(null);
 const analyticsSyncLoading = ref(false);
 const analyticsDateRange = ref<[number, number] | null>(null);
 
 /** Optional inclusive local calendar range for GetSales partitioned list sync (contacts, companies). */
 const syncPipelineDateRange = ref<[number, number] | null>(null);
+
 
 /** YYYY-MM-DD in local calendar (matches GetSales day boundaries UX). */
 function toLocalYmd(ms: number): string {
@@ -455,6 +459,37 @@ async function loadAnalyticsCollectedDays() {
   }
 }
 
+async function removeAnalyticsSnapshotsForDay(day: string): Promise<void> {
+  if (!selectedProjectId.value) throw new Error("No project selected");
+  const r = await fetch(
+    `/api/analytics-day?projectId=${encodeURIComponent(selectedProjectId.value)}&date=${encodeURIComponent(day)}`,
+    { method: "DELETE" },
+  );
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error ?? "Failed to remove analytics for this day");
+  message.success(`Removed analytics for ${day}`);
+  await loadAnalyticsCollectedDays();
+}
+
+function onAnalyticsDayChipClose(day: string) {
+  dialog.warning({
+    title: "Remove analytics for this day?",
+    content:
+      `Permanently delete all AnalyticsSnapshots rows for ${day} in this project. ` +
+      "Dashboards will exclude this day until you run analytics sync again.",
+    positiveText: "Remove",
+    negativeText: "Cancel",
+    onPositiveClick: async () => {
+      analyticsDayDeleting.value = day;
+      try {
+        await removeAnalyticsSnapshotsForDay(day);
+      } finally {
+        analyticsDayDeleting.value = null;
+      }
+    },
+  });
+}
+
 async function runAnalyticsSync() {
   if (!selectedProjectId.value || !analyticsDateRange.value) return;
   const [start, end] = analyticsDateRange.value;
@@ -488,6 +523,7 @@ async function runAnalyticsSync() {
     analyticsSyncLoading.value = false;
   }
 }
+
 
 function connectWs(runId: string) {
   if (ws) ws.close();
@@ -1106,10 +1142,13 @@ const preflightRows = computed(() => {
             <NTag
               v-for="d in sortedCollectedDays"
               :key="d"
+              closable
               size="small"
               round
               type="success"
               :bordered="false"
+              :disabled="!!analyticsDayDeleting || analyticsDaysLoading"
+              @close="onAnalyticsDayChipClose(d)"
             >
               {{ d }}
             </NTag>

@@ -72,6 +72,7 @@ import {
   getEnrichmentAgentResultsMapForEntity,
   getEnrichmentAgentByName,
   getCollectedAnalyticsDays,
+  deleteAnalyticsSnapshotsForDay,
   getAutomationFlowFunnelByFlow,
   aggregateAutomationFlowFunnelTotals,
   getProjectDashboardSnapshot,
@@ -118,7 +119,13 @@ import {
   mapContactForSupabase,
   type SyncEntityKey,
 } from "./services/sync-supabase.js";
-import { fetchContactByUuid, verifyGetSalesCredentials } from "./services/source-api.js";
+import {
+  fetchContactByUuid,
+  fetchContactsByListUuid,
+  fetchContactsByUuidsConcurrent,
+  fetchLeadUuidsByListUuid,
+  verifyGetSalesCredentials,
+} from "./services/source-api.js";
 import { syncPipedriveDeals } from "./services/pipedrive-deals-sync.js";
 import { listOpenRouterModels, generateOpenRouterMessage } from "./services/openrouter.js";
 import {
@@ -831,6 +838,48 @@ export async function handleAnalyticsCollectedDays(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ dates }));
+}
+
+const ANALYTICS_DAY_YMD = /^\d{4}-\d{2}-\d{2}$/;
+
+/** DELETE /api/analytics-day?projectId=&date=YYYY-MM-DD — remove all AnalyticsSnapshots for that day. */
+export async function handleAnalyticsDayDelete(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "DELETE") {
+    res.writeHead(405, { Allow: "DELETE" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const projectId = getQueryParams(req).get("projectId");
+  const date = getQueryParams(req).get("date");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing projectId query parameter" }));
+    return;
+  }
+  if (!date || !ANALYTICS_DAY_YMD.test(date)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing or invalid date (expected YYYY-MM-DD)" }));
+    return;
+  }
+  const { error } = await deleteAnalyticsSnapshotsForDay(client, projectId, date);
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true, date }));
 }
 
 /** POST /api/analytics-sync — body: { projectId, dateFrom, dateTo } (YYYY-MM-DD). */
@@ -3076,6 +3125,265 @@ export async function handleGetContactsByList(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data }));
+}
+
+/**
+ * GET /api/contacts/list-sync-check?projectId=&listUuid=
+ * Compare local Contacts count vs GetSales list count and return missing UUIDs (in GetSales, absent locally).
+ */
+export async function handleGetContactsListSyncCheck(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim() ?? "";
+  const listUuid = params.get("listUuid")?.trim() ?? "";
+  if (!projectId || !listUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and listUuid are required." }));
+    return;
+  }
+  const [dbRowsRes, credRes] = await Promise.all([
+    getContactsForListUuid(client, listUuid, projectId),
+    getGetSalesCredentials(client, projectId),
+  ]);
+  if (dbRowsRes.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: dbRowsRes.error }));
+    return;
+  }
+  if (credRes.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: credRes.error }));
+    return;
+  }
+  const credentials = credRes.credentials;
+  if (!credentials?.baseUrl || !credentials?.apiKey) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "GetSales credentials missing on project and environment." }));
+    return;
+  }
+  const gsRes = await fetchLeadUuidsByListUuid(listUuid, credentials);
+  if (gsRes.error) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: gsRes.error, errorDetail: gsRes.errorDetail ?? null }));
+    return;
+  }
+  const dbUuids = new Set<string>();
+  for (const row of dbRowsRes.data) {
+    const u = row.uuid;
+    if (typeof u === "string" && u.trim()) dbUuids.add(u.trim());
+  }
+  const missingUuids = gsRes.uuids.filter((u) => !dbUuids.has(u));
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      projectId,
+      listUuid,
+      dbCount: dbUuids.size,
+      getsalesCount: gsRes.total ?? gsRes.uuids.length,
+      getsalesFetchedUuids: gsRes.uuids.length,
+      missingCount: missingUuids.length,
+      missingUuids,
+      countsMatch: missingUuids.length === 0 && (gsRes.total ?? gsRes.uuids.length) === dbUuids.size,
+    })
+  );
+}
+
+/**
+ * GET /api/contacts/gs-by-list?projectId=&listUuid=
+ * Proxy to GetSales leads/search by list_uuid and return full rows.
+ */
+export async function handleGetContactsGsByList(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim() ?? "";
+  const listUuid = params.get("listUuid")?.trim() ?? "";
+  if (!projectId || !listUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and listUuid are required." }));
+    return;
+  }
+  const credRes = await getGetSalesCredentials(client, projectId);
+  if (credRes.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: credRes.error }));
+    return;
+  }
+  const credentials = credRes.credentials;
+  if (!credentials?.baseUrl || !credentials?.apiKey) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "GetSales credentials missing on project and environment." }));
+    return;
+  }
+  const gsRes = await fetchContactsByListUuid(listUuid, credentials);
+  if (gsRes.error) {
+    res.writeHead(502);
+    res.end(
+      JSON.stringify({
+        error: gsRes.error,
+        errorDetail: gsRes.errorDetail ?? null,
+        total: gsRes.total,
+        data: gsRes.rows,
+      })
+    );
+    return;
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      projectId,
+      listUuid,
+      total: gsRes.total ?? gsRes.rows.length,
+      fetched: gsRes.rows.length,
+      data: gsRes.rows,
+    })
+  );
+}
+
+/**
+ * POST /api/contacts/list-sync-resync-missing
+ * Body: { projectId, listUuid } — fetches missing list contacts from GetSales by UUID and upserts into Contacts.
+ */
+export async function handlePostContactsListSyncResyncMissing(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { projectId?: string; listUuid?: string } | undefined;
+  const projectId = body?.projectId?.trim() ?? "";
+  const listUuid = body?.listUuid?.trim() ?? "";
+  if (!projectId || !listUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId and listUuid are required." }));
+    return;
+  }
+  const [dbRowsRes, credRes] = await Promise.all([
+    getContactsForListUuid(client, listUuid, projectId),
+    getGetSalesCredentials(client, projectId),
+  ]);
+  if (dbRowsRes.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: dbRowsRes.error }));
+    return;
+  }
+  if (credRes.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: credRes.error }));
+    return;
+  }
+  const credentials = credRes.credentials;
+  if (!credentials?.baseUrl || !credentials?.apiKey) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "GetSales credentials missing on project and environment." }));
+    return;
+  }
+  const gsRes = await fetchLeadUuidsByListUuid(listUuid, credentials);
+  if (gsRes.error) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: gsRes.error, errorDetail: gsRes.errorDetail ?? null }));
+    return;
+  }
+  const dbUuids = new Set<string>();
+  for (const row of dbRowsRes.data) {
+    const u = row.uuid;
+    if (typeof u === "string" && u.trim()) dbUuids.add(u.trim());
+  }
+  const missingUuids = gsRes.uuids.filter((u) => !dbUuids.has(u));
+  if (missingUuids.length === 0) {
+    res.writeHead(200);
+    res.end(
+      JSON.stringify({
+        projectId,
+        listUuid,
+        missingCount: 0,
+        fetchedFromGetSales: 0,
+        upserted: 0,
+        errors: [],
+      })
+    );
+    return;
+  }
+  const fetched = await fetchContactsByUuidsConcurrent(credentials, missingUuids, { concurrency: 5 });
+  const mappedRows = fetched.rows.map((r) => {
+    const mapped = mapContactForSupabase(r);
+    mapped.project_id = projectId;
+    if (typeof mapped.uuid !== "string" || !mapped.uuid.trim()) {
+      const fallback = r.uuid;
+      if (typeof fallback === "string" && fallback.trim()) mapped.uuid = fallback.trim();
+    }
+    return mapped;
+  });
+  let upserted = 0;
+  const upsertErrors: string[] = [];
+  const chunkSize = 100;
+  for (let i = 0; i < mappedRows.length; i += chunkSize) {
+    const chunk = mappedRows.slice(i, i + chunkSize);
+    const validChunk = chunk.filter((r) => typeof r.uuid === "string" && !!r.uuid);
+    if (validChunk.length === 0) continue;
+    const { error } = await client.from(CONTACTS_TABLE).upsert(validChunk, { onConflict: "uuid" });
+    if (error) {
+      upsertErrors.push(error.message);
+    } else {
+      upserted += validChunk.length;
+    }
+  }
+  const errors = [
+    ...fetched.errors.map((e) => `${e.uuid}: ${e.error}`),
+    ...upsertErrors,
+  ];
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      projectId,
+      listUuid,
+      missingCount: missingUuids.length,
+      fetchedFromGetSales: fetched.rows.length,
+      notFoundInGetSales: fetched.missing.length,
+      upserted,
+      errors,
+    })
+  );
 }
 
 // ── Contacts by company ───────────────────────────────────────────────────────

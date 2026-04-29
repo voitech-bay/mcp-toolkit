@@ -4,7 +4,14 @@ import {
   PIPEDRIVE_DEAL_FIELDS_TABLE,
   PIPEDRIVE_DEALS_TABLE,
   PIPEDRIVE_RELATED_OBJECTS_TABLE,
+  getCollectedAnalyticsDays,
 } from "./supabase.js";
+import {
+  aggregateMetricsByFlow,
+  emptyMetrics,
+  finalizeRates,
+  type FunnelMetrics,
+} from "./analytics-funnel.js";
 import type {
   ProjectAnalyticsDashboardFlow,
   ProjectAnalyticsPipelineStage,
@@ -24,6 +31,14 @@ export interface ProjectTotalAnalyticsPayload {
   warnings: string[];
   error: string | null;
 }
+
+/** GetSales (LinkedIn) first in combined alluvial; use these `stageUuid` values in `pipelineStageBreakdown` never — only as column keys on the client. */
+export const GETSALES_TOTAL_STAGES: ProjectAnalyticsPipelineStage[] = [
+  { stageUuid: "__gs:connectionSent", stageName: "Connection request sent", stageOrder: 0, source: "getsales" },
+  { stageUuid: "__gs:connectionAccepted", stageName: "Connection accepted", stageOrder: 1, source: "getsales" },
+  { stageUuid: "__gs:inbox", stageName: "Inbox (new)", stageOrder: 2, source: "getsales" },
+  { stageUuid: "__gs:positiveReplies", stageName: "Positive replies", stageOrder: 3, source: "getsales" },
+];
 
 function asRecord(raw: unknown): Record<string, unknown> {
   return raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
@@ -291,6 +306,14 @@ export async function getProjectTotalAnalytics(
   const flowRes = await loadFlowsByName(client, projectId, warnings);
   if (flowRes.error) return { flows: [], pipelineStages: [], warnings, error: flowRes.error };
 
+  const { dates, error: daysErr } = await getCollectedAnalyticsDays(client, projectId);
+  if (daysErr) warnings.push(`Collected analytics days: ${daysErr}`);
+  const today = new Date().toISOString().slice(0, 10);
+  const dateFrom = dates.length > 0 ? dates[0]! : "2000-01-01";
+  const dateTo = dates.length > 0 ? dates[dates.length - 1]! : today;
+  const { data: metricsByFlow, error: snapErr } = await aggregateMetricsByFlow(client, projectId, dateFrom, dateTo);
+  if (snapErr) warnings.push(`GetSales snapshot metrics: ${snapErr}`);
+
   const stageRes = await loadStageMeta(client, projectId);
   if (stageRes.error) warnings.push(`Pipedrive stage labels: ${stageRes.error}`);
   const stageMeta = stageRes.stages;
@@ -372,18 +395,28 @@ export async function getProjectTotalAnalytics(
     warnings.push(`Unmapped Pipedrive campaign(s): ${top}${unmappedCampaignCounts.size > 8 ? ", ..." : ""}`);
   }
 
-  const pipelineStages = [...stageMeta.values()].sort(sortStages);
+  const pipelineStages: ProjectAnalyticsPipelineStage[] = [
+    ...GETSALES_TOTAL_STAGES,
+    ...[...stageMeta.values()].sort(sortStages).map((s) => ({
+      stageUuid: s.stageUuid,
+      stageName: s.stageName,
+      stageOrder: s.stageOrder,
+      source: "pipedrive" as const,
+    })),
+  ];
   const flows: ProjectAnalyticsDashboardFlow[] = flowRes.flows.map((flow) => {
     const totalDeals = totalByFlow.get(flow.uuid) ?? 0;
+    const m = metricsByFlow.get(flow.uuid) ?? emptyMetrics();
+    finalizeRates(m);
     const stageCounts = countsByFlow.get(flow.uuid) ?? new Map<string, number>();
     const pipelineStageBreakdown = [...stageCounts.entries()]
       .map(([stageUuid, contactsCount]) => {
-        const m = stageMeta.get(stageUuid);
+        const meta = stageMeta.get(stageUuid);
         return {
           stageUuid,
-          stageName: m?.stageName ?? `Stage ${stageUuid}`,
-          stageOrder: m?.stageOrder ?? null,
-          pipelineId: m?.pipelineId ?? "",
+          stageName: meta?.stageName ?? `Stage ${stageUuid}`,
+          stageOrder: meta?.stageOrder ?? null,
+          pipelineId: meta?.pipelineId ?? "",
           contactsCount,
         };
       })
@@ -392,15 +425,16 @@ export async function getProjectTotalAnalytics(
     return {
       flowUuid: flow.uuid,
       flowName: flow.name,
-      messagesSent: totalDeals,
-      connectionSent: totalDeals,
-      connectionAccepted: 0,
-      inbox: 0,
-      positiveReplies: 0,
-      connectionRequestRatePct: null,
-      acceptedRatePct: null,
-      inboxRatePct: null,
-      positiveRatePct: null,
+      messagesSent: m.messages_sent,
+      connectionSent: m.connection_sent,
+      connectionAccepted: m.connection_accepted,
+      inbox: m.inbox,
+      positiveReplies: m.positive_replies,
+      connectionRequestRatePct: m.connection_request_rate_pct,
+      acceptedRatePct: m.accepted_rate_pct,
+      inboxRatePct: m.inbox_rate_pct,
+      positiveRatePct: m.positive_rate_pct,
+      pipedriveDealCount: totalDeals,
       pipelineStageBreakdown,
     };
   });

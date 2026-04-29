@@ -387,6 +387,20 @@ export interface FetchContactsResult {
   errorDetail?: SourceApiErrorDetail;
 }
 
+export interface FetchLeadUuidsByListUuidResult {
+  uuids: string[];
+  total: number | null;
+  error: string | null;
+  errorDetail?: SourceApiErrorDetail;
+}
+
+export interface FetchContactsByListUuidResult {
+  rows: Record<string, unknown>[];
+  total: number | null;
+  error: string | null;
+  errorDetail?: SourceApiErrorDetail;
+}
+
 /** Get created_at from a row (API may use created_at or different casing). */
 function rowCreatedAt(row: Record<string, unknown>): string | null {
   const v = row.created_at ?? row.createdAt;
@@ -548,6 +562,150 @@ export async function fetchContactsIncremental(
     });
   }
   return fetchContactsSearchPass(sinceUpdatedAt, config, onLog, options);
+}
+
+/**
+ * Return all lead UUIDs for a GetSales list (`filter.list_uuid`) from POST /leads/api/leads/search.
+ * Also returns API-reported `total` (when present).
+ */
+export async function fetchLeadUuidsByListUuid(
+  listUuid: string,
+  credentials?: ApiCredentials,
+  onLog?: FetchLogger
+): Promise<FetchLeadUuidsByListUuidResult> {
+  const config = resolveCredentials(credentials);
+  if (!config) {
+    return { uuids: [], total: null, error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
+  }
+  const trimmedListUuid = listUuid.trim();
+  if (!trimmedListUuid) {
+    return { uuids: [], total: 0, error: null };
+  }
+  const out = new Set<string>();
+  let offset = 0;
+  let total: number | null = null;
+  try {
+    while (true) {
+      const limit = pageLimitForOffset(offset);
+      if (limit === 0) {
+        return {
+          uuids: [...out],
+          total,
+          error: sourceApiEsPaginationTruncatedError(`contacts list ${trimmedListUuid}`, offset, total ?? undefined),
+        };
+      }
+      const url = `${config.baseUrl}${CONTACTS_PATH}`;
+      const body = JSON.stringify({
+        filter: { list_uuid: [trimmedListUuid] },
+        limit,
+        offset,
+        order_field: "updated_at",
+        order_type: "desc",
+      });
+      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config.apiKey, {
+        method: "POST",
+        body,
+      });
+      if (typeof res.total === "number" && Number.isFinite(res.total)) total = res.total;
+      const page = (res.data ?? []).map(unwrapContact);
+      for (const row of page) {
+        const u = row.uuid;
+        if (typeof u === "string" && u.trim()) out.add(u.trim());
+      }
+      if (onLog) {
+        await onLog("contacts-by-list: page fetched", {
+          listUuid: trimmedListUuid,
+          offset,
+          limit,
+          pageSize: page.length,
+          total,
+          uniqueUuids: out.size,
+        });
+      }
+      if (page.length === 0 || (total != null && offset + page.length >= total)) break;
+      offset += limit;
+      await sleep(DELAY_MS);
+    }
+    return { uuids: [...out], total, error: null };
+  } catch (e) {
+    const fe = fetchErrorFromUnknown(e);
+    return {
+      uuids: [...out],
+      total,
+      error: fe.error,
+      errorDetail: fe.errorDetail,
+    };
+  }
+}
+
+/**
+ * Return all lead rows for a GetSales list (`filter.list_uuid`) from POST /leads/api/leads/search.
+ */
+export async function fetchContactsByListUuid(
+  listUuid: string,
+  credentials?: ApiCredentials,
+  onLog?: FetchLogger
+): Promise<FetchContactsByListUuidResult> {
+  const config = resolveCredentials(credentials);
+  if (!config) {
+    return { rows: [], total: null, error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
+  }
+  const trimmedListUuid = listUuid.trim();
+  if (!trimmedListUuid) {
+    return { rows: [], total: 0, error: null };
+  }
+  const rows: Record<string, unknown>[] = [];
+  let offset = 0;
+  let total: number | null = null;
+  try {
+    while (true) {
+      const limit = pageLimitForOffset(offset);
+      if (limit === 0) {
+        return {
+          rows,
+          total,
+          error: sourceApiEsPaginationTruncatedError(`contacts list ${trimmedListUuid}`, offset, total ?? undefined),
+        };
+      }
+      const url = `${config.baseUrl}${CONTACTS_PATH}`;
+      const body = JSON.stringify({
+        filter: { list_uuid: [trimmedListUuid] },
+        limit,
+        offset,
+        order_field: "updated_at",
+        order_type: "desc",
+      });
+      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config.apiKey, {
+        method: "POST",
+        body,
+      });
+      if (typeof res.total === "number" && Number.isFinite(res.total)) total = res.total;
+      const page = (res.data ?? []).map(unwrapContact);
+      rows.push(...page);
+      if (onLog) {
+        await onLog("contacts-by-list: full page fetched", {
+          listUuid: trimmedListUuid,
+          offset,
+          limit,
+          pageSize: page.length,
+          total,
+          rowsSoFar: rows.length,
+        });
+      }
+      if (page.length === 0 || (total != null && offset + page.length >= total)) break;
+      offset += limit;
+      await sleep(DELAY_MS);
+    }
+    return { rows, total, error: null };
+  } catch (e) {
+    const fe = fetchErrorFromUnknown(e);
+    return {
+      rows,
+      total,
+      error: fe.error,
+      errorDetail: fe.errorDetail,
+    };
+  }
 }
 
 /**

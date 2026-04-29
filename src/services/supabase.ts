@@ -2480,6 +2480,23 @@ export async function replaceAnalyticsSnapshotsForDay(
   return { error: null };
 }
 
+/**
+ * Remove all AnalyticsSnapshots rows for one calendar day (same scope as sync replace delete).
+ */
+export async function deleteAnalyticsSnapshotsForDay(
+  client: SupabaseClient,
+  projectId: string,
+  snapshotDateYyyyMmDd: string
+): Promise<{ error: string | null }> {
+  const { error } = await client
+    .from(ANALYTICS_SNAPSHOTS_TABLE)
+    .delete()
+    .eq("project_id", projectId)
+    .eq("snapshot_date", snapshotDateYyyyMmDd);
+  if (error) return { error: error.message };
+  return { error: null };
+}
+
 // --- All companies (global browse, with per-project membership flag) ---
 
 export interface AllCompanyRow {
