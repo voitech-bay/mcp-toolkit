@@ -2,6 +2,7 @@
  * HTTP handlers for Supabase state and sync. Used by Vercel serverless api/supabase-state and api/supabase-sync.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   getSupabase,
   getTableCounts,
@@ -3346,16 +3347,135 @@ function resolveLeadUuidFromPayload(item: Record<string, unknown>): string | nul
   return typeof u === "string" && u.trim() ? u.trim() : null;
 }
 
+const N8N_CONTACT_UUID_IN_CHUNK = 200;
+const N8N_COMPANY_ID_IN_CHUNK = 200;
+const N8N_CONTACT_UPSERT_CHUNK = 100;
+const N8N_RESULTS_INSERT_CHUNK = 250;
+
+function chunkArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+async function n8nLoadContactProjectByUuid(
+  client: SupabaseClient,
+  uuids: string[]
+): Promise<{ map: Map<string, string>; error: string | null }> {
+  const map = new Map<string, string>();
+  if (uuids.length === 0) return { map, error: null };
+  const unique = [...new Set(uuids.map((u) => u.trim()).filter((u) => u.length > 0))];
+  for (const batch of chunkArray(unique, N8N_CONTACT_UUID_IN_CHUNK)) {
+    const { data, error } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, project_id")
+      .in("uuid", batch);
+    if (error) return { map: new Map(), error: error.message };
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const u = typeof row.uuid === "string" ? row.uuid.trim() : "";
+      const p = typeof row.project_id === "string" ? row.project_id.trim() : "";
+      if (u && p && !map.has(u)) map.set(u, p);
+    }
+  }
+  return { map, error: null };
+}
+
+async function n8nLoadExistingCompanyIds(
+  client: SupabaseClient,
+  ids: string[]
+): Promise<{ set: Set<string>; error: string | null }> {
+  const set = new Set<string>();
+  if (ids.length === 0) return { set, error: null };
+  const unique = [...new Set(ids.map((u) => u.trim()).filter((u) => u.length > 0))];
+  for (const batch of chunkArray(unique, N8N_COMPANY_ID_IN_CHUNK)) {
+    const { data, error } = await client.from(COMPANIES_TABLE).select("id").in("id", batch);
+    if (error) return { set: new Set(), error: error.message };
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const id = typeof row.id === "string" ? row.id : "";
+      if (id) set.add(id);
+    }
+  }
+  return { set, error: null };
+}
+
+/** Upsert contacts in chunks; on bulk failure, retry row-by-row for that chunk. */
+async function n8nUpsertContactsBatched(
+  client: SupabaseClient,
+  rows: Record<string, unknown>[],
+  errors: Array<{ index: number; message: string }>,
+  lastIndexByUuid: Map<string, number>
+): Promise<Set<string>> {
+  const success = new Set<string>();
+  for (let i = 0; i < rows.length; i += N8N_CONTACT_UPSERT_CHUNK) {
+    const slice = rows.slice(i, i + N8N_CONTACT_UPSERT_CHUNK);
+    const { error } = await client
+      .from(CONTACTS_TABLE)
+      .upsert(slice, { onConflict: "uuid", ignoreDuplicates: false });
+    if (!error) {
+      for (const r of slice) {
+        const u = r.uuid;
+        if (typeof u === "string" && u.trim()) success.add(u.trim());
+      }
+      continue;
+    }
+    for (const r of slice) {
+      const u = typeof r.uuid === "string" ? r.uuid.trim() : "";
+      const { error: e1 } = await client
+        .from(CONTACTS_TABLE)
+        .upsert([r], { onConflict: "uuid", ignoreDuplicates: false });
+      if (!e1 && u) {
+        success.add(u);
+      } else if (e1 && u) {
+        const idx = lastIndexByUuid.get(u) ?? -1;
+        if (idx >= 0) {
+          errors.push({ index: idx, message: `Contact upsert failed: ${e1.message}` });
+        }
+      }
+    }
+  }
+  return success;
+}
+
+async function n8nInsertWorkflowResultsBatched(
+  client: SupabaseClient,
+  rows: Array<Record<string, unknown>>,
+  errors: Array<{ index: number; message: string }>
+): Promise<number> {
+  let inserted = 0;
+  for (let i = 0; i < rows.length; i += N8N_RESULTS_INSERT_CHUNK) {
+    const slice = rows.slice(i, i + N8N_RESULTS_INSERT_CHUNK);
+    const { error } = await client.from(N8N_WORKFLOW_RESULTS_TABLE).insert(slice);
+    if (!error) {
+      inserted += slice.length;
+      continue;
+    }
+    for (const row of slice) {
+      const idx =
+        typeof row._n8n_index === "number" && Number.isFinite(row._n8n_index)
+          ? (row._n8n_index as number)
+          : -1;
+      const { _n8n_index, ...clean } = row;
+      const { error: e1 } = await client.from(N8N_WORKFLOW_RESULTS_TABLE).insert(clean);
+      if (!e1) inserted += 1;
+      else if (idx >= 0) {
+        errors.push({ index: idx, message: `Insert n8n_workflow_results failed: ${e1.message}` });
+      }
+    }
+  }
+  return inserted;
+}
+
 /**
  * POST /api/n8n/workflow-results
  *
  * n8n contract:
  * - Body: `{ results: object[], executionId?: string }` (`execution_id` also accepted). Each results item is one row’s combined agent output. `executionId` is copied to every inserted DB row.
  * - No `projectId`: rows are tied only via `contact_id` / `company_id`. Contact upsert uses `project_id` from the existing `Contacts` row when found.
- * - `row_data`: original row from `GET /api/contacts/gs-by-list` (used to upsert `Contacts` when the lead exists for `projectId`).
+ * - `row_data`: original row from `GET /api/contacts/gs-by-list` (used to upsert `Contacts` when the lead already exists in DB).
  * - Other top-level keys (except `row_data`) are agent names; sorted keys become `workflow` (comma-separated).
  * - `lead_uuid` / `company_uuid` may appear anywhere in the item graph (nested). If `lead_uuid` is missing, `row_data.uuid` is used as the lead id.
  * - Optional: set `N8N_WORKFLOW_RESULTS_SECRET`; then send `Authorization: Bearer <secret>`.
+ * - Internally batches DB calls (contact load / company load / upserts / inserts) so large `results` arrays avoid per-row round-trips.
  */
 export async function handlePostN8nWorkflowResults(
   req: IncomingMessage,
@@ -3404,112 +3524,152 @@ export async function handlePostN8nWorkflowResults(
   }
 
   const nowIso = new Date().toISOString();
-  let contactsUpserted = 0;
-  let contactsSkipped = 0;
-  let rowsInserted = 0;
   const errors: Array<{ index: number; message: string }> = [];
 
+  type ParsedLine = {
+    index: number;
+    item: Record<string, unknown> | null;
+    leadUuid: string | null;
+    companyUuidRaw: string | null;
+    workflow: string;
+  };
+
+  const parsed: ParsedLine[] = [];
   for (let index = 0; index < resultsRaw.length; index++) {
     const rawItem = resultsRaw[index];
     if (!isPlainObject(rawItem)) {
+      parsed.push({
+        index,
+        item: null,
+        leadUuid: null,
+        companyUuidRaw: null,
+        workflow: "",
+      });
       errors.push({ index, message: "Item must be a plain object" });
-      const { error: badInsErr } = await client.from(N8N_WORKFLOW_RESULTS_TABLE).insert({
+      continue;
+    }
+    const item = rawItem;
+    parsed.push({
+      index,
+      item,
+      leadUuid: resolveLeadUuidFromPayload(item),
+      companyUuidRaw: findFirstNestedStringForKey(item, "company_uuid"),
+      workflow: Object.keys(item)
+        .filter((k) => k !== "row_data")
+        .sort()
+        .join(", "),
+    });
+  }
+
+  const leadUuidsNeedingLookup = [
+    ...new Set(
+      parsed.map((p) => p.leadUuid).filter((u): u is string => typeof u === "string" && u.length > 0)
+    ),
+  ];
+
+  const { map: contactProjByUuid, error: contactLoadErr } = await n8nLoadContactProjectByUuid(
+    client,
+    leadUuidsNeedingLookup
+  );
+  if (contactLoadErr) {
+    errors.push({ index: 0, message: `Contact batch lookup failed: ${contactLoadErr}` });
+  }
+
+  const upsertByUuid = new Map<string, Record<string, unknown>>();
+  const lastIndexByUuid = new Map<string, number>();
+  for (const p of parsed) {
+    if (!p.item || !p.leadUuid) continue;
+    const proj = contactProjByUuid.get(p.leadUuid);
+    if (!proj) continue;
+    const rd = p.item.row_data;
+    if (!isPlainObject(rd)) continue;
+    const mapped = mapContactForSupabase(rd);
+    mapped.project_id = proj;
+    if (typeof mapped.uuid !== "string" || !mapped.uuid.trim()) {
+      mapped.uuid = p.leadUuid;
+    }
+    upsertByUuid.set(p.leadUuid, mapped);
+    lastIndexByUuid.set(p.leadUuid, p.index);
+  }
+
+  const toUpsert = [...upsertByUuid.values()];
+  let successUuids = new Set<string>();
+  if (toUpsert.length > 0 && !contactLoadErr) {
+    successUuids = await n8nUpsertContactsBatched(client, toUpsert, errors, lastIndexByUuid);
+  }
+
+  const companyIdCandidates = [
+    ...new Set(
+      parsed
+        .map((p) => p.companyUuidRaw)
+        .filter((u): u is string => typeof u === "string" && u.length > 0)
+    ),
+  ];
+  const { set: companyExists, error: companyLoadErr } = await n8nLoadExistingCompanyIds(
+    client,
+    companyIdCandidates
+  );
+  if (companyLoadErr) {
+    errors.push({ index: 0, message: `Company batch lookup failed: ${companyLoadErr}` });
+  }
+
+  let contactsUpserted = 0;
+  let contactsSkipped = 0;
+  for (const p of parsed) {
+    if (!p.item) continue;
+    const lead = p.leadUuid;
+    if (!lead || !contactProjByUuid.has(lead)) {
+      contactsSkipped += 1;
+      continue;
+    }
+    const proj = contactProjByUuid.get(lead)!;
+    const rd = p.item.row_data;
+    if (!isPlainObject(rd) || !proj) {
+      contactsSkipped += 1;
+      continue;
+    }
+    if (successUuids.has(lead)) {
+      contactsUpserted += 1;
+      continue;
+    }
+    if (upsertByUuid.has(lead)) {
+      continue;
+    }
+    contactsSkipped += 1;
+  }
+
+  const insertRows: Array<Record<string, unknown>> = [];
+  for (const p of parsed) {
+    if (!p.item) {
+      insertRows.push({
+        _n8n_index: p.index,
         contact_id: null,
         company_id: null,
         execution_id: executionId,
         workflow: "",
-        result: { _error: "item_not_plain_object", index },
+        result: { _error: "item_not_plain_object", index: p.index },
         updated_at: nowIso,
       });
-      if (badInsErr) {
-        errors.push({
-          index,
-          message: `Insert n8n_workflow_results failed: ${badInsErr.message}`,
-        });
-      } else {
-        rowsInserted += 1;
-      }
       continue;
     }
-    const item = rawItem;
-
-    const leadUuid = resolveLeadUuidFromPayload(item);
-    const companyUuidRaw = findFirstNestedStringForKey(item, "company_uuid");
-
-    let contactIdForRow: string | null = null;
-    let companyIdForRow: string | null = null;
-
-    if (leadUuid) {
-      const { data: contactRows, error: cErr } = await client
-        .from(CONTACTS_TABLE)
-        .select("uuid, project_id")
-        .eq("uuid", leadUuid)
-        .limit(1);
-      const contactRow = (contactRows ?? [])[0] as
-        | Record<string, unknown>
-        | undefined;
-      if (cErr) {
-        errors.push({ index, message: `Contact lookup failed: ${cErr.message}` });
-        contactsSkipped += 1;
-      } else if (contactRow?.uuid) {
-        contactIdForRow = leadUuid;
-        const contactProj =
-          typeof contactRow.project_id === "string" ? contactRow.project_id.trim() : "";
-        const rd = item.row_data;
-        if (isPlainObject(rd) && contactProj) {
-          const mapped = mapContactForSupabase(rd);
-          mapped.project_id = contactProj;
-          if (typeof mapped.uuid !== "string" || !mapped.uuid.trim()) {
-            mapped.uuid = leadUuid;
-          }
-          const { error: upErr } = await client
-            .from(CONTACTS_TABLE)
-            .upsert([mapped], { onConflict: "uuid", ignoreDuplicates: false });
-          if (upErr) {
-            errors.push({ index, message: `Contact upsert failed: ${upErr.message}` });
-          } else {
-            contactsUpserted += 1;
-          }
-        } else {
-          contactsSkipped += 1;
-        }
-      } else {
-        contactsSkipped += 1;
-      }
-    } else {
-      contactsSkipped += 1;
-    }
-
-    if (companyUuidRaw) {
-      const { data: co, error: coErr } = await client
-        .from(COMPANIES_TABLE)
-        .select("id")
-        .eq("id", companyUuidRaw)
-        .maybeSingle();
-      if (!coErr && co?.id && typeof co.id === "string") {
-        companyIdForRow = co.id;
-      }
-    }
-
-    const workflow = Object.keys(item)
-      .filter((k) => k !== "row_data")
-      .sort()
-      .join(", ");
-
-    const { error: insErr } = await client.from(N8N_WORKFLOW_RESULTS_TABLE).insert({
+    const item = p.item;
+    const lead = p.leadUuid;
+    const contactIdForRow =
+      lead && contactProjByUuid.has(lead) ? lead : null;
+    const companyIdForRow =
+      p.companyUuidRaw && companyExists.has(p.companyUuidRaw) ? p.companyUuidRaw : null;
+    insertRows.push({
+      _n8n_index: p.index,
       contact_id: contactIdForRow,
       company_id: companyIdForRow,
       execution_id: executionId,
-      workflow,
+      workflow: p.workflow,
       result: item,
       updated_at: nowIso,
     });
-    if (insErr) {
-      errors.push({ index, message: `Insert n8n_workflow_results failed: ${insErr.message}` });
-    } else {
-      rowsInserted += 1;
-    }
   }
+
+  const rowsInserted = await n8nInsertWorkflowResultsBatched(client, insertRows, errors);
 
   res.writeHead(200);
   res.end(
