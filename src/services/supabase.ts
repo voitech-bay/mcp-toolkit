@@ -1968,6 +1968,34 @@ export async function findContactsForProject(
 }
 
 /**
+ * Find contacts across **all** projects by ILIKE on `name`, `first_name`, or `last_name`.
+ */
+export async function findContactsByNameLikeGlobal(
+  client: SupabaseClient,
+  params: { nameLike: string; limit?: number }
+): Promise<{ data: Array<Record<string, unknown>>; error: string | null }> {
+  const nameLike = params.nameLike?.trim() ?? "";
+  if (nameLike.length === 0) {
+    return { data: [], error: "nameLike is required." };
+  }
+
+  const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
+  const pattern = `%${escapeIlikeMetacharacters(nameLike)}%`;
+  const query = client
+    .from(CONTACTS_TABLE)
+    .select(
+      "uuid, name, first_name, last_name, company_name, company_uuid, position, linkedin, work_email, project_id, created_at"
+    )
+    .or(`name.ilike.${pattern},first_name.ilike.${pattern},last_name.ilike.${pattern}`)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  const { data, error } = await query;
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as Array<Record<string, unknown>>, error: null };
+}
+
+/**
  * Load Contacts rows for a project by uuid (same as GetSales lead_uuid / Contacts.uuid).
  * Chunks `.in("uuid", …)` for large lists.
  */
@@ -4433,6 +4461,47 @@ export const ENRICHMENT_AGENT_BATCHES_TABLE = "enrichment_agent_batches";
 export const ENRICHMENT_AGENT_RESULTS_TABLE = "enrichment_agent_results";
 /** Global + per-project prefix/suffix and `{{companies}}` JSON config. */
 export const ENRICHMENT_PROMPT_SETTINGS_TABLE = "enrichment_prompt_settings";
+/** One row per n8n agent batch output (combined JSON); not the per-agent enrichment worker rows. */
+export const N8N_WORKFLOW_RESULTS_TABLE = "n8n_workflow_results";
+
+/** Row in `n8n_workflow_results`; `contact_id` is `Contacts.uuid` when FK-resolvable. No project column — scope via contact/company. */
+export interface N8nWorkflowResultRow {
+  id: string;
+  contact_id: string | null;
+  company_id: string | null;
+  execution_id: string | null;
+  workflow: string;
+  result: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * Load `n8n_workflow_results` rows where `company_id` or `contact_id` is in `ids` (newest first).
+ */
+export async function getN8nWorkflowResultsByForeignIds(
+  client: SupabaseClient,
+  params: {
+    column: "company_id" | "contact_id";
+    ids: string[];
+    limit?: number;
+  }
+): Promise<{ data: N8nWorkflowResultRow[]; error: string | null }> {
+  const ids = [...new Set(params.ids.map((x) => String(x).trim()).filter((x) => x.length > 0))];
+  if (ids.length === 0) return { data: [], error: null };
+
+  const limit = Math.min(Math.max(params.limit ?? 200, 1), 500);
+  const col = params.column;
+  const { data, error } = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("*")
+    .in(col, ids)
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as N8nWorkflowResultRow[], error: null };
+}
 
 export type EnrichmentEntityType = "company" | "contact";
 

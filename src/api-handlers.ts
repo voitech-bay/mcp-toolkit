@@ -94,6 +94,7 @@ import {
   getContactsByUuidsForProject,
   getCompaniesByIdsForProject,
   getContactsForListUuid,
+  N8N_WORKFLOW_RESULTS_TABLE,
 } from "./services/supabase.js";
 import {
   getProjectAnalyticsDashboard,
@@ -3302,6 +3303,224 @@ export async function handleGetContactsGsByList(
   });
   res.writeHead(200);
   res.end(JSON.stringify({ data: normalized }));
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v != null && typeof v === "object" && !Array.isArray(v);
+}
+
+/** Depth-first search for the first non-empty string at `key` (e.g. nested `lead_uuid`). */
+function findFirstNestedStringForKey(
+  value: unknown,
+  key: "lead_uuid" | "company_uuid",
+  seen: WeakSet<object> = new WeakSet()
+): string | null {
+  if (value == null) return null;
+  if (Array.isArray(value)) {
+    for (const el of value) {
+      const v = findFirstNestedStringForKey(el, key, seen);
+      if (v) return v;
+    }
+    return null;
+  }
+  if (typeof value !== "object") return null;
+  const o = value as Record<string, unknown>;
+  if (seen.has(o)) return null;
+  seen.add(o);
+  const direct = o[key];
+  if (typeof direct === "string" && direct.trim()) return direct.trim();
+  for (const v of Object.values(o)) {
+    const found = findFirstNestedStringForKey(v, key, seen);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Prefer nested `lead_uuid`, else GetSales `uuid` on `row_data`. */
+function resolveLeadUuidFromPayload(item: Record<string, unknown>): string | null {
+  const fromTree = findFirstNestedStringForKey(item, "lead_uuid");
+  if (fromTree) return fromTree;
+  const rd = item.row_data;
+  if (!isPlainObject(rd)) return null;
+  const u = rd.uuid;
+  return typeof u === "string" && u.trim() ? u.trim() : null;
+}
+
+/**
+ * POST /api/n8n/workflow-results
+ *
+ * n8n contract:
+ * - Body: `{ results: object[], executionId?: string }` (`execution_id` also accepted). Each results item is one row’s combined agent output. `executionId` is copied to every inserted DB row.
+ * - No `projectId`: rows are tied only via `contact_id` / `company_id`. Contact upsert uses `project_id` from the existing `Contacts` row when found.
+ * - `row_data`: original row from `GET /api/contacts/gs-by-list` (used to upsert `Contacts` when the lead exists for `projectId`).
+ * - Other top-level keys (except `row_data`) are agent names; sorted keys become `workflow` (comma-separated).
+ * - `lead_uuid` / `company_uuid` may appear anywhere in the item graph (nested). If `lead_uuid` is missing, `row_data.uuid` is used as the lead id.
+ * - Optional: set `N8N_WORKFLOW_RESULTS_SECRET`; then send `Authorization: Bearer <secret>`.
+ */
+export async function handlePostN8nWorkflowResults(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+
+  const secret = process.env.N8N_WORKFLOW_RESULTS_SECRET?.trim();
+  if (secret) {
+    const raw =
+      (req.headers.authorization as string | undefined) ??
+      (req.headers.Authorization as string | undefined);
+    const ok = typeof raw === "string" && raw === `Bearer ${secret}`;
+    if (!ok) {
+      res.writeHead(401);
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+  }
+
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+
+  const body = (await getParsedBody(req)) as {
+    results?: unknown;
+    executionId?: unknown;
+    execution_id?: unknown;
+  } | null;
+  const execRaw = body?.executionId ?? body?.execution_id;
+  const executionId =
+    typeof execRaw === "string" && execRaw.trim() ? execRaw.trim() : null;
+  const resultsRaw = body?.results;
+  if (!Array.isArray(resultsRaw)) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "results must be an array." }));
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  let contactsUpserted = 0;
+  let contactsSkipped = 0;
+  let rowsInserted = 0;
+  const errors: Array<{ index: number; message: string }> = [];
+
+  for (let index = 0; index < resultsRaw.length; index++) {
+    const rawItem = resultsRaw[index];
+    if (!isPlainObject(rawItem)) {
+      errors.push({ index, message: "Item must be a plain object" });
+      const { error: badInsErr } = await client.from(N8N_WORKFLOW_RESULTS_TABLE).insert({
+        contact_id: null,
+        company_id: null,
+        execution_id: executionId,
+        workflow: "",
+        result: { _error: "item_not_plain_object", index },
+        updated_at: nowIso,
+      });
+      if (badInsErr) {
+        errors.push({
+          index,
+          message: `Insert n8n_workflow_results failed: ${badInsErr.message}`,
+        });
+      } else {
+        rowsInserted += 1;
+      }
+      continue;
+    }
+    const item = rawItem;
+
+    const leadUuid = resolveLeadUuidFromPayload(item);
+    const companyUuidRaw = findFirstNestedStringForKey(item, "company_uuid");
+
+    let contactIdForRow: string | null = null;
+    let companyIdForRow: string | null = null;
+
+    if (leadUuid) {
+      const { data: contactRows, error: cErr } = await client
+        .from(CONTACTS_TABLE)
+        .select("uuid, project_id")
+        .eq("uuid", leadUuid)
+        .limit(1);
+      const contactRow = (contactRows ?? [])[0] as
+        | Record<string, unknown>
+        | undefined;
+      if (cErr) {
+        errors.push({ index, message: `Contact lookup failed: ${cErr.message}` });
+        contactsSkipped += 1;
+      } else if (contactRow?.uuid) {
+        contactIdForRow = leadUuid;
+        const contactProj =
+          typeof contactRow.project_id === "string" ? contactRow.project_id.trim() : "";
+        const rd = item.row_data;
+        if (isPlainObject(rd) && contactProj) {
+          const mapped = mapContactForSupabase(rd);
+          mapped.project_id = contactProj;
+          if (typeof mapped.uuid !== "string" || !mapped.uuid.trim()) {
+            mapped.uuid = leadUuid;
+          }
+          const { error: upErr } = await client
+            .from(CONTACTS_TABLE)
+            .upsert([mapped], { onConflict: "uuid", ignoreDuplicates: false });
+          if (upErr) {
+            errors.push({ index, message: `Contact upsert failed: ${upErr.message}` });
+          } else {
+            contactsUpserted += 1;
+          }
+        } else {
+          contactsSkipped += 1;
+        }
+      } else {
+        contactsSkipped += 1;
+      }
+    } else {
+      contactsSkipped += 1;
+    }
+
+    if (companyUuidRaw) {
+      const { data: co, error: coErr } = await client
+        .from(COMPANIES_TABLE)
+        .select("id")
+        .eq("id", companyUuidRaw)
+        .maybeSingle();
+      if (!coErr && co?.id && typeof co.id === "string") {
+        companyIdForRow = co.id;
+      }
+    }
+
+    const workflow = Object.keys(item)
+      .filter((k) => k !== "row_data")
+      .sort()
+      .join(", ");
+
+    const { error: insErr } = await client.from(N8N_WORKFLOW_RESULTS_TABLE).insert({
+      contact_id: contactIdForRow,
+      company_id: companyIdForRow,
+      execution_id: executionId,
+      workflow,
+      result: item,
+      updated_at: nowIso,
+    });
+    if (insErr) {
+      errors.push({ index, message: `Insert n8n_workflow_results failed: ${insErr.message}` });
+    } else {
+      rowsInserted += 1;
+    }
+  }
+
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      processed: resultsRaw.length,
+      contactsUpserted,
+      contactsSkipped,
+      rowsInserted,
+      errors,
+    })
+  );
 }
 
 /**

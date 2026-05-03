@@ -8,6 +8,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { registerExecuteReadonlySqlTool } from "./tools/execute-readonly-sql.js";
 import { registerFindCompaniesTool } from "./tools/find-companies.js";
+import { registerFindN8nWorkflowResultsTool } from "./tools/find-n8n-workflow-results.js";
 import { registerFindContactsTool } from "./tools/find-contacts.js";
 import { registerFindProjectsTool } from "./tools/find-projects.js";
 import { registerFindProjectLinkedinConversationsTool } from "./tools/find-project-linkedin-conversations.js";
@@ -28,6 +29,7 @@ const server = new McpServer({
 registerFindProjectsTool(server);
 registerFindContactsTool(server);
 registerFindCompaniesTool(server);
+registerFindN8nWorkflowResultsTool(server);
 registerListSupabaseSchemaTool(server);
 registerExecuteReadonlySqlTool(server);
 registerGetProjectSyncStatusTool(server);

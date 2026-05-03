@@ -96,6 +96,7 @@ import {
   handlePostRollbackGeneratedMessagePreset,
   handlePostFindContactByUuid,
   handlePostContactsListSyncResyncMissing,
+  handlePostN8nWorkflowResults,
   handleFirefliesWebhook,
   handleGetDifyWorkflows,
   handleGetDifyWorkflowRuns,
@@ -620,6 +621,14 @@ const server = createServer(async (req, res) => {
       case "/api/contacts/find-by-uuid":
         if (req.method === "POST") {
           await handlePostFindContactByUuid(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/n8n/workflow-results":
+        if (req.method === "POST") {
+          await handlePostN8nWorkflowResults(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
