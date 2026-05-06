@@ -786,6 +786,103 @@ export async function fetchContactsByUuidsConcurrent(
   return { rows, missing, errors };
 }
 
+/**
+ * Fetch many companies by UUID from POST /leads/api/companies/list in chunks.
+ * Never throws: chunk failures are collected in `errors`; not returned ids in `missing`.
+ */
+export async function fetchCompaniesByIdsBatched(
+  credentials: ApiCredentials | undefined,
+  companyIds: string[],
+  opts: {
+    batchSize?: number;
+    onBefore?: () => Promise<void>;
+    onLog?: FetchLogger;
+  } = {}
+): Promise<{
+  rows: Record<string, unknown>[];
+  missing: string[];
+  errors: Array<{ companyId: string; error: string }>;
+}> {
+  const rows: Record<string, unknown>[] = [];
+  const errors: Array<{ companyId: string; error: string }> = [];
+  const unique = Array.from(new Set(companyIds.map((id) => (typeof id === "string" ? id.trim() : ""))))
+    .filter(Boolean);
+  if (unique.length === 0) return { rows, missing: [], errors };
+  const config = resolveCredentials(credentials);
+  if (!config) {
+    const msg = "SOURCE_API_BASE_URL and SOURCE_API_KEY are required";
+    return {
+      rows,
+      missing: unique,
+      errors: unique.map((companyId) => ({ companyId, error: msg })),
+    };
+  }
+
+  const batchSize = Math.max(1, Math.min(200, Math.floor(opts.batchSize ?? 100)));
+  const seen = new Set<string>();
+
+  for (let i = 0; i < unique.length; i += batchSize) {
+    if (opts.onBefore) await opts.onBefore();
+    const chunk = unique.slice(i, i + batchSize);
+    let offset = 0;
+    let chunkFailed = false;
+    try {
+      while (true) {
+        const limit = Math.max(1, Math.min(chunk.length, pageLimitForOffset(offset) || chunk.length));
+        const body = JSON.stringify({
+          filter: { uuid: chunk },
+          limit,
+          offset,
+          order_field: "updated_at",
+          order_type: "desc",
+        });
+        const res = await fetchJson<{ data?: CompanyItem[]; total?: number; has_more?: boolean }>(
+          `${config.baseUrl}${COMPANIES_LIST_PATH}`,
+          config.apiKey,
+          { method: "POST", body }
+        );
+        const page = (res.data ?? []).map(unwrapCompany);
+        for (const row of page) {
+          const uuid = row.uuid;
+          if (typeof uuid === "string" && uuid.trim()) {
+            seen.add(uuid.trim());
+          }
+          rows.push(row);
+        }
+        if (page.length === 0 || res.has_more === false || (res.total != null && offset + page.length >= res.total)) {
+          break;
+        }
+        offset += limit;
+        await sleep(DELAY_MS);
+      }
+      if (opts.onLog) {
+        await opts.onLog("companies-by-ids: chunk fetched", {
+          chunkSize: chunk.length,
+          offset: i,
+          fetchedRowsSoFar: rows.length,
+        });
+      }
+    } catch (e) {
+      chunkFailed = true;
+      const msg = e instanceof Error ? e.message : String(e);
+      for (const companyId of chunk) errors.push({ companyId, error: msg });
+      if (opts.onLog) {
+        await opts.onLog("companies-by-ids: chunk fetch error", {
+          chunkSize: chunk.length,
+          offset: i,
+          error: msg,
+        });
+      }
+    }
+    if (!chunkFailed && i + batchSize < unique.length) {
+      await sleep(DELAY_MS);
+    }
+  }
+
+  const missing = unique.filter((companyId) => !seen.has(companyId));
+  return { rows, missing, errors };
+}
+
 export interface FetchLinkedInMessagesResult {
   data: Record<string, unknown>[];
   error: string | null;

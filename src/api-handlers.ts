@@ -53,6 +53,7 @@ import {
   createCompany,
   updateContactCompany,
   getCompaniesByIds,
+  upsertCompaniesMapped,
   type TableQueryFilters,
   listEnrichmentAgentsForEntityType,
   listAllEnrichmentAgents,
@@ -124,6 +125,7 @@ import {
 } from "./services/sync-supabase.js";
 import {
   fetchContactByUuid,
+  fetchCompaniesByIdsBatched,
   fetchContactsByListUuid,
   fetchContactsByUuidsConcurrent,
   fetchLeadUuidsByListUuid,
@@ -3210,6 +3212,133 @@ export async function handleGetContactsListSyncCheck(
  * GET /api/contacts/gs-by-list?projectId=&listUuid=
  * Proxy to GetSales leads/search by list_uuid and return full rows.
  */
+type HydratedCompanyRow = {
+  name: unknown;
+  company_description: unknown;
+  company_employees: unknown;
+  domain: unknown;
+};
+
+type FetchContactsByListUuidFn = typeof fetchContactsByListUuid;
+type FetchCompaniesByIdsBatchedFn = typeof fetchCompaniesByIdsBatched;
+type UpsertCompaniesMappedFn = (
+  rows: Record<string, unknown>[]
+) => Promise<{ upserted: number; error: string | null }>;
+
+async function loadCompaniesForHydration(
+  client: SupabaseClient,
+  companyIds: string[]
+): Promise<{ map: Map<string, HydratedCompanyRow>; error: string | null }> {
+  const map = new Map<string, HydratedCompanyRow>();
+  if (companyIds.length === 0) return { map, error: null };
+  const chunkSize = 100;
+  for (let i = 0; i < companyIds.length; i += chunkSize) {
+    const chunk = companyIds.slice(i, i + chunkSize);
+    const { data: rows, error } = await client
+      .from(COMPANIES_TABLE)
+      .select("id, name, about, employees_range, domain")
+      .in("id", chunk);
+    if (error) return { map: new Map(), error: error.message };
+    for (const row of (rows ?? []) as Array<Record<string, unknown>>) {
+      const id = typeof row.id === "string" ? row.id.trim() : "";
+      if (!id) continue;
+      map.set(id, {
+        name: row.name ?? null,
+        company_description: row.about ?? null,
+        company_employees: row.employees_range ?? null,
+        domain: row.domain ?? null,
+      });
+    }
+  }
+  return { map, error: null };
+}
+
+export async function hydrateContactsGsByListData(
+  listUuid: string,
+  credentials: { baseUrl: string; apiKey: string },
+  loadCompanies: (companyIds: string[]) => Promise<{ map: Map<string, HydratedCompanyRow>; error: string | null }>,
+  deps: {
+    fetchContactsByListUuidFn?: FetchContactsByListUuidFn;
+    fetchCompaniesByIdsBatchedFn?: FetchCompaniesByIdsBatchedFn;
+    upsertCompaniesMappedFn?: UpsertCompaniesMappedFn;
+  } = {}
+): Promise<{
+  status: 200 | 500 | 502;
+  body: Record<string, unknown>;
+}> {
+  const fetchContactsByListUuidFn = deps.fetchContactsByListUuidFn ?? fetchContactsByListUuid;
+  const fetchCompaniesByIdsBatchedFn = deps.fetchCompaniesByIdsBatchedFn ?? fetchCompaniesByIdsBatched;
+  const upsertCompaniesMappedFn =
+    deps.upsertCompaniesMappedFn ??
+    (async (_rows: Record<string, unknown>[]) => ({ upserted: 0, error: "upsertCompaniesMappedFn not configured" }));
+  const gsRes = await fetchContactsByListUuidFn(listUuid, credentials);
+  if (gsRes.error) {
+    return { status: 502, body: { data: gsRes.rows, error: gsRes.error } };
+  }
+
+  const uniqueCompanyIds = [
+    ...new Set(
+      gsRes.rows
+        .map((r) => {
+          const id = r.company_uuid;
+          return typeof id === "string" ? id.trim() : "";
+        })
+        .filter((id) => id.length > 0)
+    ),
+  ];
+
+  const firstCompanyRead = await loadCompanies(uniqueCompanyIds);
+  if (firstCompanyRead.error) {
+    return { status: 500, body: { data: [], error: firstCompanyRead.error } };
+  }
+
+  const missingCompanyIds = uniqueCompanyIds.filter((id) => !firstCompanyRead.map.has(id));
+  let companiesHydrated = 0;
+  const companiesErrors: Array<{ companyId: string; error: string }> = [];
+  if (missingCompanyIds.length > 0) {
+    const hydrateRes = await fetchCompaniesByIdsBatchedFn(credentials, missingCompanyIds);
+    companiesHydrated = hydrateRes.rows.length;
+    companiesErrors.push(...hydrateRes.errors);
+    if (hydrateRes.rows.length > 0) {
+      const upsertRes = await upsertCompaniesMappedFn(hydrateRes.rows);
+      if (upsertRes.error) {
+        companiesErrors.push({ companyId: "batch-upsert", error: upsertRes.error });
+      }
+    }
+  }
+
+  const finalCompanyRead = await loadCompanies(uniqueCompanyIds);
+  if (finalCompanyRead.error) {
+    return { status: 500, body: { data: [], error: finalCompanyRead.error } };
+  }
+  const companiesMissing = uniqueCompanyIds.filter((id) => !finalCompanyRead.map.has(id));
+  const normalized = gsRes.rows.map((row) => {
+    const cid = typeof row.company_uuid === "string" ? row.company_uuid.trim() : "";
+    const co = cid ? finalCompanyRead.map.get(cid) : undefined;
+    const linkedinUrlRaw = row.linkedin_url ?? row.linkedin ?? null;
+    const companyName = typeof co?.name === "string" && co.name.trim() ? co.name : row.company_name ?? null;
+    return {
+      ...row,
+      linkedin_url: typeof linkedinUrlRaw === "string" ? linkedinUrlRaw : null,
+      company_name: companyName,
+      company_description: co?.company_description ?? null,
+      company_employees: co?.company_employees ?? null,
+      domain: co?.domain ?? null,
+    };
+  });
+  return {
+    status: 200,
+    body: {
+      data: normalized,
+      meta: {
+        companiesHydrated,
+        companiesMissing: companiesMissing.length,
+        companiesErrors: companiesErrors.length,
+      },
+    },
+  };
+}
+
 export async function handleGetContactsGsByList(
   req: IncomingMessage,
   res: ServerResponse
@@ -3247,64 +3376,16 @@ export async function handleGetContactsGsByList(
     res.end(JSON.stringify({ data: [], error: "GetSales credentials missing on project and environment." }));
     return;
   }
-  const gsRes = await fetchContactsByListUuid(listUuid, credentials);
-  if (gsRes.error) {
-    res.writeHead(502);
-    res.end(JSON.stringify({ data: gsRes.rows, error: gsRes.error }));
-    return;
-  }
-
-  const uniqueCompanyIds = [
-    ...new Set(
-      gsRes.rows
-        .map((r) => {
-          const id = r.company_uuid;
-          return typeof id === "string" ? id.trim() : "";
-        })
-        .filter((id) => id.length > 0)
-    ),
-  ];
-  const companyById = new Map<
-    string,
-    { company_description: unknown; company_employees: unknown; domain: unknown }
-  >();
-  const coChunk = 100;
-  for (let i = 0; i < uniqueCompanyIds.length; i += coChunk) {
-    const chunk = uniqueCompanyIds.slice(i, i + coChunk);
-    const { data: coRows, error: coErr } = await client
-      .from(COMPANIES_TABLE)
-      .select("id, about, employees_range, domain")
-      .in("id", chunk);
-    if (coErr) {
-      res.writeHead(500);
-      res.end(JSON.stringify({ data: [], error: coErr.message }));
-      return;
+  const result = await hydrateContactsGsByListData(
+    listUuid,
+    credentials,
+    async (ids) => loadCompaniesForHydration(client, ids),
+    {
+      upsertCompaniesMappedFn: async (rows) => upsertCompaniesMapped(client, rows, 100),
     }
-    for (const row of (coRows ?? []) as Array<Record<string, unknown>>) {
-      const id = typeof row.id === "string" ? row.id : "";
-      if (!id) continue;
-      companyById.set(id, {
-        company_description: row.about ?? null,
-        company_employees: row.employees_range ?? null,
-        domain: row.domain ?? null,
-      });
-    }
-  }
-
-  const normalized = gsRes.rows.map((row) => {
-    const cid = typeof row.company_uuid === "string" ? row.company_uuid.trim() : "";
-    const co = cid ? companyById.get(cid) : undefined;
-    const linkedinUrlRaw = row.linkedin_url ?? row.linkedin ?? null;
-    return {
-      ...row,
-      linkedin_url: typeof linkedinUrlRaw === "string" ? linkedinUrlRaw : null,
-      company_description: co?.company_description ?? null,
-      company_employees: co?.company_employees ?? null,
-      domain: co?.domain ?? null,
-    };
-  });
-  res.writeHead(200);
-  res.end(JSON.stringify({ data: normalized }));
+  );
+  res.writeHead(result.status);
+  res.end(JSON.stringify(result.body));
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {

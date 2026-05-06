@@ -2,6 +2,7 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { COMPANY_SELECT_FOR_CONTACT_LLM } from "./prompt-resolver.js";
 import type { ApiCredentials } from "./source-api.js";
 import { decryptSecretPayload, encryptSecretPayload } from "./integration-secrets-crypto.js";
+import { mapCompanyForSupabase } from "./supabase-schema.js";
 
 const url = process.env.SUPABASE_URL;
 const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_KEY;
@@ -2582,6 +2583,27 @@ export async function getCompaniesByIds(
     })),
     error: null,
   };
+}
+
+/**
+ * Upsert GetSales companies in chunks using schema mapper (uuid -> id).
+ */
+export async function upsertCompaniesMapped(
+  client: SupabaseClient,
+  rows: Record<string, unknown>[],
+  chunkSize = 100
+): Promise<{ upserted: number; error: string | null }> {
+  const normalized = rows.map(mapCompanyForSupabase).filter((row) => typeof row.id === "string" && row.id);
+  if (normalized.length === 0) return { upserted: 0, error: null };
+  const size = Math.max(1, Math.min(500, Math.floor(chunkSize)));
+  for (let i = 0; i < normalized.length; i += size) {
+    const slice = normalized.slice(i, i + size);
+    const { error } = await client
+      .from(COMPANIES_TABLE)
+      .upsert(slice, { onConflict: "id", ignoreDuplicates: false });
+    if (error) return { upserted: i, error: error.message };
+  }
+  return { upserted: normalized.length, error: null };
 }
 
 /** LinkedIn-style profile fields from Contacts (for reply prompts). */
