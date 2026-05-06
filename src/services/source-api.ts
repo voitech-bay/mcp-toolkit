@@ -787,12 +787,13 @@ export async function fetchContactsByUuidsConcurrent(
 }
 
 /**
- * Fetch many companies by UUID from POST /leads/api/companies/list in chunks.
- * Never throws: chunk failures are collected in `errors`; not returned ids in `missing`.
+ * Fetch companies for list UUIDs from POST /leads/api/companies/list in chunks.
+ * Uses `filter.lists` because API does not support `filter.uuid`.
+ * Never throws: chunk failures are collected in `errors`.
  */
-export async function fetchCompaniesByIdsBatched(
+export async function fetchCompaniesByListUuidsBatched(
   credentials: ApiCredentials | undefined,
-  companyIds: string[],
+  listUuids: string[],
   opts: {
     batchSize?: number;
     onBefore?: () => Promise<void>;
@@ -801,11 +802,11 @@ export async function fetchCompaniesByIdsBatched(
 ): Promise<{
   rows: Record<string, unknown>[];
   missing: string[];
-  errors: Array<{ companyId: string; error: string }>;
+  errors: Array<{ listUuid: string; error: string }>;
 }> {
   const rows: Record<string, unknown>[] = [];
-  const errors: Array<{ companyId: string; error: string }> = [];
-  const unique = Array.from(new Set(companyIds.map((id) => (typeof id === "string" ? id.trim() : ""))))
+  const errors: Array<{ listUuid: string; error: string }> = [];
+  const unique = Array.from(new Set(listUuids.map((id) => (typeof id === "string" ? id.trim() : ""))))
     .filter(Boolean);
   if (unique.length === 0) return { rows, missing: [], errors };
   const config = resolveCredentials(credentials);
@@ -814,13 +815,11 @@ export async function fetchCompaniesByIdsBatched(
     return {
       rows,
       missing: unique,
-      errors: unique.map((companyId) => ({ companyId, error: msg })),
+      errors: unique.map((listUuid) => ({ listUuid, error: msg })),
     };
   }
 
   const batchSize = Math.max(1, Math.min(200, Math.floor(opts.batchSize ?? 100)));
-  const seen = new Set<string>();
-
   for (let i = 0; i < unique.length; i += batchSize) {
     if (opts.onBefore) await opts.onBefore();
     const chunk = unique.slice(i, i + batchSize);
@@ -830,7 +829,7 @@ export async function fetchCompaniesByIdsBatched(
       while (true) {
         const limit = Math.max(1, Math.min(chunk.length, pageLimitForOffset(offset) || chunk.length));
         const body = JSON.stringify({
-          filter: { uuid: chunk },
+          filter: { lists: chunk },
           limit,
           offset,
           order_field: "updated_at",
@@ -843,10 +842,6 @@ export async function fetchCompaniesByIdsBatched(
         );
         const page = (res.data ?? []).map(unwrapCompany);
         for (const row of page) {
-          const uuid = row.uuid;
-          if (typeof uuid === "string" && uuid.trim()) {
-            seen.add(uuid.trim());
-          }
           rows.push(row);
         }
         if (page.length === 0 || res.has_more === false || (res.total != null && offset + page.length >= res.total)) {
@@ -856,7 +851,7 @@ export async function fetchCompaniesByIdsBatched(
         await sleep(DELAY_MS);
       }
       if (opts.onLog) {
-        await opts.onLog("companies-by-ids: chunk fetched", {
+        await opts.onLog("companies-by-lists: chunk fetched", {
           chunkSize: chunk.length,
           offset: i,
           fetchedRowsSoFar: rows.length,
@@ -865,9 +860,9 @@ export async function fetchCompaniesByIdsBatched(
     } catch (e) {
       chunkFailed = true;
       const msg = e instanceof Error ? e.message : String(e);
-      for (const companyId of chunk) errors.push({ companyId, error: msg });
+      for (const listUuid of chunk) errors.push({ listUuid, error: msg });
       if (opts.onLog) {
-        await opts.onLog("companies-by-ids: chunk fetch error", {
+        await opts.onLog("companies-by-lists: chunk fetch error", {
           chunkSize: chunk.length,
           offset: i,
           error: msg,
@@ -879,8 +874,7 @@ export async function fetchCompaniesByIdsBatched(
     }
   }
 
-  const missing = unique.filter((companyId) => !seen.has(companyId));
-  return { rows, missing, errors };
+  return { rows, missing: [], errors };
 }
 
 export interface FetchLinkedInMessagesResult {

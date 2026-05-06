@@ -25,7 +25,7 @@ test("hydrateContactsGsByListData: no missing companies skips hydration fetch", 
         total: 1,
         error: null,
       }),
-      fetchCompaniesByIdsBatchedFn: async () => {
+      fetchCompaniesByListUuidsBatchedFn: async () => {
         hydrateCalls += 1;
         return { rows: [], missing: [], errors: [] };
       },
@@ -88,7 +88,7 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
         total: 2,
         error: null,
       }),
-      fetchCompaniesByIdsBatchedFn: async () => {
+      fetchCompaniesByListUuidsBatchedFn: async () => {
         hydrateCalls += 1;
         return {
           rows: [{ uuid: "co-2", name: "Hydrated Co", about: "new", employees_range: "51-200", domain: "new.test" }],
@@ -142,10 +142,10 @@ test("hydrateContactsGsByListData: partial failure returns best-effort payload",
         total: 2,
         error: null,
       }),
-      fetchCompaniesByIdsBatchedFn: async () => ({
+      fetchCompaniesByListUuidsBatchedFn: async () => ({
         rows: [{ uuid: "co-2", name: "Recovered Co", domain: "ok.test" }],
         missing: ["co-3"],
-        errors: [{ companyId: "co-3", error: "not found" }],
+        errors: [{ listUuid: "list-1", error: "not found" }],
       }),
       upsertCompaniesMappedFn: async (rows) => ({ upserted: rows.length, error: null }),
     }
