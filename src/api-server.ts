@@ -96,6 +96,7 @@ import {
   handlePostRollbackGeneratedMessagePreset,
   handlePostFindContactByUuid,
   handlePostContactsListSyncResyncMissing,
+  handleGetN8nWorkflowResults,
   handlePostN8nWorkflowResults,
   handleFirefliesWebhook,
   handleGetDifyWorkflows,
@@ -627,7 +628,9 @@ const server = createServer(async (req, res) => {
         }
         return;
       case "/api/n8n/workflow-results":
-        if (req.method === "POST") {
+        if (req.method === "GET") {
+          await handleGetN8nWorkflowResults(req, res);
+        } else if (req.method === "POST") {
           await handlePostN8nWorkflowResults(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });

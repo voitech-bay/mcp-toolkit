@@ -4503,6 +4503,175 @@ export async function getN8nWorkflowResultsByForeignIds(
   return { data: (data ?? []) as N8nWorkflowResultRow[], error: null };
 }
 
+function n8nBatchArray<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+function n8nPreviewAgentValue(val: unknown): string {
+  if (val === null || val === undefined) return "—";
+  if (typeof val === "string") return val.length > 160 ? `${val.slice(0, 160)}…` : val;
+  try {
+    const s = JSON.stringify(val);
+    return s.length > 160 ? `${s.slice(0, 160)}…` : s;
+  } catch {
+    return "[unserializable]";
+  }
+}
+
+function n8nContactLabelFromRow(row: Record<string, unknown>): string {
+  const name = row.name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  const f = typeof row.first_name === "string" ? row.first_name.trim() : "";
+  const l = typeof row.last_name === "string" ? row.last_name.trim() : "";
+  if (f || l) return `${f} ${l}`.trim();
+  const u = row.uuid;
+  if (typeof u === "string" && u.length >= 8) return `${u.slice(0, 8)}…`;
+  return "—";
+}
+
+/** One row for GET list UI: labels resolved from Contacts / companies. */
+export interface N8nWorkflowResultListRow {
+  id: string;
+  contact_id: string | null;
+  contact_label: string | null;
+  company_id: string | null;
+  company_label: string | null;
+  workflow: string;
+  execution_id: string | null;
+  created_at: string;
+  updated_at: string;
+  result: Record<string, unknown>;
+  agent_previews: Record<string, string>;
+}
+
+/**
+ * Paginated `n8n_workflow_results` for UI (newest first), optional filters, with contact/company labels.
+ */
+export async function listN8nWorkflowResultsPage(
+  client: SupabaseClient,
+  params: {
+    contactId?: string | null;
+    companyId?: string | null;
+    executionId?: string | null;
+    limit: number;
+    offset: number;
+  }
+): Promise<{
+  rows: N8nWorkflowResultListRow[];
+  total: number;
+  agent_key_union: string[];
+  error: string | null;
+}> {
+  const limit = Math.min(Math.max(params.limit, 1), 200);
+  const offset = Math.max(params.offset, 0);
+  const contactId = params.contactId?.trim() ?? "";
+  const companyId = params.companyId?.trim() ?? "";
+  const executionId = params.executionId?.trim() ?? "";
+
+  let q = client.from(N8N_WORKFLOW_RESULTS_TABLE).select("*", { count: "exact" });
+  if (contactId) q = q.eq("contact_id", contactId);
+  if (companyId) q = q.eq("company_id", companyId);
+  if (executionId) q = q.eq("execution_id", executionId);
+
+  const { data, error, count } = await q
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  if (error) {
+    return { rows: [], total: 0, agent_key_union: [], error: error.message };
+  }
+
+  const rawRows = (data ?? []) as Array<Record<string, unknown>>;
+  const contactIds = [
+    ...new Set(
+      rawRows
+        .map((r) => r.contact_id)
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+    ),
+  ];
+  const companyIds = [
+    ...new Set(
+      rawRows
+        .map((r) => r.company_id)
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+    ),
+  ];
+
+  const contactLabelByUuid = new Map<string, string>();
+  for (const batch of n8nBatchArray(contactIds, 200)) {
+    const { data: cRows, error: cErr } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, name, first_name, last_name")
+      .in("uuid", batch);
+    if (cErr) {
+      return { rows: [], total: 0, agent_key_union: [], error: `Contacts lookup: ${cErr.message}` };
+    }
+    for (const c of (cRows ?? []) as Array<Record<string, unknown>>) {
+      const u = typeof c.uuid === "string" ? c.uuid : "";
+      if (u) contactLabelByUuid.set(u, n8nContactLabelFromRow(c));
+    }
+  }
+
+  const companyLabelById = new Map<string, string>();
+  for (const batch of n8nBatchArray(companyIds, 200)) {
+    const { data: coRows, error: coErr } = await client
+      .from(COMPANIES_TABLE)
+      .select("id, name")
+      .in("id", batch);
+    if (coErr) {
+      return { rows: [], total: 0, agent_key_union: [], error: `Companies lookup: ${coErr.message}` };
+    }
+    for (const co of (coRows ?? []) as Array<Record<string, unknown>>) {
+      const id = typeof co.id === "string" ? co.id : "";
+      const nm = typeof co.name === "string" ? co.name.trim() : "";
+      if (id) companyLabelById.set(id, nm || (id.length >= 8 ? `${id.slice(0, 8)}…` : id));
+    }
+  }
+
+  const agentKeySet = new Set<string>();
+  const rows: N8nWorkflowResultListRow[] = [];
+
+  for (const r of rawRows) {
+    const id = typeof r.id === "string" ? r.id : "";
+    const cid = typeof r.contact_id === "string" ? r.contact_id : null;
+    const coid = typeof r.company_id === "string" ? r.company_id : null;
+    const resObj =
+      r.result && typeof r.result === "object" && !Array.isArray(r.result)
+        ? (r.result as Record<string, unknown>)
+        : {};
+    const agent_previews: Record<string, string> = {};
+    for (const k of Object.keys(resObj)) {
+      if (k === "row_data") continue;
+      agentKeySet.add(k);
+      agent_previews[k] = n8nPreviewAgentValue(resObj[k]);
+    }
+    rows.push({
+      id,
+      contact_id: cid,
+      contact_label: cid
+        ? contactLabelByUuid.get(cid) ?? (cid.length >= 8 ? `${cid.slice(0, 8)}…` : cid)
+        : null,
+      company_id: coid,
+      company_label: coid ? companyLabelById.get(coid) ?? null : null,
+      workflow: typeof r.workflow === "string" ? r.workflow : "",
+      execution_id: typeof r.execution_id === "string" ? r.execution_id : null,
+      created_at: typeof r.created_at === "string" ? r.created_at : "",
+      updated_at: typeof r.updated_at === "string" ? r.updated_at : "",
+      result: resObj,
+      agent_previews,
+    });
+  }
+
+  return {
+    rows,
+    total: count ?? 0,
+    agent_key_union: [...agentKeySet].sort(),
+    error: null,
+  };
+}
+
 export type EnrichmentEntityType = "company" | "contact";
 
 export type EnrichmentAgentCellStatus =

@@ -96,6 +96,7 @@ import {
   getCompaniesByIdsForProject,
   getContactsForListUuid,
   N8N_WORKFLOW_RESULTS_TABLE,
+  listN8nWorkflowResultsPage,
 } from "./services/supabase.js";
 import {
   getProjectAnalyticsDashboard,
@@ -3466,14 +3467,67 @@ async function n8nInsertWorkflowResultsBatched(
 }
 
 /**
+ * GET /api/n8n/workflow-results?contactId=&companyId=&executionId=&limit=&offset=
+ * Paginated list for UI; optional filters (exact match). Returns rows with contact/company labels and agent_key_union for table columns.
+ */
+export async function handleGetN8nWorkflowResults(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const contactId = params.get("contactId")?.trim() ?? params.get("contact_id")?.trim() ?? "";
+  const companyId = params.get("companyId")?.trim() ?? params.get("company_id")?.trim() ?? "";
+  const executionId = params.get("executionId")?.trim() ?? params.get("execution_id")?.trim() ?? "";
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 200);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+
+  const { rows, total, agent_key_union, error } = await listN8nWorkflowResultsPage(client, {
+    contactId: contactId || null,
+    companyId: companyId || null,
+    executionId: executionId || null,
+    limit,
+    offset,
+  });
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      rows,
+      total,
+      limit,
+      offset,
+      agent_key_union,
+    })
+  );
+}
+
+/**
  * POST /api/n8n/workflow-results
  *
  * n8n contract:
- * - Body: `{ results: object[], executionId?: string }` (`execution_id` also accepted). Each results item is one row’s combined agent output. `executionId` is copied to every inserted DB row.
- * - No `projectId`: rows are tied only via `contact_id` / `company_id`. Contact upsert uses `project_id` from the existing `Contacts` row when found.
- * - `row_data`: original row from `GET /api/contacts/gs-by-list` (used to upsert `Contacts` when the lead already exists in DB).
+ * - Body: `{ results: object[], executionId?: string, projectId?: string }` (`execution_id` also accepted). Each results item is one row’s combined agent output. `executionId` is copied to every inserted DB row.
+ * - `projectId`: when a resolved lead UUID is not in `Contacts`, the server calls GetSales (`GET /leads/api/leads/{uuid}` per lead, same as `POST /api/contacts/find-by-uuid`) and upserts those leads so `contact_id` can be set. Omit only if every lead already exists in DB (otherwise `contact_id` stays null and an error is recorded).
+ * - `row_data`: original row from `GET /api/contacts/gs-by-list` (used to upsert `Contacts` when the lead is known after DB load / GetSales hydrate).
  * - Other top-level keys (except `row_data`) are agent names; sorted keys become `workflow` (comma-separated).
  * - `lead_uuid` / `company_uuid` may appear anywhere in the item graph (nested). If `lead_uuid` is missing, `row_data.uuid` is used as the lead id.
+ * - Every result row is inserted into `n8n_workflow_results` (including when `contact_id` / `company_id` are null). Non-object items are stored with `result.payload` plus a parse note.
  * - Optional: set `N8N_WORKFLOW_RESULTS_SECRET`; then send `Authorization: Bearer <secret>`.
  * - Internally batches DB calls (contact load / company load / upserts / inserts) so large `results` arrays avoid per-row round-trips.
  */
@@ -3512,10 +3566,13 @@ export async function handlePostN8nWorkflowResults(
     results?: unknown;
     executionId?: unknown;
     execution_id?: unknown;
+    projectId?: unknown;
   } | null;
   const execRaw = body?.executionId ?? body?.execution_id;
   const executionId =
     typeof execRaw === "string" && execRaw.trim() ? execRaw.trim() : null;
+  const projectId =
+    typeof body?.projectId === "string" && body.projectId.trim() ? body.projectId.trim() : "";
   const resultsRaw = body?.results;
   if (!Array.isArray(resultsRaw)) {
     res.writeHead(400);
@@ -3525,6 +3582,7 @@ export async function handlePostN8nWorkflowResults(
 
   const nowIso = new Date().toISOString();
   const errors: Array<{ index: number; message: string }> = [];
+  let leadsHydratedFromGetSales = 0;
 
   type ParsedLine = {
     index: number;
@@ -3561,18 +3619,101 @@ export async function handlePostN8nWorkflowResults(
     });
   }
 
+  const firstIndexByLead = new Map<string, number>();
+  for (const p of parsed) {
+    if (p.leadUuid && !firstIndexByLead.has(p.leadUuid)) {
+      firstIndexByLead.set(p.leadUuid, p.index);
+    }
+  }
+
   const leadUuidsNeedingLookup = [
     ...new Set(
       parsed.map((p) => p.leadUuid).filter((u): u is string => typeof u === "string" && u.length > 0)
     ),
   ];
 
-  const { map: contactProjByUuid, error: contactLoadErr } = await n8nLoadContactProjectByUuid(
+  const { map: initialContactProj, error: contactLoadErr } = await n8nLoadContactProjectByUuid(
     client,
     leadUuidsNeedingLookup
   );
+  let contactProjByUuid = initialContactProj;
   if (contactLoadErr) {
     errors.push({ index: 0, message: `Contact batch lookup failed: ${contactLoadErr}` });
+  }
+
+  const missingForGs = leadUuidsNeedingLookup.filter((u) => !contactProjByUuid.has(u));
+  if (missingForGs.length > 0 && !contactLoadErr) {
+    if (!projectId) {
+      errors.push({
+        index: firstIndexByLead.get(missingForGs[0]) ?? 0,
+        message: `Lead(s) not in database (${missingForGs.length}); pass projectId to load from GetSales by UUID.`,
+      });
+    } else {
+      const [{ data: project, error: projectErr }, credentialsResult] = await Promise.all([
+        getProjectById(client, projectId),
+        getGetSalesCredentials(client, projectId),
+      ]);
+      if (projectErr || !project) {
+        errors.push({
+          index: firstIndexByLead.get(missingForGs[0]) ?? 0,
+          message: `projectId: ${projectErr ?? "Project not found"}`,
+        });
+      } else if (credentialsResult.error) {
+        errors.push({
+          index: firstIndexByLead.get(missingForGs[0]) ?? 0,
+          message: `GetSales credentials: ${credentialsResult.error}`,
+        });
+      } else {
+        const baseUrl = credentialsResult.credentials?.baseUrl ?? "";
+        const apiKey = credentialsResult.credentials?.apiKey ?? "";
+        if (!baseUrl || !apiKey) {
+          errors.push({
+            index: firstIndexByLead.get(missingForGs[0]) ?? 0,
+            message: "GetSales credentials missing on project and environment.",
+          });
+        } else {
+          const { rows: gsRows, missing: gsMissing, errors: gsErrors } =
+            await fetchContactsByUuidsConcurrent({ baseUrl, apiKey }, missingForGs, {
+              concurrency: 5,
+            });
+          for (const ge of gsErrors) {
+            const idx = firstIndexByLead.get(ge.uuid) ?? 0;
+            errors.push({ index: idx, message: `GetSales ${ge.uuid}: ${ge.error}` });
+          }
+          for (const m of gsMissing) {
+            const idx = firstIndexByLead.get(m) ?? 0;
+            errors.push({ index: idx, message: `Contact not found in GetSales: ${m}` });
+          }
+          const byUuid = new Map<string, Record<string, unknown>>();
+          const lastIdxForGsUpsert = new Map<string, number>();
+          for (const row of gsRows) {
+            const mapped = mapContactForSupabase(row);
+            const u =
+              typeof mapped.uuid === "string" && mapped.uuid.trim()
+                ? mapped.uuid.trim()
+                : "";
+            if (!u) continue;
+            mapped.project_id = projectId;
+            mapped.uuid = u;
+            byUuid.set(u, mapped);
+            lastIdxForGsUpsert.set(u, firstIndexByLead.get(u) ?? 0);
+          }
+          const gsMapped = [...byUuid.values()];
+          if (gsMapped.length > 0) {
+            const gsSuccess = await n8nUpsertContactsBatched(
+              client,
+              gsMapped,
+              errors,
+              lastIdxForGsUpsert
+            );
+            leadsHydratedFromGetSales = gsSuccess.size;
+            for (const u of gsSuccess) {
+              contactProjByUuid.set(u, projectId);
+            }
+          }
+        }
+      }
+    }
   }
 
   const upsertByUuid = new Map<string, Record<string, unknown>>();
@@ -3647,7 +3788,11 @@ export async function handlePostN8nWorkflowResults(
         company_id: null,
         execution_id: executionId,
         workflow: "",
-        result: { _error: "item_not_plain_object", index: p.index },
+        result: {
+          _error: "item_not_plain_object",
+          index: p.index,
+          payload: resultsRaw[p.index],
+        },
         updated_at: nowIso,
       });
       continue;
@@ -3677,6 +3822,7 @@ export async function handlePostN8nWorkflowResults(
       processed: resultsRaw.length,
       contactsUpserted,
       contactsSkipped,
+      leadsHydratedFromGetSales,
       rowsInserted,
       errors,
     })

@@ -40,6 +40,12 @@ const router = createRouter({
     { path: "/getsales-tags", name: "GetSalesTags", component: () => import("../views/GetSalesTagsPage.vue"), meta: { title: "GetSales tags | MCP Toolkit" } },
     { path: "/enrichment", name: "EnrichmentTable", component: () => import("../views/EnrichmentTablePage.vue"), meta: { title: "Enrichment | MCP Toolkit" } },
     { path: "/enrichment/jobs", name: "EnrichmentJobs", component: () => import("../views/EnrichmentJobsPage.vue"), meta: { title: "Enrichment jobs | MCP Toolkit" } },
+    {
+      path: "/n8n/workflow-results",
+      name: "N8nWorkflowResults",
+      component: () => import("../views/N8nWorkflowResultsPage.vue"),
+      meta: { title: "n8n workflow results | MCP Toolkit" },
+    },
   ],
 });
 
