@@ -88,6 +88,7 @@ const autoSummarize = ref(false);
 const activeTab = ref<"ai_summary" | "static_summary" | "details">("static_summary");
 const sidebarWidthPct = ref(42);
 const resizing = ref(false);
+const profileAboutExpanded = ref(false);
 
 const historyEntries = ref<HistoryEntry[]>([]);
 const summariesMap = ref<Record<string, SummaryEntry>>({});
@@ -210,6 +211,7 @@ type StaticSummaryCard = {
   category: "Contact" | "Company";
   title: string;
   value: string;
+  isLink?: boolean;
 };
 type StaticNoneCard = {
   category: "Contact" | "Company";
@@ -306,6 +308,203 @@ function formatValuesForCard(values: string[]): string {
   return values.map((v, i) => `${i + 1}. ${v}`).join("\n");
 }
 
+function parseMaybeDate(value: unknown): Date | null {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function humanizeTenureFromDates(start: Date, end: Date): string {
+  let months = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+  if (end.getDate() < start.getDate()) months -= 1;
+  if (months < 0) months = 0;
+  const years = Math.floor(months / 12);
+  const remMonths = months % 12;
+  if (years > 0 && remMonths > 0) return `${years}y ${remMonths}m`;
+  if (years > 0) return `${years}y`;
+  return `${remMonths}m`;
+}
+
+type LeadExperienceParsed = {
+  companyName: string | null;
+  duration: string | null;
+  summaryText: string | null;
+};
+
+function companyNameFromExperienceRow(row: Record<string, unknown>): string | null {
+  return firstNonEmpty([
+    typeof row.company_name === "string" ? row.company_name : null,
+    typeof row.company === "string" ? row.company : null,
+    typeof row.organization === "string" ? row.organization : null,
+    typeof row.employer === "string" ? row.employer : null,
+    typeof row.account === "string" ? row.account : null,
+  ]);
+}
+
+function leadExperienceFromRaw(raw: unknown): LeadExperienceParsed | null {
+  if (typeof raw === "string") {
+    const t = raw.trim();
+    if (!t) return null;
+    return { companyName: null, duration: null, summaryText: t };
+  }
+  if (Array.isArray(raw)) {
+    const rows = raw.filter((x): x is Record<string, unknown> => !!x && typeof x === "object");
+    if (rows.length === 0) return null;
+    const active =
+      rows.find((x) => x.current === true || x.is_current === true || x.present === true) ?? rows[0] ?? null;
+    if (!active) return null;
+    const companyName = companyNameFromExperienceRow(active);
+    const durationText =
+      typeof active.duration === "string"
+        ? active.duration.trim()
+        : typeof active.tenure === "string"
+          ? active.tenure.trim()
+          : "";
+    const summaryText = firstNonEmpty([
+      typeof active.summary === "string" ? active.summary : null,
+      typeof active.description === "string" ? active.description : null,
+      typeof active.role_summary === "string" ? active.role_summary : null,
+      typeof active.value === "string" ? active.value : null,
+    ]);
+    if (durationText) return { companyName, duration: durationText, summaryText };
+    const start =
+      parseMaybeDate(active.start_date) ??
+      parseMaybeDate(active.startDate) ??
+      parseMaybeDate(active.from) ??
+      parseMaybeDate(active.date_from);
+    const end =
+      parseMaybeDate(active.end_date) ??
+      parseMaybeDate(active.endDate) ??
+      parseMaybeDate(active.to) ??
+      parseMaybeDate(active.date_to) ??
+      new Date();
+    if (start) return { companyName, duration: humanizeTenureFromDates(start, end), summaryText };
+    if (!summaryText && !companyName) return null;
+    return { companyName, duration: null, summaryText };
+  }
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    const companyName = companyNameFromExperienceRow(obj);
+    const durationText =
+      typeof obj.duration === "string"
+        ? obj.duration.trim()
+        : typeof obj.tenure === "string"
+          ? obj.tenure.trim()
+          : typeof obj.value === "string"
+            ? obj.value.trim()
+            : "";
+    const summaryText = firstNonEmpty([
+      typeof obj.summary === "string" ? obj.summary : null,
+      typeof obj.description === "string" ? obj.description : null,
+      typeof obj.role_summary === "string" ? obj.role_summary : null,
+      typeof obj.value === "string" ? obj.value : null,
+    ]);
+    if (durationText || summaryText || companyName) {
+      return { companyName, duration: durationText || null, summaryText };
+    }
+  }
+  return null;
+}
+
+function collectLeadTenureValues(): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of n8nRows.value) {
+    const raw = getByPath(row.result, "lead.experience");
+    const parsed = leadExperienceFromRaw(raw);
+    const tenure = parsed?.duration;
+    if (!tenure) continue;
+    const key = tenure.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(tenure);
+  }
+  return out;
+}
+
+function collectLeadExperienceParsed(): LeadExperienceParsed[] {
+  const out: LeadExperienceParsed[] = [];
+  const seen = new Set<string>();
+  for (const row of n8nRows.value) {
+    const raw = getByPath(row.result, "lead.experience");
+    const parsed = leadExperienceFromRaw(raw);
+    if (!parsed) continue;
+    const sig = `${parsed.companyName ?? ""}|${parsed.duration ?? ""}|${parsed.summaryText ?? ""}`.toLowerCase();
+    if (seen.has(sig)) continue;
+    seen.add(sig);
+    out.push(parsed);
+  }
+  return out;
+}
+
+function firstNonEmpty(values: Array<string | null | undefined>): string | null {
+  for (const v of values) {
+    const t = typeof v === "string" ? v.trim() : "";
+    if (t) return t;
+  }
+  return null;
+}
+
+function normalizeLinkedinUrl(raw: string | null | undefined): string | null {
+  const v = typeof raw === "string" ? raw.trim() : "";
+  if (!v) return null;
+  if (/^https?:\/\//i.test(v)) return v;
+  if (/^www\.linkedin\.com\//i.test(v)) return `https://${v}`;
+  if (/^linkedin\.com\//i.test(v)) return `https://www.${v}`;
+  if (/^in\//i.test(v)) return `https://www.linkedin.com/${v.replace(/^\/+/, "")}`;
+  const slug = v.replace(/^@/, "").replace(/^\/+|\/+$/g, "");
+  if (!slug) return null;
+  return `https://www.linkedin.com/in/${slug}/`;
+}
+
+type ProfileSummary = {
+  company: string | null;
+  experienceCompany: string | null;
+  position: string | null;
+  tenure: string | null;
+  companyExperience: string | null;
+  about: string | null;
+  linkedin: string | null;
+};
+
+const profileSummary = computed<ProfileSummary>(() => {
+  const exp = collectLeadExperienceParsed()[0] ?? null;
+  const expCompany = exp?.companyName ?? null;
+  const company = firstNonEmpty([
+    expCompany,
+    collectFieldValues("lead.company_name")[0],
+    selectedContact.value?.company_name ?? null,
+  ]);
+  const position = firstNonEmpty([collectFieldValues("lead.position")[0], selectedContact.value?.position ?? null]);
+  const about = collectFieldValues("lead.about")[0] ?? null;
+  const linkedin = collectFieldValues("lead.linkedin")[0] ?? null;
+  const tenure = exp?.duration ?? collectLeadTenureValues()[0] ?? null;
+  const companyExperience = exp?.summaryText
+    ? expCompany
+      ? `${expCompany}: ${exp.summaryText}`
+      : exp.summaryText
+    : null;
+  return {
+    company,
+    experienceCompany: expCompany,
+    position,
+    tenure,
+    companyExperience,
+    about,
+    linkedin,
+  };
+});
+
+const profileAboutDisplay = computed(() => {
+  const raw = profileSummary.value.about ?? "";
+  if (raw.length <= 150) return raw;
+  if (profileAboutExpanded.value) return raw;
+  return `${raw.slice(0, 150)}...`;
+});
+
+const canExpandAbout = computed(() => (profileSummary.value.about?.length ?? 0) > 150);
+const profileLinkedinUrl = computed(() => normalizeLinkedinUrl(profileSummary.value.linkedin));
+
 function buildStaticCards(
   fields: readonly StaticFieldDef[],
   category: "Contact" | "Company"
@@ -330,7 +529,18 @@ function buildStaticCards(
 const staticSummaryCards = computed<StaticSummaryCard[]>(() => {
   const contact = buildStaticCards(STATIC_CONTACT_FIELDS, "Contact");
   const company = buildStaticCards(STATIC_COMPANY_FIELDS, "Company");
-  return [...contact.cards, ...company.cards];
+  const { company: leadCompany, position: leadPosition, about: leadAbout, linkedin: leadLinkedin, tenure: leadTenure } =
+    profileSummary.value;
+  const profileCards: StaticSummaryCard[] = [];
+  if (leadCompany || leadPosition || leadTenure || leadAbout || leadLinkedin || profileSummary.value.companyExperience) {
+    profileCards.push({
+      category: "Contact",
+      title: "Profile",
+      value: "",
+    });
+  }
+
+  return [...profileCards, ...contact.cards, ...company.cards];
 });
 
 const staticSummaryNoneFields = computed(() => {
@@ -474,6 +684,7 @@ async function loadN8nForContact(): Promise<void> {
 function selectHit(hit: SearchHit): void {
   selectedContact.value = hit;
   activeTab.value = "static_summary";
+  profileAboutExpanded.value = false;
   pushHistory(hit);
   summarizeText.value = "";
   const local = latestSummaryForContactId(hit.uuid);
@@ -500,6 +711,7 @@ function selectHistory(entry: HistoryEntry): void {
   };
   selectedContact.value = hit;
   activeTab.value = "static_summary";
+  profileAboutExpanded.value = false;
   pushHistory(hit);
   summarizeText.value = "";
   const local = latestSummaryForContactId(hit.uuid);
@@ -842,8 +1054,69 @@ onUnmounted(() => {
                         <NTag size="small" :type="c.category === 'Contact' ? 'info' : 'default'" bordered>
                           {{ c.category }}
                         </NTag>
-                        <strong>{{ c.title }}</strong>
-                        <p class="card-value">{{ c.value }}</p>
+                        <strong v-if="c.title !== 'Profile'">{{ c.title }}</strong>
+                        <template v-if="c.title === 'Profile'">
+                          <div class="profile-lines">
+                            <p v-if="profileSummary.company" class="card-value">
+                              <strong>Company:</strong>
+                              <NTag
+                                size="small"
+                                bordered
+                                :style="companyTagStyle(profileSummary.company)"
+                                style="margin-left: 6px"
+                              >
+                                {{ profileSummary.company }}
+                              </NTag>
+                            </p>
+                            <p v-if="profileSummary.position" class="card-value"><strong>Position:</strong> {{ profileSummary.position }}</p>
+                            <p v-if="profileSummary.tenure" class="card-value">
+                              <strong>Time at company:</strong>
+                              <NTag
+                                v-if="profileSummary.experienceCompany"
+                                size="small"
+                                bordered
+                                :style="companyTagStyle(profileSummary.experienceCompany)"
+                                style="margin: 0 6px"
+                              >
+                                {{ profileSummary.experienceCompany }}
+                              </NTag>
+                              {{ profileSummary.tenure }}
+                            </p>
+                            <p v-if="profileSummary.companyExperience" class="card-value">
+                              <strong>Current company experience:</strong> {{ profileSummary.companyExperience }}
+                            </p>
+                            <p v-if="profileSummary.about" class="card-value">
+                              <strong>About:</strong> {{ profileAboutDisplay }}
+                            </p>
+                            <NButton
+                              v-if="canExpandAbout"
+                              size="tiny"
+                              quaternary
+                              class="about-toggle-btn"
+                              @click="profileAboutExpanded = !profileAboutExpanded"
+                            >
+                              {{ profileAboutExpanded ? "Show less" : "Show more" }}
+                            </NButton>
+                            <p v-if="profileLinkedinUrl" class="card-value">
+                              <strong>LinkedIn:</strong>
+                              <a :href="profileLinkedinUrl" target="_blank" rel="noreferrer noopener" class="linkedin-tag-link">
+                                <NTag size="small" type="info" bordered style="margin-left: 6px">
+                                  {{ profileLinkedinUrl }}
+                                </NTag>
+                              </a>
+                            </p>
+                          </div>
+                        </template>
+                        <a
+                          v-else-if="c.isLink"
+                          class="card-link"
+                          :href="c.value"
+                          target="_blank"
+                          rel="noreferrer noopener"
+                        >
+                          {{ c.value }}
+                        </a>
+                        <p v-else class="card-value">{{ c.value }}</p>
                       </NSpace>
                     </NCard>
                   </div>
@@ -1042,6 +1315,8 @@ onUnmounted(() => {
 }
 .inline-position {
   font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 2px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1089,6 +1364,26 @@ onUnmounted(() => {
   word-break: break-word;
   font-size: 0.84rem;
   line-height: 1.42;
+}
+.card-link {
+  font-size: 0.84rem;
+  line-height: 1.42;
+  word-break: break-all;
+}
+.linkedin-tag-link {
+  text-decoration: none;
+  & .n-tag {
+    cursor: pointer !important;
+  }
+}
+.profile-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.about-toggle-btn {
+  align-self: flex-start;
+  padding-left: 0;
 }
 .typing-indicator {
   display: inline-flex;
