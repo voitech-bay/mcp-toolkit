@@ -46,6 +46,12 @@ const router = createRouter({
       component: () => import("../views/N8nWorkflowResultsPage.vue"),
       meta: { title: "n8n workflow results | MCP Toolkit" },
     },
+    {
+      path: "/calls/cold-n8n",
+      name: "ColdCallN8n",
+      component: () => import("../views/ColdCallN8nPage.vue"),
+      meta: { title: "Cold call — n8n | MCP Toolkit" },
+    },
   ],
 });
 

@@ -96,9 +96,12 @@ import {
   getContactsByUuidsForProject,
   getCompaniesByIdsForProject,
   getContactsForListUuid,
+  findN8nContactsByNameLike,
   N8N_WORKFLOW_RESULTS_TABLE,
   listN8nWorkflowResultsPage,
+  listN8nWorkflowResultsFilteredPageRpc,
 } from "./services/supabase.js";
+import { parseN8nWorkflowResultsQueryBody } from "./services/n8n-workflow-result-filters.js";
 import {
   getProjectAnalyticsDashboard,
   getProjectAnalyticsDailySeries,
@@ -132,7 +135,11 @@ import {
   verifyGetSalesCredentials,
 } from "./services/source-api.js";
 import { syncPipedriveDeals } from "./services/pipedrive-deals-sync.js";
-import { listOpenRouterModels, generateOpenRouterMessage } from "./services/openrouter.js";
+import {
+  listOpenRouterModels,
+  generateOpenRouterMessage,
+  pipeOpenRouterChatStreamToSse,
+} from "./services/openrouter.js";
 import {
   buildGeneratedMessagePrompt,
   evaluateGeneratedMessageQuality,
@@ -1138,6 +1145,146 @@ export async function handleGetOpenRouterModels(
     res.writeHead(500);
     res.end(JSON.stringify({ data: [], error: e instanceof Error ? e.message : String(e) }));
   }
+}
+
+const N8N_SUMMARY_USER_PROMPT_MAX_CHARS = 48_000;
+
+function contactLabelFromSearchRow(row: Record<string, unknown>): string {
+  const name = row.name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  const f = typeof row.first_name === "string" ? row.first_name.trim() : "";
+  const l = typeof row.last_name === "string" ? row.last_name.trim() : "";
+  if (f || l) return `${f} ${l}`.trim();
+  const u = row.uuid;
+  if (typeof u === "string" && u.length >= 8) return `${u.slice(0, 8)}…`;
+  return "—";
+}
+
+function buildN8nWorkflowResultsSummaryPrompts(
+  contactId: string,
+  contactLabel: string,
+  rows: unknown[]
+): { systemPrompt: string; userPrompt: string } {
+  const systemPrompt = [
+    "You assist a sales rep on a live cold call.",
+    "They connected with a lead; below is JSON from n8n_workflow_results (research / agent output).",
+    "Use all relevant data, but prioritize these fields as what really matters for call prep.",
+    "High-priority contact fields:",
+    "contacts_output.ai_marketing_depth, contacts_output.ai_tools_detected, contacts_output.channel_affinity, contacts_output.channel_affinity_evidence, contacts_output.paid_media_responsibility, contacts_output.performance_motion.",
+    "High-priority company fields:",
+    "companies_output.ad_spend_potential, companies_output.business_motion, companies_output.business_motion_evidence, companies_output.channel_affinity_company, companies_output.company_type_tag, companies_output.dtc_motion, companies_output.included_contact_roles_display, companies_output.marketing_team_composition, companies_output.singleton_hook_signal, companies_output.singleton_observation_line, companies_output.sprites_account_pov, companies_output.their_icp_summary, companies_output.web_evidence_paid_media_explanation, companies_output.web_evidence_seo_explanation.",
+    "Summarize in short sections:",
+    "1) Lead snapshot — who they are and company (only from data).",
+    "2) What really matters — concise bullets mainly from the high-priority fields above; explicitly call out confidence and evidence when possible.",
+    "3) Suggested openers/questions for this call tied to those high-priority findings.",
+    "4) Data gaps — mention missing high-priority fields that would change call strategy.",
+    "Be concise. Be explicit about assumptions. If data is missing, say so. Do not invent facts.",
+  ].join(" ");
+  let blob = JSON.stringify(rows, null, 2);
+  if (blob.length > N8N_SUMMARY_USER_PROMPT_MAX_CHARS) {
+    blob = `${blob.slice(0, N8N_SUMMARY_USER_PROMPT_MAX_CHARS)}\n...[truncated]`;
+  }
+  const userPrompt = `Contact id: ${contactId}\nDisplay label: ${contactLabel}\n\nWorkflow result rows (JSON array):\n${blob}`;
+  return { systemPrompt, userPrompt };
+}
+
+/**
+ * POST /api/openrouter/stream-chat
+ * Body: { model, temperature?, systemPrompt, userPrompt } OR { model, mode: "n8n_workflow_results_summary", contactId, contactLabel?, rows }.
+ * Response: text/event-stream SSE with `data: {"text":"…"}` chunks and final `data: {"done":true}`.
+ */
+export async function handlePostOpenRouterStreamChat(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const rawUtf8 = await getRawBody(req);
+  let parsed: unknown;
+  try {
+    parsed = rawUtf8.trim() ? (JSON.parse(rawUtf8) as unknown) : null;
+  } catch {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Invalid JSON" }));
+    return;
+  }
+  if (!isRecord(parsed)) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Body must be a JSON object" }));
+    return;
+  }
+  const model = typeof parsed.model === "string" ? parsed.model.trim() : "";
+  const temperature =
+    typeof parsed.temperature === "number" && Number.isFinite(parsed.temperature)
+      ? parsed.temperature
+      : 0.5;
+  const mode = typeof parsed.mode === "string" ? parsed.mode.trim() : "";
+  let systemPrompt = typeof parsed.systemPrompt === "string" ? parsed.systemPrompt : "";
+  let userPrompt = typeof parsed.userPrompt === "string" ? parsed.userPrompt : "";
+
+  if (mode === "n8n_workflow_results_summary") {
+    const contactId = typeof parsed.contactId === "string" ? parsed.contactId.trim() : "";
+    const contactLabel =
+      typeof parsed.contactLabel === "string" && parsed.contactLabel.trim()
+        ? parsed.contactLabel.trim()
+        : contactId;
+    const rows = parsed.rows;
+    if (!contactId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "contactId is required for n8n_workflow_results_summary" }));
+      return;
+    }
+    if (!Array.isArray(rows) || rows.length === 0) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "rows must be a non-empty array" }));
+      return;
+    }
+    const built = buildN8nWorkflowResultsSummaryPrompts(contactId, contactLabel, rows);
+    systemPrompt = built.systemPrompt;
+    userPrompt = built.userPrompt;
+  }
+
+  if (!model || !systemPrompt || !userPrompt) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        error: "model, systemPrompt, and userPrompt are required (or use mode n8n_workflow_results_summary with contactId and rows).",
+      })
+    );
+    return;
+  }
+
+  const user =
+    typeof parsed.user === "string" && parsed.user.trim()
+      ? parsed.user.trim()
+      : `cold-call:${typeof parsed.contactId === "string" ? parsed.contactId.trim() : "unknown"}`;
+  const sessionId = typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : undefined;
+  const trace = isRecord(parsed.trace) ? parsed.trace : undefined;
+
+  const abort = new AbortController();
+  const onClose = (): void => {
+    abort.abort();
+  };
+  req.once("close", onClose);
+
+  await pipeOpenRouterChatStreamToSse(
+    res,
+    {
+      model,
+      systemPrompt,
+      userPrompt,
+      temperature,
+      user,
+      sessionId,
+      trace,
+    },
+    { signal: abort.signal }
+  );
+  req.removeListener("close", onClose);
 }
 
 /** GET /api/generated-messages?contactId=... */
@@ -3611,6 +3758,64 @@ export async function handleGetN8nWorkflowResults(
 }
 
 /**
+ * POST /api/n8n/workflow-results/query
+ * Body: `{ filters: { field, op, value }[], limit?, offset? }` → RPC `n8n_workflow_results_filtered_page`.
+ */
+export async function handlePostN8nWorkflowResultsQuery(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const rawUtf8 = await getRawBody(req);
+  let parsed: unknown;
+  try {
+    parsed = rawUtf8.trim() ? (JSON.parse(rawUtf8) as unknown) : {};
+  } catch {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Invalid JSON" }));
+    return;
+  }
+  const parsedBody = parseN8nWorkflowResultsQueryBody(parsed);
+  if (!parsedBody.ok) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: parsedBody.error }));
+    return;
+  }
+  const { rows, total, agent_key_union, error } = await listN8nWorkflowResultsFilteredPageRpc(client, {
+    filters: parsedBody.filters,
+    limit: parsedBody.limit,
+    offset: parsedBody.offset,
+  });
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      rows,
+      total,
+      limit: parsedBody.limit,
+      offset: parsedBody.offset,
+      agent_key_union,
+    })
+  );
+}
+
+/**
  * POST /api/n8n/workflow-results
  *
  * n8n contract:
@@ -4073,6 +4278,60 @@ export async function handleGetContactsByCompany(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data }));
+}
+
+/**
+ * GET /api/contacts/search-global?nameLike=&limit=
+ * ILIKE search on Contacts.name / first_name / last_name, restricted to contacts present in n8n_workflow_results.
+ */
+export async function handleGetContactsSearchGlobal(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const nameLike =
+    params.get("nameLike")?.trim() ?? params.get("q")?.trim() ?? params.get("query")?.trim() ?? "";
+  if (!nameLike) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: nameLike (or q)" }));
+    return;
+  }
+  const limitRaw = parseInt(params.get("limit") ?? "20", 10);
+  const limit = Math.min(Math.max(Number.isFinite(limitRaw) ? limitRaw : 20, 1), 100);
+  const { data, error } = await findN8nContactsByNameLike(client, { nameLike, limit });
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error }));
+    return;
+  }
+  const out = (data ?? []).map((row) => {
+    const uuid = typeof row.uuid === "string" ? row.uuid : "";
+    const avatar = row.avatar_url;
+    return {
+      uuid,
+      label: contactLabelFromSearchRow(row),
+      avatar_url: typeof avatar === "string" && avatar.trim() ? avatar.trim() : null,
+      company_name: typeof row.company_name === "string" ? row.company_name : null,
+      company_uuid: typeof row.company_uuid === "string" ? row.company_uuid : null,
+      position: typeof row.position === "string" ? row.position : null,
+      work_email: typeof row.work_email === "string" ? row.work_email : null,
+    };
+  });
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: out }));
 }
 
 /**

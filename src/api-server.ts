@@ -86,6 +86,7 @@ import {
   handlePatchEnrichmentPromptSettings,
   handlePostEnrichmentPromptPreview,
   handleGetOpenRouterModels,
+  handlePostOpenRouterStreamChat,
   handlePostGenerateMessage,
   handleGetGeneratedMessages,
   handleDeleteGeneratedMessage,
@@ -94,9 +95,11 @@ import {
   handlePostSaveGeneratedMessagePreset,
   handlePostSetGeneratedMessagePresetDefault,
   handlePostRollbackGeneratedMessagePreset,
+  handleGetContactsSearchGlobal,
   handlePostFindContactByUuid,
   handlePostContactsListSyncResyncMissing,
   handleGetN8nWorkflowResults,
+  handlePostN8nWorkflowResultsQuery,
   handlePostN8nWorkflowResults,
   handleFirefliesWebhook,
   handleGetDifyWorkflows,
@@ -264,6 +267,7 @@ const server = createServer(async (req, res) => {
     pathname !== "/api/contacts/list-sync-check" &&
     pathname !== "/api/contacts/list-sync-resync-missing" &&
     pathname !== "/api/contacts/find-by-uuid" &&
+    pathname !== "/api/contacts/search-global" &&
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
   const generatedMessageIdMatch =
     pathname !== "/api/generated-messages/generate" &&
@@ -619,9 +623,25 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/contacts/search-global":
+        if (req.method === "GET") {
+          await handleGetContactsSearchGlobal(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/contacts/find-by-uuid":
         if (req.method === "POST") {
           await handlePostFindContactByUuid(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/n8n/workflow-results/query":
+        if (req.method === "POST") {
+          await handlePostN8nWorkflowResultsQuery(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
@@ -831,6 +851,14 @@ const server = createServer(async (req, res) => {
       case "/api/openrouter/models":
         if (req.method === "GET") {
           await handleGetOpenRouterModels(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/openrouter/stream-chat":
+        if (req.method === "POST") {
+          await handlePostOpenRouterStreamChat(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

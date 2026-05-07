@@ -38,6 +38,7 @@ import {
   BarChart3Icon,
   CopyIcon,
   WorkflowIcon,
+  PhoneIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 
@@ -57,7 +58,14 @@ const isAnalyticsGroupActive = computed(
 /** Grouped routes — highlight parent when any child is active. */
 const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
 const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses", "/hypothesis-tag-contacts"] as const;
-const PIPELINE_PATHS = ["/sync", "/lists-checker", "/enrichment", "/enrichment/jobs", "/n8n/workflow-results"] as const;
+const PIPELINE_PATHS = [
+  "/sync",
+  "/lists-checker",
+  "/enrichment",
+  "/enrichment/jobs",
+  "/n8n/workflow-results",
+  "/calls/cold-n8n",
+] as const;
 
 function pathInGroup(path: string, group: readonly string[]): boolean {
   return group.includes(path);
@@ -143,6 +151,11 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "n8n results",
     key: "/n8n/workflow-results",
     icon: () => h(WorkflowIcon, { size: 14 }),
+  },
+  {
+    label: "Cold call (n8n)",
+    key: "/calls/cold-n8n",
+    icon: () => h(PhoneIcon, { size: 14 }),
   },
 ];
 

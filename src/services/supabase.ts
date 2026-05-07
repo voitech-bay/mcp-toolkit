@@ -1985,7 +1985,7 @@ export async function findContactsByNameLikeGlobal(
   const query = client
     .from(CONTACTS_TABLE)
     .select(
-      "uuid, name, first_name, last_name, company_name, company_uuid, position, linkedin, work_email, project_id, created_at"
+      "uuid, name, first_name, last_name, avatar_url, company_name, company_uuid, position, linkedin, work_email, project_id, created_at"
     )
     .or(`name.ilike.${pattern},first_name.ilike.${pattern},last_name.ilike.${pattern}`)
     .order("created_at", { ascending: false })
@@ -1994,6 +1994,68 @@ export async function findContactsByNameLikeGlobal(
   const { data, error } = await query;
   if (error) return { data: [], error: error.message };
   return { data: (data ?? []) as Array<Record<string, unknown>>, error: null };
+}
+
+/**
+ * Find contacts by name, but only those that exist in n8n_workflow_results.
+ * Ordering is driven by most recent n8n row for each contact.
+ */
+export async function findN8nContactsByNameLike(
+  client: SupabaseClient,
+  params: { nameLike: string; limit?: number }
+): Promise<{ data: Array<Record<string, unknown>>; error: string | null }> {
+  const nameLike = params.nameLike?.trim() ?? "";
+  if (nameLike.length === 0) {
+    return { data: [], error: "nameLike is required." };
+  }
+  const limit = Math.min(Math.max(params.limit ?? 50, 1), 100);
+  const pattern = `%${escapeIlikeMetacharacters(nameLike)}%`;
+  const contactsLimit = Math.min(limit * 4, 400);
+
+  const { data: contacts, error: contactsErr } = await client
+    .from(CONTACTS_TABLE)
+    .select(
+      "uuid, name, first_name, last_name, avatar_url, company_name, company_uuid, position, linkedin, work_email, project_id, created_at"
+    )
+    .or(`name.ilike.${pattern},first_name.ilike.${pattern},last_name.ilike.${pattern}`)
+    .order("created_at", { ascending: false })
+    .limit(contactsLimit);
+  if (contactsErr) return { data: [], error: contactsErr.message };
+
+  const ids = (contacts ?? [])
+    .map((row) => (typeof row.uuid === "string" ? row.uuid : ""))
+    .filter((id) => id.length > 0);
+  if (ids.length === 0) return { data: [], error: null };
+
+  const { data: n8nRows, error: n8nErr } = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("contact_id, created_at")
+    .in("contact_id", ids)
+    .order("created_at", { ascending: false })
+    .limit(5000);
+  if (n8nErr) return { data: [], error: n8nErr.message };
+
+  const orderedIds: string[] = [];
+  const seen = new Set<string>();
+  for (const row of (n8nRows ?? []) as Array<Record<string, unknown>>) {
+    const id = typeof row.contact_id === "string" ? row.contact_id : "";
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    orderedIds.push(id);
+    if (orderedIds.length >= limit) break;
+  }
+  if (orderedIds.length === 0) return { data: [], error: null };
+
+  const byId = new Map<string, Record<string, unknown>>();
+  for (const row of (contacts ?? []) as Array<Record<string, unknown>>) {
+    const id = typeof row.uuid === "string" ? row.uuid : "";
+    if (id) byId.set(id, row);
+  }
+  const out = orderedIds
+    .map((id) => byId.get(id))
+    .filter((row): row is Record<string, unknown> => !!row)
+    .slice(0, limit);
+  return { data: out, error: null };
 }
 
 /**
@@ -4558,14 +4620,126 @@ export interface N8nWorkflowResultListRow {
   id: string;
   contact_id: string | null;
   contact_label: string | null;
+  contact_avatar_url: string | null;
   company_id: string | null;
   company_label: string | null;
+  company_logo_url: string | null;
   workflow: string;
   execution_id: string | null;
   created_at: string;
   updated_at: string;
   result: Record<string, unknown>;
   agent_previews: Record<string, string>;
+}
+
+async function hydrateN8nWorkflowResultListRows(
+  client: SupabaseClient,
+  rawRows: Array<Record<string, unknown>>,
+  total: number
+): Promise<{
+  rows: N8nWorkflowResultListRow[];
+  total: number;
+  agent_key_union: string[];
+  error: string | null;
+}> {
+  const contactIds = [
+    ...new Set(
+      rawRows
+        .map((r) => r.contact_id)
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+    ),
+  ];
+  const companyIds = [
+    ...new Set(
+      rawRows
+        .map((r) => r.company_id)
+        .filter((x): x is string => typeof x === "string" && x.length > 0)
+    ),
+  ];
+
+  const contactLabelByUuid = new Map<string, string>();
+  const contactAvatarByUuid = new Map<string, string | null>();
+  for (const batch of n8nBatchArray(contactIds, 200)) {
+    const { data: cRows, error: cErr } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, name, first_name, last_name, avatar_url")
+      .in("uuid", batch);
+    if (cErr) {
+      return { rows: [], total: 0, agent_key_union: [], error: `Contacts lookup: ${cErr.message}` };
+    }
+    for (const c of (cRows ?? []) as Array<Record<string, unknown>>) {
+      const u = typeof c.uuid === "string" ? c.uuid : "";
+      if (u) {
+        contactLabelByUuid.set(u, n8nContactLabelFromRow(c));
+        const au = c.avatar_url;
+        contactAvatarByUuid.set(u, typeof au === "string" && au.trim() ? au.trim() : null);
+      }
+    }
+  }
+
+  const companyLabelById = new Map<string, string>();
+  const companyLogoById = new Map<string, string | null>();
+  for (const batch of n8nBatchArray(companyIds, 200)) {
+    const { data: coRows, error: coErr } = await client
+      .from(COMPANIES_TABLE)
+      .select("id, name, logo_url")
+      .in("id", batch);
+    if (coErr) {
+      return { rows: [], total: 0, agent_key_union: [], error: `Companies lookup: ${coErr.message}` };
+    }
+    for (const co of (coRows ?? []) as Array<Record<string, unknown>>) {
+      const id = typeof co.id === "string" ? co.id : "";
+      const nm = typeof co.name === "string" ? co.name.trim() : "";
+      const logo = co.logo_url;
+      if (id) {
+        companyLabelById.set(id, nm || (id.length >= 8 ? `${id.slice(0, 8)}…` : id));
+        companyLogoById.set(id, typeof logo === "string" && logo.trim() ? logo.trim() : null);
+      }
+    }
+  }
+
+  const agentKeySet = new Set<string>();
+  const rows: N8nWorkflowResultListRow[] = [];
+
+  for (const r of rawRows) {
+    const id = typeof r.id === "string" ? r.id : "";
+    const cid = typeof r.contact_id === "string" ? r.contact_id : null;
+    const coid = typeof r.company_id === "string" ? r.company_id : null;
+    const resObj =
+      r.result && typeof r.result === "object" && !Array.isArray(r.result)
+        ? (r.result as Record<string, unknown>)
+        : {};
+    const agent_previews: Record<string, string> = {};
+    for (const k of Object.keys(resObj)) {
+      if (k === "row_data") continue;
+      agentKeySet.add(k);
+      agent_previews[k] = n8nPreviewAgentValue(resObj[k]);
+    }
+    rows.push({
+      id,
+      contact_id: cid,
+      contact_label: cid
+        ? contactLabelByUuid.get(cid) ?? (cid.length >= 8 ? `${cid.slice(0, 8)}…` : cid)
+        : null,
+      contact_avatar_url: cid ? contactAvatarByUuid.get(cid) ?? null : null,
+      company_id: coid,
+      company_label: coid ? companyLabelById.get(coid) ?? null : null,
+      company_logo_url: coid ? companyLogoById.get(coid) ?? null : null,
+      workflow: typeof r.workflow === "string" ? r.workflow : "",
+      execution_id: typeof r.execution_id === "string" ? r.execution_id : null,
+      created_at: typeof r.created_at === "string" ? r.created_at : "",
+      updated_at: typeof r.updated_at === "string" ? r.updated_at : "",
+      result: resObj,
+      agent_previews,
+    });
+  }
+
+  return {
+    rows,
+    total,
+    agent_key_union: [...agentKeySet].sort(),
+    error: null,
+  };
 }
 
 /**
@@ -4606,92 +4780,49 @@ export async function listN8nWorkflowResultsPage(
   }
 
   const rawRows = (data ?? []) as Array<Record<string, unknown>>;
-  const contactIds = [
-    ...new Set(
-      rawRows
-        .map((r) => r.contact_id)
-        .filter((x): x is string => typeof x === "string" && x.length > 0)
-    ),
-  ];
-  const companyIds = [
-    ...new Set(
-      rawRows
-        .map((r) => r.company_id)
-        .filter((x): x is string => typeof x === "string" && x.length > 0)
-    ),
-  ];
+  return hydrateN8nWorkflowResultListRows(client, rawRows, count ?? 0);
+}
 
-  const contactLabelByUuid = new Map<string, string>();
-  for (const batch of n8nBatchArray(contactIds, 200)) {
-    const { data: cRows, error: cErr } = await client
-      .from(CONTACTS_TABLE)
-      .select("uuid, name, first_name, last_name")
-      .in("uuid", batch);
-    if (cErr) {
-      return { rows: [], total: 0, agent_key_union: [], error: `Contacts lookup: ${cErr.message}` };
-    }
-    for (const c of (cRows ?? []) as Array<Record<string, unknown>>) {
-      const u = typeof c.uuid === "string" ? c.uuid : "";
-      if (u) contactLabelByUuid.set(u, n8nContactLabelFromRow(c));
-    }
+/**
+ * Paginated filtered list via RPC `n8n_workflow_results_filtered_page` (AND clauses).
+ */
+export async function listN8nWorkflowResultsFilteredPageRpc(
+  client: SupabaseClient,
+  params: {
+    filters: Array<{ field: string; op: string; value: string }>;
+    limit: number;
+    offset: number;
   }
-
-  const companyLabelById = new Map<string, string>();
-  for (const batch of n8nBatchArray(companyIds, 200)) {
-    const { data: coRows, error: coErr } = await client
-      .from(COMPANIES_TABLE)
-      .select("id, name")
-      .in("id", batch);
-    if (coErr) {
-      return { rows: [], total: 0, agent_key_union: [], error: `Companies lookup: ${coErr.message}` };
-    }
-    for (const co of (coRows ?? []) as Array<Record<string, unknown>>) {
-      const id = typeof co.id === "string" ? co.id : "";
-      const nm = typeof co.name === "string" ? co.name.trim() : "";
-      if (id) companyLabelById.set(id, nm || (id.length >= 8 ? `${id.slice(0, 8)}…` : id));
-    }
+): Promise<{
+  rows: N8nWorkflowResultListRow[];
+  total: number;
+  agent_key_union: string[];
+  error: string | null;
+}> {
+  const limit = Math.min(Math.max(params.limit, 1), 200);
+  const offset = Math.max(params.offset, 0);
+  const { data, error } = await client.rpc("n8n_workflow_results_filtered_page", {
+    p_filters: params.filters,
+    p_limit: limit,
+    p_offset: offset,
+  });
+  if (error) {
+    return { rows: [], total: 0, agent_key_union: [], error: error.message };
   }
-
-  const agentKeySet = new Set<string>();
-  const rows: N8nWorkflowResultListRow[] = [];
-
-  for (const r of rawRows) {
-    const id = typeof r.id === "string" ? r.id : "";
-    const cid = typeof r.contact_id === "string" ? r.contact_id : null;
-    const coid = typeof r.company_id === "string" ? r.company_id : null;
-    const resObj =
-      r.result && typeof r.result === "object" && !Array.isArray(r.result)
-        ? (r.result as Record<string, unknown>)
-        : {};
-    const agent_previews: Record<string, string> = {};
-    for (const k of Object.keys(resObj)) {
-      if (k === "row_data") continue;
-      agentKeySet.add(k);
-      agent_previews[k] = n8nPreviewAgentValue(resObj[k]);
-    }
-    rows.push({
-      id,
-      contact_id: cid,
-      contact_label: cid
-        ? contactLabelByUuid.get(cid) ?? (cid.length >= 8 ? `${cid.slice(0, 8)}…` : cid)
-        : null,
-      company_id: coid,
-      company_label: coid ? companyLabelById.get(coid) ?? null : null,
-      workflow: typeof r.workflow === "string" ? r.workflow : "",
-      execution_id: typeof r.execution_id === "string" ? r.execution_id : null,
-      created_at: typeof r.created_at === "string" ? r.created_at : "",
-      updated_at: typeof r.updated_at === "string" ? r.updated_at : "",
-      result: resObj,
-      agent_previews,
-    });
+  const payload = data as Record<string, unknown> | null;
+  if (!payload || typeof payload !== "object") {
+    return { rows: [], total: 0, agent_key_union: [], error: "RPC returned empty payload" };
   }
-
-  return {
-    rows,
-    total: count ?? 0,
-    agent_key_union: [...agentKeySet].sort(),
-    error: null,
-  };
+  const totalRaw = payload.total;
+  const total =
+    typeof totalRaw === "bigint"
+      ? Number(totalRaw)
+      : typeof totalRaw === "number"
+        ? totalRaw
+        : parseInt(String(totalRaw ?? "0"), 10) || 0;
+  const rowsRaw = payload.rows;
+  const rawRows = Array.isArray(rowsRaw) ? (rowsRaw as Array<Record<string, unknown>>) : [];
+  return hydrateN8nWorkflowResultListRows(client, rawRows, total);
 }
 
 export type EnrichmentEntityType = "company" | "contact";
