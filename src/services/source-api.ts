@@ -733,6 +733,29 @@ export async function fetchContactByUuid(
 }
 
 /**
+ * GET /leads/api/companies/{uuid} — single company lookup. Returns unwrapped company row, or `null` on 404.
+ */
+export async function fetchCompanyByUuid(
+  credentials: ApiCredentials | undefined,
+  uuid: string
+): Promise<Record<string, unknown> | null> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const trimmed = uuid.trim();
+  if (!trimmed) return null;
+  const url = `${config.baseUrl}/leads/api/companies/${encodeURIComponent(trimmed)}`;
+  try {
+    const json = await fetchJson<{ company?: Record<string, unknown> | null }>(url, config.apiKey, { method: "GET" });
+    const company = json.company;
+    if (company && typeof company === "object") return { ...company };
+    return null;
+  } catch (e) {
+    if (e instanceof SourceApiRequestError && e.response?.status === 404) return null;
+    throw e;
+  }
+}
+
+/**
  * Fetch many contacts by UUID via a bounded concurrency pool of `GET /leads/api/leads/{uuid}` calls.
  * Never throws: per-UUID failures collected in `errors`; 404s recorded in `missing`.
  * Cancellation: `onBefore` is awaited before each dequeue (wire to sync cancellation token).
@@ -783,6 +806,73 @@ export async function fetchContactsByUuidsConcurrent(
   };
   const workers = Array.from({ length: Math.min(concurrency, unique.length) }, () => worker());
   await Promise.all(workers);
+  return { rows, missing, errors };
+}
+
+/**
+ * Fetch companies by UUID in groups. Each group runs UUID fetches in parallel, then waits before next group.
+ * Never throws: per-UUID failures collected in `errors`; 404s recorded in `missing`.
+ */
+export async function fetchCompaniesByUuidsGrouped(
+  credentials: ApiCredentials | undefined,
+  uuids: string[],
+  opts: {
+    groupSize?: number;
+    minDelayMsBetweenGroups?: number;
+    onBeforeGroup?: () => Promise<void>;
+    onLog?: FetchLogger;
+  } = {}
+): Promise<{
+  rows: Record<string, unknown>[];
+  missing: string[];
+  errors: Array<{ uuid: string; error: string }>;
+}> {
+  const rows: Record<string, unknown>[] = [];
+  const missing: string[] = [];
+  const errors: Array<{ uuid: string; error: string }> = [];
+  const unique = Array.from(new Set(uuids.map((u) => (typeof u === "string" ? u.trim() : "")))).filter(Boolean);
+  if (unique.length === 0) return { rows, missing, errors };
+  const groupSize = Math.max(1, Math.min(20, Math.floor(opts.groupSize ?? 5)));
+  const minDelayMsBetweenGroups = Math.max(0, Math.floor(opts.minDelayMsBetweenGroups ?? 1000));
+  for (let i = 0; i < unique.length; i += groupSize) {
+    if (opts.onBeforeGroup) await opts.onBeforeGroup();
+    const group = unique.slice(i, i + groupSize);
+    if (opts.onLog) {
+      await opts.onLog("companies-by-uuid: group start", {
+        groupIndex: Math.floor(i / groupSize) + 1,
+        totalGroups: Math.ceil(unique.length / groupSize),
+        groupSize: group.length,
+        uuids: group,
+      });
+    }
+    await Promise.all(
+      group.map(async (uuid) => {
+        try {
+          const row = await fetchCompanyByUuid(credentials, uuid);
+          if (row == null) {
+            missing.push(uuid);
+            return;
+          }
+          rows.push(row);
+        } catch (e) {
+          if (e instanceof SyncCancelledError) throw e;
+          const msg = e instanceof Error ? e.message : String(e);
+          errors.push({ uuid, error: msg });
+        }
+      })
+    );
+    if (opts.onLog) {
+      await opts.onLog("companies-by-uuid: group done", {
+        groupIndex: Math.floor(i / groupSize) + 1,
+        fetchedRowsSoFar: rows.length,
+        missingSoFar: missing.length,
+        errorsSoFar: errors.length,
+      });
+    }
+    if (i + groupSize < unique.length && minDelayMsBetweenGroups > 0) {
+      await sleep(minDelayMsBetweenGroups);
+    }
+  }
   return { rows, missing, errors };
 }
 

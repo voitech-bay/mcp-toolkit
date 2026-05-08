@@ -25,7 +25,7 @@ test("hydrateContactsGsByListData: no missing companies skips hydration fetch", 
         total: 1,
         error: null,
       }),
-      fetchCompaniesByListUuidsBatchedFn: async () => {
+      fetchCompaniesByUuidsGroupedFn: async () => {
         hydrateCalls += 1;
         return { rows: [], missing: [], errors: [] };
       },
@@ -88,7 +88,7 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
         total: 2,
         error: null,
       }),
-      fetchCompaniesByListUuidsBatchedFn: async () => {
+      fetchCompaniesByUuidsGroupedFn: async () => {
         hydrateCalls += 1;
         return {
           rows: [{ uuid: "co-2", name: "Hydrated Co", about: "new", employees_range: "51-200", domain: "new.test" }],
@@ -142,10 +142,10 @@ test("hydrateContactsGsByListData: partial failure returns best-effort payload",
         total: 2,
         error: null,
       }),
-      fetchCompaniesByListUuidsBatchedFn: async () => ({
+      fetchCompaniesByUuidsGroupedFn: async () => ({
         rows: [{ uuid: "co-2", name: "Recovered Co", domain: "ok.test" }],
         missing: ["co-3"],
-        errors: [{ listUuid: "list-1", error: "not found" }],
+        errors: [],
       }),
       upsertCompaniesMappedFn: async (rows) => ({ upserted: rows.length, error: null }),
     }
@@ -160,4 +160,51 @@ test("hydrateContactsGsByListData: partial failure returns best-effort payload",
   const data = result.body.data as Array<Record<string, unknown>>;
   assert.equal(data[0].domain, "ok.test");
   assert.equal(data[1].domain, null);
+});
+
+test("hydrateContactsGsByListData: hydrates company present in DB but domain missing", async () => {
+  let loadIndex = 0;
+  let hydrateCalls = 0;
+  const result = await hydrateContactsGsByListData(
+    "list-1",
+    credentials,
+    async () => {
+      loadIndex += 1;
+      if (loadIndex === 1) {
+        return {
+          map: new Map([
+            ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", domain: null }],
+          ]),
+          error: null,
+        };
+      }
+      return {
+        map: new Map([
+          ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", domain: "known.test" }],
+        ]),
+        error: null,
+      };
+    },
+    {
+      fetchContactsByListUuidFn: async () => ({
+        rows: [{ uuid: "lead-1", company_uuid: "co-1", company_name: "Known Co" }],
+        total: 1,
+        error: null,
+      }),
+      fetchCompaniesByUuidsGroupedFn: async (_credentials, ids) => {
+        hydrateCalls += 1;
+        assert.deepEqual(ids, ["co-1"]);
+        return {
+          rows: [{ uuid: "co-1", name: "Known Co", domain: "known.test" }],
+          missing: [],
+          errors: [],
+        };
+      },
+      upsertCompaniesMappedFn: async (rows) => ({ upserted: rows.length, error: null }),
+    }
+  );
+  assert.equal(result.status, 200);
+  assert.equal(hydrateCalls, 1);
+  const data = result.body.data as Array<Record<string, unknown>>;
+  assert.equal(data[0].domain, "known.test");
 });

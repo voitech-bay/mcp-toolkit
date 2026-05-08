@@ -128,7 +128,7 @@ import {
 } from "./services/sync-supabase.js";
 import {
   fetchContactByUuid,
-  fetchCompaniesByListUuidsBatched,
+  fetchCompaniesByUuidsGrouped,
   fetchContactsByListUuid,
   fetchContactsByUuidsConcurrent,
   fetchLeadUuidsByListUuid,
@@ -3367,7 +3367,7 @@ type HydratedCompanyRow = {
 };
 
 type FetchContactsByListUuidFn = typeof fetchContactsByListUuid;
-type FetchCompaniesByListUuidsBatchedFn = typeof fetchCompaniesByListUuidsBatched;
+type FetchCompaniesByUuidsGroupedFn = typeof fetchCompaniesByUuidsGrouped;
 type UpsertCompaniesMappedFn = (
   rows: Record<string, unknown>[]
 ) => Promise<{ upserted: number; error: string | null }>;
@@ -3406,7 +3406,7 @@ export async function hydrateContactsGsByListData(
   loadCompanies: (companyIds: string[]) => Promise<{ map: Map<string, HydratedCompanyRow>; error: string | null }>,
   deps: {
     fetchContactsByListUuidFn?: FetchContactsByListUuidFn;
-    fetchCompaniesByListUuidsBatchedFn?: FetchCompaniesByListUuidsBatchedFn;
+    fetchCompaniesByUuidsGroupedFn?: FetchCompaniesByUuidsGroupedFn;
     upsertCompaniesMappedFn?: UpsertCompaniesMappedFn;
   } = {}
 ): Promise<{
@@ -3414,8 +3414,7 @@ export async function hydrateContactsGsByListData(
   body: Record<string, unknown>;
 }> {
   const fetchContactsByListUuidFn = deps.fetchContactsByListUuidFn ?? fetchContactsByListUuid;
-  const fetchCompaniesByListUuidsBatchedFn =
-    deps.fetchCompaniesByListUuidsBatchedFn ?? fetchCompaniesByListUuidsBatched;
+  const fetchCompaniesByUuidsGroupedFn = deps.fetchCompaniesByUuidsGroupedFn ?? fetchCompaniesByUuidsGrouped;
   const upsertCompaniesMappedFn =
     deps.upsertCompaniesMappedFn ??
     (async (_rows: Record<string, unknown>[]) => ({ upserted: 0, error: "upsertCompaniesMappedFn not configured" }));
@@ -3440,23 +3439,40 @@ export async function hydrateContactsGsByListData(
     return { status: 500, body: { data: [], error: firstCompanyRead.error } };
   }
 
-  const missingCompanyIds = uniqueCompanyIds.filter((id) => !firstCompanyRead.map.has(id));
+  const needsHydrationCompanyIds = uniqueCompanyIds.filter((id) => {
+    const row = firstCompanyRead.map.get(id);
+    if (!row) return true;
+    const domain = row.domain;
+    return !(typeof domain === "string" && domain.trim().length > 0);
+  });
   let companiesHydrated = 0;
   const companiesErrors: Array<{ companyId: string; error: string }> = [];
-  if (missingCompanyIds.length > 0) {
-    const missingCompanyIdSet = new Set(missingCompanyIds);
-    const hydrateRes = await fetchCompaniesByListUuidsBatchedFn(credentials, [listUuid]);
+  if (needsHydrationCompanyIds.length > 0) {
+    console.info("[gs-by-list] companies hydration: ids to fetch", {
+      listUuid,
+      total: needsHydrationCompanyIds.length,
+      companyUuids: needsHydrationCompanyIds,
+    });
+    const neededIdSet = new Set(needsHydrationCompanyIds);
+    const hydrateRes = await fetchCompaniesByUuidsGroupedFn(credentials, needsHydrationCompanyIds, {
+      groupSize: 5,
+      minDelayMsBetweenGroups: 1000,
+      onLog: async (message, payload) => {
+        console.info(`[gs-by-list] ${message}`, payload);
+      },
+    });
     const filteredHydratedRows = hydrateRes.rows.filter((row) => {
       const id = typeof row.uuid === "string" ? row.uuid.trim() : "";
-      return id.length > 0 && missingCompanyIdSet.has(id);
+      return id.length > 0 && neededIdSet.has(id);
     });
     companiesHydrated = filteredHydratedRows.length;
     companiesErrors.push(
       ...hydrateRes.errors.map((item) => ({
-        companyId: item.listUuid,
+        companyId: item.uuid,
         error: item.error,
       }))
     );
+    companiesErrors.push(...hydrateRes.missing.map((id) => ({ companyId: id, error: "not found" })));
     if (filteredHydratedRows.length > 0) {
       const upsertRes = await upsertCompaniesMappedFn(filteredHydratedRows);
       if (upsertRes.error) {
