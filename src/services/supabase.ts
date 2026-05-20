@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+import { conversationMatchesSearch } from "./conversation-search.js";
 import { COMPANY_SELECT_FOR_CONTACT_LLM } from "./prompt-resolver.js";
 import type { ApiCredentials } from "./source-api.js";
 import { decryptSecretPayload, encryptSecretPayload } from "./integration-secrets-crypto.js";
@@ -4299,16 +4300,10 @@ export async function getConversationsList(
     return db.localeCompare(da);
   });
 
-  const searchRaw = typeof options?.search === "string" ? options.search.trim().toLowerCase() : "";
+  const searchQuery = typeof options?.search === "string" ? options.search.trim() : "";
   let filtered = allItems;
-  if (searchRaw.length > 0) {
-    filtered = allItems.filter(
-      (c) =>
-        c.receiverDisplayName.toLowerCase().includes(searchRaw) ||
-        c.senderDisplayName.toLowerCase().includes(searchRaw) ||
-        (c.receiverCompanyName ?? "").toLowerCase().includes(searchRaw) ||
-        (c.lastMessageText ?? "").toLowerCase().includes(searchRaw)
-    );
+  if (searchQuery.length > 0) {
+    filtered = allItems.filter((c) => conversationMatchesSearch(c, searchQuery));
   }
 
   const tagFilter = options?.replyTag ?? null;

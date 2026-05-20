@@ -1,6 +1,10 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import {
+  conversationMatchesContactName,
+  conversationMatchesSenderName,
+} from "../services/conversation-search.js";
+import {
   CONTACTS_TABLE,
   SENDERS_TABLE,
   getConversationsList,
@@ -23,12 +27,6 @@ function compactMessage(m: Record<string, unknown>) {
   };
 }
 
-/** Case-insensitive substring match (SQL `%LIKE%` equivalent). */
-function likeMatch(haystack: string | null | undefined, needle: string): boolean {
-  if (!haystack) return false;
-  return haystack.toLowerCase().includes(needle.toLowerCase());
-}
-
 /** Upper bound for in-memory scan when name filters are applied. */
 const FILTER_SCAN_LIMIT = 500;
 
@@ -40,7 +38,7 @@ const FILTER_SCAN_LIMIT = 500;
 export function registerFindProjectLinkedinConversationsTool(server: McpServer): void {
   server.tool(
     "find_project_linkedin_conversations",
-    "Return the most recent LinkedIn conversations for a project. Each item includes receiver (contact) info, sender profile info, and the last N messages (newest→oldest). `limit` = # of conversations (default 10, max 50). `messageLimit` = # of messages per conversation (default 4, max 20). Optional %LIKE% (case-insensitive substring) filters: `contactName` (receiver name / company / display) and `senderName` (sender display / label).",
+    "Return the most recent LinkedIn conversations for a project. Each item includes receiver (contact) info, sender profile info, and the last N messages (newest→oldest). `limit` = # of conversations (default 10, max 50). `messageLimit` = # of messages per conversation (default 4, max 20). Optional tokenized AND filters: `contactName` (receiver name, company, title, last message) and `senderName` (sender display / label); each whitespace-separated term must match.",
     {
       projectId: z.string().uuid().describe("Supabase project id (from find_projects)."),
       limit: z
@@ -103,15 +101,13 @@ export function registerFindProjectLinkedinConversationsTool(server: McpServer):
       const totalBeforeFilter = conversations.length;
 
       if (contactNeedle) {
-        conversations = conversations.filter(
-          (c) =>
-            likeMatch(c.receiverDisplayName, contactNeedle) ||
-            likeMatch(c.receiverCompanyName, contactNeedle)
+        conversations = conversations.filter((c) =>
+          conversationMatchesContactName(c, contactNeedle)
         );
       }
       if (senderNeedle) {
         conversations = conversations.filter((c) =>
-          likeMatch(c.senderDisplayName, senderNeedle)
+          conversationMatchesSenderName(c, senderNeedle)
         );
       }
 
