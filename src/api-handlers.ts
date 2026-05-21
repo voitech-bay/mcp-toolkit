@@ -3363,7 +3363,6 @@ type HydratedCompanyRow = {
   name: unknown;
   company_description: unknown;
   about: unknown;
-  company_employees: unknown;
   employees_on_linkedin: unknown;
   industry: unknown;
   hq_location: unknown;
@@ -3387,7 +3386,7 @@ async function loadCompaniesForHydration(
     const chunk = companyIds.slice(i, i + chunkSize);
     const { data: rows, error } = await client
       .from(COMPANIES_TABLE)
-      .select("id, name, about, employees_range, employees_on_linkedin, industry, hq_location, domain")
+      .select("id, name, about, employees_on_linkedin, industry, hq_location, domain")
       .in("id", chunk);
     if (error) return { map: new Map(), error: error.message };
     for (const row of (rows ?? []) as Array<Record<string, unknown>>) {
@@ -3398,7 +3397,6 @@ async function loadCompaniesForHydration(
         name: row.name ?? null,
         company_description: about,
         about,
-        company_employees: row.employees_range ?? null,
         employees_on_linkedin: row.employees_on_linkedin ?? null,
         industry: row.industry ?? null,
         hq_location: row.hq_location ?? null,
@@ -3506,7 +3504,6 @@ export async function hydrateContactsGsByListData(
       company_name: companyName,
       company_description: co?.company_description ?? null,
       about: co?.about ?? null,
-      company_employees: co?.company_employees ?? null,
       employees_on_linkedin: co?.employees_on_linkedin ?? null,
       industry: co?.industry ?? null,
       hq_location: co?.hq_location ?? null,
