@@ -14,7 +14,16 @@ test("hydrateContactsGsByListData: no missing companies skips hydration fetch", 
       map: new Map([
         [
           "co-1",
-          { name: "ACME", company_description: "desc", company_employees: "11-50", employees_on_linkedin: 120, domain: "acme.test" },
+          {
+            name: "ACME",
+            company_description: "desc",
+            about: "desc",
+            company_employees: "11-50",
+            employees_on_linkedin: 120,
+            industry: "Tech",
+            hq_location: "NYC",
+            domain: "acme.test",
+          },
         ],
       ]),
       error: null,
@@ -59,7 +68,16 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
           map: new Map([
             [
               "co-1",
-              { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: "known.test" },
+              {
+                name: "Known Co",
+                company_description: "known",
+                about: "known",
+                company_employees: "1-10",
+                employees_on_linkedin: null,
+                industry: null,
+                hq_location: null,
+                domain: "known.test",
+              },
             ],
           ]),
           error: null,
@@ -69,11 +87,29 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
         map: new Map([
           [
             "co-1",
-            { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: "known.test" },
+            {
+              name: "Known Co",
+              company_description: "known",
+              about: "known",
+              company_employees: "1-10",
+              employees_on_linkedin: null,
+              industry: null,
+              hq_location: null,
+              domain: "known.test",
+            },
           ],
           [
             "co-2",
-            { name: "Hydrated Co", company_description: "new", company_employees: "51-200", employees_on_linkedin: 88, domain: "new.test" },
+            {
+              name: "Hydrated Co",
+              company_description: "new",
+              about: "new",
+              company_employees: "51-200",
+              employees_on_linkedin: 88,
+              industry: "SaaS",
+              hq_location: "SF",
+              domain: "new.test",
+            },
           ],
         ]),
         error: null,
@@ -114,6 +150,9 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
   assert.equal(data[1].company_name, "Hydrated Co");
   assert.equal(data[1].domain, "new.test");
   assert.equal(data[1].employees_on_linkedin, 88);
+  assert.equal(data[1].about, "new");
+  assert.equal(data[1].industry, "SaaS");
+  assert.equal(data[1].hq_location, "SF");
 });
 
 test("hydrateContactsGsByListData: partial failure returns best-effort payload", async () => {
@@ -128,7 +167,16 @@ test("hydrateContactsGsByListData: partial failure returns best-effort payload",
         map: new Map([
           [
             "co-2",
-            { name: "Recovered Co", company_description: "ok", company_employees: "11-50", employees_on_linkedin: null, domain: "ok.test" },
+            {
+              name: "Recovered Co",
+              company_description: "ok",
+              about: "ok",
+              company_employees: "11-50",
+              employees_on_linkedin: null,
+              industry: null,
+              hq_location: null,
+              domain: "ok.test",
+            },
           ],
         ]),
         error: null,
@@ -174,14 +222,38 @@ test("hydrateContactsGsByListData: hydrates company present in DB but domain mis
       if (loadIndex === 1) {
         return {
           map: new Map([
-            ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: null }],
+            [
+              "co-1",
+              {
+                name: "Known Co",
+                company_description: "known",
+                about: "known",
+                company_employees: "1-10",
+                employees_on_linkedin: null,
+                industry: null,
+                hq_location: null,
+                domain: null,
+              },
+            ],
           ]),
           error: null,
         };
       }
       return {
         map: new Map([
-          ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: "known.test" }],
+          [
+            "co-1",
+            {
+              name: "Known Co",
+              company_description: "known",
+              about: "known",
+              company_employees: "1-10",
+              employees_on_linkedin: null,
+              industry: null,
+              hq_location: null,
+              domain: "known.test",
+            },
+          ],
         ]),
         error: null,
       };
