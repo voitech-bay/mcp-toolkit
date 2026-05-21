@@ -14,7 +14,7 @@ test("hydrateContactsGsByListData: no missing companies skips hydration fetch", 
       map: new Map([
         [
           "co-1",
-          { name: "ACME", company_description: "desc", company_employees: "11-50", domain: "acme.test" },
+          { name: "ACME", company_description: "desc", company_employees: "11-50", employees_on_linkedin: 120, domain: "acme.test" },
         ],
       ]),
       error: null,
@@ -59,7 +59,7 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
           map: new Map([
             [
               "co-1",
-              { name: "Known Co", company_description: "known", company_employees: "1-10", domain: "known.test" },
+              { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: "known.test" },
             ],
           ]),
           error: null,
@@ -69,11 +69,11 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
         map: new Map([
           [
             "co-1",
-            { name: "Known Co", company_description: "known", company_employees: "1-10", domain: "known.test" },
+            { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: "known.test" },
           ],
           [
             "co-2",
-            { name: "Hydrated Co", company_description: "new", company_employees: "51-200", domain: "new.test" },
+            { name: "Hydrated Co", company_description: "new", company_employees: "51-200", employees_on_linkedin: 88, domain: "new.test" },
           ],
         ]),
         error: null,
@@ -113,6 +113,7 @@ test("hydrateContactsGsByListData: partial miss hydrates and enriches response",
   const data = result.body.data as Array<Record<string, unknown>>;
   assert.equal(data[1].company_name, "Hydrated Co");
   assert.equal(data[1].domain, "new.test");
+  assert.equal(data[1].employees_on_linkedin, 88);
 });
 
 test("hydrateContactsGsByListData: partial failure returns best-effort payload", async () => {
@@ -127,7 +128,7 @@ test("hydrateContactsGsByListData: partial failure returns best-effort payload",
         map: new Map([
           [
             "co-2",
-            { name: "Recovered Co", company_description: "ok", company_employees: "11-50", domain: "ok.test" },
+            { name: "Recovered Co", company_description: "ok", company_employees: "11-50", employees_on_linkedin: null, domain: "ok.test" },
           ],
         ]),
         error: null,
@@ -173,14 +174,14 @@ test("hydrateContactsGsByListData: hydrates company present in DB but domain mis
       if (loadIndex === 1) {
         return {
           map: new Map([
-            ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", domain: null }],
+            ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: null }],
           ]),
           error: null,
         };
       }
       return {
         map: new Map([
-          ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", domain: "known.test" }],
+          ["co-1", { name: "Known Co", company_description: "known", company_employees: "1-10", employees_on_linkedin: null, domain: "known.test" }],
         ]),
         error: null,
       };
