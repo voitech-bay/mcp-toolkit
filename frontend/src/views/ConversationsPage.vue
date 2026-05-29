@@ -410,7 +410,12 @@ async function fetchDialogue(convUuid: string) {
   dialogueMessages.value = [];
   dialogueContact.value = null;
   try {
-    const r = await fetch(`/api/conversation?conversationUuid=${encodeURIComponent(convUuid)}`);
+    // Threads with no linkedin_conversation_uuid are keyed by the synthetic
+    // "lead:<leadUuid>" id from the RPC; fetch those by leadUuid instead.
+    const sp = new URLSearchParams();
+    if (convUuid.startsWith("lead:")) sp.set("leadUuid", convUuid.slice("lead:".length));
+    else sp.set("conversationUuid", convUuid);
+    const r = await fetch(`/api/conversation?${sp.toString()}`);
     const j = await r.json();
     if (j.error) dialogueError.value = j.error;
     dialogueContact.value = j.contact ?? null;
