@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
-import { conversationMatchesSearch } from "./conversation-search.js";
+import { conversationMatchesSearch, parseSearchTokens } from "./conversation-search.js";
 import { COMPANY_SELECT_FOR_CONTACT_LLM } from "./prompt-resolver.js";
 import type { ApiCredentials } from "./source-api.js";
 import { decryptSecretPayload, encryptSecretPayload } from "./integration-secrets-crypto.js";
@@ -4137,12 +4137,29 @@ export async function getConversationsList(
     pipelineStageUuid?: string | null;
   }
 ): Promise<{ data: ConversationListItem[]; total: number; error: string | null }> {
-  const { data: rpcData, error: rpcErr } = await client.rpc(
-    "list_conversations_summary_for_project",
-    { p_project_id: projectId }
-  );
-  if (rpcErr) return { data: [], total: 0, error: rpcErr.message };
-  const summaries = (rpcData ?? []) as ConversationSummaryRow[];
+  // PostgREST caps each RPC response at 1000 rows, so page through with Range
+  // requests until the full set is loaded. The .order() is required for correct
+  // paging: PostgREST wraps the RPC as `SELECT * FROM fn() LIMIT/OFFSET`, and the
+  // function's internal ORDER BY is not guaranteed to survive that wrapping —
+  // without an explicit outer order the page windows shift between requests and
+  // rows get dropped/duplicated.
+  // NOTE: this loads the whole project. The interactive conversations page uses
+  // the filter-and-paginate-in-SQL path (searchConversationsForProject) instead;
+  // this function backs callers that need the full set (geo aggregates, the MCP
+  // find-conversations tool).
+  const RPC_PAGE = 1000;
+  const summaries: ConversationSummaryRow[] = [];
+  for (let from = 0; ; from += RPC_PAGE) {
+    const { data: rpcData, error: rpcErr } = await client
+      .rpc("list_conversations_summary_for_project", { p_project_id: projectId })
+      .order("last_sent_at", { ascending: false, nullsFirst: false })
+      .order("linkedin_conversation_uuid", { ascending: true })
+      .range(from, from + RPC_PAGE - 1);
+    if (rpcErr) return { data: [], total: 0, error: rpcErr.message };
+    const batch = (rpcData ?? []) as ConversationSummaryRow[];
+    summaries.push(...batch);
+    if (batch.length < RPC_PAGE) break;
+  }
 
   const leadUuids = [
     ...new Set(
@@ -4166,12 +4183,19 @@ export async function getConversationsList(
 
   if (leadUuids.length > 0) {
     const chunkSize = 200;
+    const chunks: string[][] = [];
     for (let i = 0; i < leadUuids.length; i += chunkSize) {
-      const chunk = leadUuids.slice(i, i + chunkSize);
-      const { data: contacts, error: contactsErr } = await client
-        .from(CONTACTS_TABLE)
-        .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_uuid, pipeline_stage_uuid")
-        .in("uuid", chunk);
+      chunks.push(leadUuids.slice(i, i + chunkSize));
+    }
+    const results = await Promise.all(
+      chunks.map((chunk) =>
+        client
+          .from(CONTACTS_TABLE)
+          .select("uuid, first_name, last_name, name, position, company_name, avatar_url, company_uuid, pipeline_stage_uuid")
+          .in("uuid", chunk)
+      )
+    );
+    for (const { data: contacts, error: contactsErr } of results) {
       if (contactsErr) {
         return { data: [], total: 0, error: contactsErr.message };
       }
@@ -4185,12 +4209,19 @@ export async function getConversationsList(
 
   if (senderUuids.length > 0) {
     const chunkSize = 200;
+    const chunks: string[][] = [];
     for (let i = 0; i < senderUuids.length; i += chunkSize) {
-      const chunk = senderUuids.slice(i, i + chunkSize);
-      const { data: senders, error: sendersErr } = await client
-        .from(SENDERS_TABLE)
-        .select("uuid, first_name, last_name, label")
-        .in("uuid", chunk);
+      chunks.push(senderUuids.slice(i, i + chunkSize));
+    }
+    const results = await Promise.all(
+      chunks.map((chunk) =>
+        client
+          .from(SENDERS_TABLE)
+          .select("uuid, first_name, last_name, label")
+          .in("uuid", chunk)
+      )
+    );
+    for (const { data: senders, error: sendersErr } of results) {
       if (sendersErr) {
         return { data: [], total: 0, error: sendersErr.message };
       }
@@ -4324,6 +4355,149 @@ export async function getConversationsList(
   const limit = Math.min(Math.max(options?.limit ?? 50, 1), 2000);
   const total = filtered.length;
   return { data: filtered.slice(offset, offset + limit), total, error: null };
+}
+
+interface SearchConversationRow {
+  linkedin_conversation_uuid: string | null;
+  lead_uuid: string | null;
+  sender_profile_uuid: string | null;
+  last_sent_at: string | null;
+  last_text: string | null;
+  last_type: string | null;
+  last_linkedin_type: string | null;
+  message_count: number | string | null;
+  inbox_count: number | string | null;
+  outbox_count: number | string | null;
+  contact_name: string | null;
+  contact_first_name: string | null;
+  contact_last_name: string | null;
+  contact_position: string | null;
+  contact_company_name: string | null;
+  contact_avatar_url: string | null;
+  contact_company_uuid: string | null;
+  contact_pipeline_stage_uuid: string | null;
+  sender_first_name: string | null;
+  sender_last_name: string | null;
+  sender_label: string | null;
+  total_count: number | string | null;
+}
+
+/**
+ * Conversations list for the interactive page. Unlike getConversationsList,
+ * search/filter/pagination run in SQL (search_conversations_for_project), so a
+ * single page (≤ limit rows) is fetched and hydrated instead of the whole
+ * project — fast and correct regardless of conversation count. Search is the
+ * same tokenized-AND semantics as conversationMatchesSearch (receiver/sender
+ * name, company, title, last message text).
+ */
+export async function searchConversationsForProject(
+  client: SupabaseClient,
+  projectId: string,
+  options?: {
+    limit?: number;
+    offset?: number;
+    search?: string | null;
+    replyTag?: ConversationReplyTag | null;
+    needAttention?: boolean;
+    pipelineStageUuid?: string | null;
+  }
+): Promise<{ data: ConversationListItem[]; total: number; error: string | null }> {
+  const limit = Math.min(Math.max(options?.limit ?? 50, 1), 2000);
+  const offset = Math.max(0, options?.offset ?? 0);
+  const tokens = parseSearchTokens(options?.search ?? "");
+  const pipelineStageUuid = options?.pipelineStageUuid?.trim() || null;
+
+  const { data, error } = await client.rpc("search_conversations_for_project", {
+    p_project_id: projectId,
+    p_search: tokens.length > 0 ? tokens : null,
+    p_reply_tag: options?.replyTag ?? null,
+    p_need_attention: options?.needAttention ?? false,
+    p_pipeline_stage: pipelineStageUuid,
+    p_limit: limit,
+    p_offset: offset,
+  });
+  if (error) return { data: [], total: 0, error: error.message };
+  const rows = (data ?? []) as SearchConversationRow[];
+  const total = rows.length > 0 ? toIntSafe(rows[0].total_count) : 0;
+
+  // Hypothesis counts only for the (≤ limit) companies on this page.
+  const companyIds = [
+    ...new Set(rows.map((r) => r.contact_company_uuid).filter(Boolean) as string[]),
+  ];
+  const hypothesisCountByCompany = new Map<string, number>();
+  if (companyIds.length > 0) {
+    const { data: pcRows } = await client
+      .from(PROJECT_COMPANIES_TABLE)
+      .select("company_id, hypothesis_targets(count)")
+      .eq("project_id", projectId)
+      .in("company_id", companyIds);
+    for (const row of (pcRows ?? []) as Array<Record<string, unknown>>) {
+      const cid = row.company_id as string;
+      const targets = row.hypothesis_targets as Array<Record<string, unknown>> | null;
+      const cnt =
+        Array.isArray(targets) && targets.length > 0 ? ((targets[0].count as number) ?? 0) : 0;
+      hypothesisCountByCompany.set(cid, (hypothesisCountByCompany.get(cid) ?? 0) + cnt);
+    }
+  }
+
+  function nameFrom(
+    name: string | null,
+    first: string | null,
+    last: string | null,
+    label: string | null,
+    fallback: string
+  ): string {
+    if (typeof name === "string" && name.trim()) return name.trim();
+    const f = typeof first === "string" ? first.trim() : "";
+    const l = typeof last === "string" ? last.trim() : "";
+    if (f || l) return [f, l].filter(Boolean).join(" ");
+    if (typeof label === "string" && label.trim()) return label.trim();
+    return fallback;
+  }
+
+  const items: ConversationListItem[] = rows.map((r) => {
+    const convId = r.linkedin_conversation_uuid ?? "";
+    const leadUuid = r.lead_uuid ?? null;
+    const inboxCount = toIntSafe(r.inbox_count);
+    const outboxCount = toIntSafe(r.outbox_count);
+    const lastMessageIsOutbox =
+      String(r.last_type ?? r.last_linkedin_type ?? "").toLowerCase() === "outbox";
+    const companyId = r.contact_company_uuid ?? null;
+    return {
+      conversationUuid: convId,
+      leadUuid,
+      senderProfileUuid: r.sender_profile_uuid ?? null,
+      senderDisplayName: nameFrom(
+        null,
+        r.sender_first_name,
+        r.sender_last_name,
+        r.sender_label,
+        "Unknown Sender"
+      ),
+      receiverDisplayName: nameFrom(
+        r.contact_name,
+        r.contact_first_name,
+        r.contact_last_name,
+        null,
+        leadUuid ? leadUuid.slice(0, 8) + "…" : "Unknown"
+      ),
+      receiverTitle: r.contact_position ?? null,
+      receiverCompanyName: r.contact_company_name ?? null,
+      receiverAvatarUrl: r.contact_avatar_url ?? null,
+      receiverCompanyId: companyId,
+      lastMessageText: r.last_text ?? null,
+      lastMessageAt: r.last_sent_at ?? null,
+      messageCount: toIntSafe(r.message_count),
+      inboxCount,
+      outboxCount,
+      lastMessageIsOutbox,
+      hypothesisCount: companyId ? (hypothesisCountByCompany.get(companyId) ?? 0) : 0,
+      replyTag: deriveConversationReplyTag({ inboxCount, outboxCount, lastMessageIsOutbox }),
+      receiverPipelineStageUuid: r.contact_pipeline_stage_uuid ?? null,
+    };
+  });
+
+  return { data: items, total, error: null };
 }
 
 export async function listContactPipelineStages(

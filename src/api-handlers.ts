@@ -46,6 +46,7 @@ import {
   getContextSnapshots,
   saveContextSnapshot,
   getConversationsList,
+  searchConversationsForProject,
   listContactPipelineStages,
   type ConversationReplyTag,
   getCompanyHypotheses,
@@ -3105,7 +3106,7 @@ export async function handleGetConversationsList(
     replyTagRaw && allowedTags.has(replyTagRaw) ? (replyTagRaw as ConversationReplyTag) : null;
   const needAttention = replyTagRaw === "need_attention";
 
-  const result = await getConversationsList(client, projectId, {
+  const result = await searchConversationsForProject(client, projectId, {
     limit,
     offset,
     search: search || null,
