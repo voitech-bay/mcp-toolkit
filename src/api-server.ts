@@ -108,6 +108,14 @@ import {
   handlePostDifyWorkflowRunsBatchDetail,
   handlePostDifyContactsLookup,
 } from "./api-handlers.js";
+import {
+  handleInmailReviewItems,
+  handleInmailReviewOpen,
+  handleInmailReviewComment,
+  handleInmailReviewRegenerate,
+  handleInmailReviewApprove,
+  handleInmailReviewPushGetsales,
+} from "./inmail-review-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -656,6 +664,24 @@ const server = createServer(async (req, res) => {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
+        return;
+      case "/api/inmail-review/items":
+        await handleInmailReviewItems(req, res);
+        return;
+      case "/api/inmail-review/open":
+        await handleInmailReviewOpen(req, res);
+        return;
+      case "/api/inmail-review/comment":
+        await handleInmailReviewComment(req, res);
+        return;
+      case "/api/inmail-review/regenerate":
+        await handleInmailReviewRegenerate(req, res);
+        return;
+      case "/api/inmail-review/approve":
+        await handleInmailReviewApprove(req, res);
+        return;
+      case "/api/inmail-review/push-getsales":
+        await handleInmailReviewPushGetsales(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {
