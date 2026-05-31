@@ -47,6 +47,12 @@ const router = createRouter({
       meta: { title: "n8n workflow results | MCP Toolkit" },
     },
     {
+      path: "/inmail-review",
+      name: "InMailReview",
+      component: () => import("../views/InMailReviewPage.vue"),
+      meta: { title: "InMail review | MCP Toolkit" },
+    },
+    {
       path: "/calls/cold-n8n",
       name: "ColdCallN8n",
       component: () => import("../views/ColdCallN8nPage.vue"),

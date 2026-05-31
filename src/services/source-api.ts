@@ -755,6 +755,80 @@ export async function fetchCompanyByUuid(
   }
 }
 
+// --- InMail review: lead custom-field reads/writes ---------------------------
+// Used only by the InMail review push. Writes touch ONLY custom_fields (keyed by
+// field uuid), never identity fields. Existing fetch functions above are unchanged.
+
+export interface LeadCustomFieldDef {
+  uuid: string;
+  name: string;
+}
+
+function asObjArray(v: unknown): Array<Record<string, unknown>> {
+  return Array.isArray(v) ? (v.filter((x) => x && typeof x === "object") as Array<Record<string, unknown>>) : [];
+}
+
+/** GET /leads/api/custom-fields?filter[object]=lead — lead custom-field definitions. */
+export async function listLeadCustomFields(
+  credentials: ApiCredentials | undefined
+): Promise<LeadCustomFieldDef[]> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const url = `${config.baseUrl}/leads/api/custom-fields?filter[object]=lead`;
+  const json = await fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "GET" });
+  const rows = asObjArray(json.data).length
+    ? asObjArray(json.data)
+    : asObjArray(json.custom_fields).length
+      ? asObjArray(json.custom_fields)
+      : asObjArray(json as unknown);
+  const out: LeadCustomFieldDef[] = [];
+  for (const r of rows) {
+    const uuid = typeof r.uuid === "string" ? r.uuid : null;
+    const name = typeof r.name === "string" ? r.name : null;
+    if (uuid && name) out.push({ uuid, name });
+  }
+  return out;
+}
+
+/** POST /leads/api/custom-fields — create a lead custom field; returns its uuid. */
+export async function createLeadCustomField(
+  credentials: ApiCredentials | undefined,
+  name: string
+): Promise<string> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const url = `${config.baseUrl}/leads/api/custom-fields`;
+  const json = await fetchJson<Record<string, unknown>>(url, config.apiKey, {
+    method: "POST",
+    body: JSON.stringify({ object: "lead", name }),
+  });
+  const nested = json.custom_field;
+  const row = nested && typeof nested === "object" ? (nested as Record<string, unknown>) : json;
+  const uuid = typeof row.uuid === "string" ? row.uuid : null;
+  if (!uuid) throw new Error(`createLeadCustomField: no uuid returned for "${name}"`);
+  return uuid;
+}
+
+/**
+ * PUT /leads/api/leads/{uuid} — update ONLY `custom_fields` (keyed by field uuid).
+ * Never sends identity/company fields. Caller must have resolved field uuids first.
+ */
+export async function updateLeadCustomFields(
+  credentials: ApiCredentials | undefined,
+  leadUuid: string,
+  customFields: Record<string, string>
+): Promise<void> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const trimmed = leadUuid.trim();
+  if (!trimmed) throw new Error("updateLeadCustomFields: leadUuid required");
+  const url = `${config.baseUrl}/leads/api/leads/${encodeURIComponent(trimmed)}`;
+  await fetchJson<Record<string, unknown>>(url, config.apiKey, {
+    method: "PUT",
+    body: JSON.stringify({ custom_fields: customFields }),
+  });
+}
+
 /**
  * Fetch many contacts by UUID via a bounded concurrency pool of `GET /leads/api/leads/{uuid}` calls.
  * Never throws: per-UUID failures collected in `errors`; 404s recorded in `missing`.
