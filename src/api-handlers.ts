@@ -3422,18 +3422,35 @@ export async function hydrateContactsGsByListData(
   body: Record<string, unknown>;
 }> {
   const fetchContactsByListUuidFn = deps.fetchContactsByListUuidFn ?? fetchContactsByListUuid;
-  const fetchCompaniesByUuidsGroupedFn = deps.fetchCompaniesByUuidsGroupedFn ?? fetchCompaniesByUuidsGrouped;
-  const upsertCompaniesMappedFn =
-    deps.upsertCompaniesMappedFn ??
-    (async (_rows: Record<string, unknown>[]) => ({ upserted: 0, error: "upsertCompaniesMappedFn not configured" }));
   const gsRes = await fetchContactsByListUuidFn(listUuid, credentials);
   if (gsRes.error) {
     return { status: 502, body: { data: gsRes.rows, error: gsRes.error } };
   }
+  return hydrateContactRows(gsRes.rows, credentials, loadCompanies, deps);
+}
+
+/**
+ * Company-hydrate + normalize already-fetched GetSales contact rows into the gs-by-list
+ * response shape. Shared by gs-by-list (whole list) and gs-by-uuid (single contact) so both
+ * produce identical contact item shapes for downstream n8n agents.
+ */
+export async function hydrateContactRows(
+  rows: Array<Record<string, unknown>>,
+  credentials: { baseUrl: string; apiKey: string },
+  loadCompanies: (companyIds: string[]) => Promise<{ map: Map<string, HydratedCompanyRow>; error: string | null }>,
+  deps: {
+    fetchCompaniesByUuidsGroupedFn?: FetchCompaniesByUuidsGroupedFn;
+    upsertCompaniesMappedFn?: UpsertCompaniesMappedFn;
+  } = {}
+): Promise<{ status: 200 | 500 | 502; body: Record<string, unknown> }> {
+  const fetchCompaniesByUuidsGroupedFn = deps.fetchCompaniesByUuidsGroupedFn ?? fetchCompaniesByUuidsGrouped;
+  const upsertCompaniesMappedFn =
+    deps.upsertCompaniesMappedFn ??
+    (async (_rows: Record<string, unknown>[]) => ({ upserted: 0, error: "upsertCompaniesMappedFn not configured" }));
 
   const uniqueCompanyIds = [
     ...new Set(
-      gsRes.rows
+      rows
         .map((r) => {
           const id = r.company_uuid;
           return typeof id === "string" ? id.trim() : "";
@@ -3457,7 +3474,6 @@ export async function hydrateContactsGsByListData(
   const companiesErrors: Array<{ companyId: string; error: string }> = [];
   if (needsHydrationCompanyIds.length > 0) {
     console.info("[gs-by-list] companies hydration: ids to fetch", {
-      listUuid,
       total: needsHydrationCompanyIds.length,
       companyUuids: needsHydrationCompanyIds,
     });
@@ -3494,7 +3510,7 @@ export async function hydrateContactsGsByListData(
     return { status: 500, body: { data: [], error: finalCompanyRead.error } };
   }
   const companiesMissing = uniqueCompanyIds.filter((id) => !finalCompanyRead.map.has(id));
-  const normalized = gsRes.rows.map((row) => {
+  const normalized = rows.map((row) => {
     const cid = typeof row.company_uuid === "string" ? row.company_uuid.trim() : "";
     const co = cid ? finalCompanyRead.map.get(cid) : undefined;
     const linkedinUrlRaw = row.linkedin_url ?? row.linkedin ?? null;
@@ -3568,6 +3584,64 @@ export async function handleGetContactsGsByList(
     {
       upsertCompaniesMappedFn: async (rows) => upsertCompaniesMapped(client, rows, 100),
     }
+  );
+  res.writeHead(result.status);
+  res.end(JSON.stringify(result.body));
+}
+
+/**
+ * GET /api/contacts/gs-by-uuid?projectId=&leadUuid=
+ * Single-contact equivalent of gs-by-list: fetch one GetSales lead, return it in the SAME
+ * hydrated item shape so the single-contact n8n workflow feeds downstream agents identically.
+ */
+export async function handleGetContactsGsByUuid(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ data: [], error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId")?.trim() ?? "";
+  const leadUuid = (params.get("leadUuid") ?? params.get("lead_uuid"))?.trim() ?? "";
+  if (!projectId || !leadUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ data: [], error: "projectId and leadUuid are required." }));
+    return;
+  }
+  const credRes = await getGetSalesCredentials(client, projectId);
+  if (credRes.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], error: credRes.error }));
+    return;
+  }
+  const credentials = credRes.credentials;
+  if (!credentials?.baseUrl || !credentials?.apiKey) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ data: [], error: "GetSales credentials missing on project and environment." }));
+    return;
+  }
+  const lead = await fetchContactByUuid(credentials, leadUuid);
+  if (!lead) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ data: [], error: `Lead not found: ${leadUuid}` }));
+    return;
+  }
+  const result = await hydrateContactRows(
+    [lead],
+    credentials,
+    async (ids) => loadCompaniesForHydration(client, ids),
+    { upsertCompaniesMappedFn: async (rows) => upsertCompaniesMapped(client, rows, 100) }
   );
   res.writeHead(result.status);
   res.end(JSON.stringify(result.body));

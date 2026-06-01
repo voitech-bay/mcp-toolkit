@@ -10,6 +10,8 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import {
   getSupabase,
   getGetSalesCredentials,
+  findContactsByNameLikeGlobal,
+  getN8nWorkflowResultsByForeignIds,
   N8N_WORKFLOW_RESULTS_TABLE,
 } from "./services/supabase.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
@@ -30,6 +32,12 @@ const STATE_TABLE = "inmail_review_state";
 const VERSIONS_TABLE = "inmail_review_versions";
 const COMMENTS_TABLE = "inmail_review_comments";
 const DEFAULT_MODEL = "nousresearch/hermes-4-70b";
+const SPRITES_PROJECT_ID = "33095db5-9793-4034-959d-7adadfd761fb";
+
+/** Pipeline of a result row; research-only rows (no generated body) are treated as InMail candidates. */
+function pipelineOrInmail(result: Json): InmailKind {
+  return pipelineOf(result) ?? "inmail";
+}
 
 type Json = Record<string, unknown>;
 
@@ -127,8 +135,7 @@ async function ensureSeeded(resultId: string, row: Json): Promise<{ currentVersi
   const client = getSupabase();
   if (!client) return { currentVersionId: null, error: "Supabase not configured" };
   const result = (row.result as Json) ?? {};
-  const pipeline = pipelineOf(result);
-  if (!pipeline) return { currentVersionId: null, error: "Row is not an InMail/Followup result" };
+  const pipeline = pipelineOrInmail(result);
 
   const { data: existingVersions } = await client
     .from(VERSIONS_TABLE)
@@ -245,7 +252,7 @@ export async function handleInmailReviewOpen(req: IncomingMessage, res: ServerRe
   if (seeded.error) return sendJson(res, 400, { error: seeded.error });
 
   const result = (row.result as Json) ?? {};
-  const pipeline = pipelineOf(result)!;
+  const pipeline = pipelineOrInmail(result);
   const [{ data: versions }, { data: comments }, { data: state }] = await Promise.all([
     client.from(VERSIONS_TABLE).select("*").eq("result_id", resultId).order("created_at", { ascending: true }),
     client.from(COMMENTS_TABLE).select("*").eq("result_id", resultId).order("created_at", { ascending: true }),
@@ -302,8 +309,7 @@ export async function handleInmailReviewRegenerate(req: IncomingMessage, res: Se
   if (error) return sendJson(res, 500, { error });
   if (!row) return sendJson(res, 404, { error: "Result not found" });
   const result = (row.result as Json) ?? {};
-  const pipeline = pipelineOf(result);
-  if (!pipeline) return sendJson(res, 400, { error: "Row is not an InMail/Followup result" });
+  const pipeline = pipelineOrInmail(result);
 
   await ensureSeeded(resultId, row);
 
@@ -417,7 +423,7 @@ export async function handleInmailReviewPushGetsales(req: IncomingMessage, res: 
   if (error) return sendJson(res, 500, { error });
   if (!row) return sendJson(res, 404, { error: "Result not found" });
   const result = (row.result as Json) ?? {};
-  const pipeline = pipelineOf(result);
+  const pipeline = pipelineOrInmail(result);
   if (pipeline !== "inmail") {
     return sendJson(res, 400, { error: "Only InMail push is supported; follow-up push is not implemented." });
   }
@@ -493,6 +499,116 @@ export async function handleInmailReviewPushGetsales(req: IncomingMessage, res: 
       .eq("result_id", resultId);
 
     sendJson(res, 200, { ok: true, leadUuid, fields: arranged.fields });
+  } catch (e) {
+    sendJson(res, 502, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+function queryParam(req: IncomingMessage, key: string): string {
+  try {
+    return new URL(req.url ?? "", "http://localhost").searchParams.get(key)?.trim() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+// --- GET /api/inmail-review/contact-search?name= -----------------------------
+// All synced contacts by name, flagged with whether they have prior n8n executions.
+export async function handleInmailContactSearch(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+  const name = queryParam(req, "name") || queryParam(req, "q");
+  if (!name) return sendJson(res, 400, { error: "name is required" });
+
+  const { data, error } = await findContactsByNameLikeGlobal(client, { nameLike: name, limit: 25 });
+  if (error) return sendJson(res, 500, { error });
+  const contacts = data;
+  const uuids = contacts.map((c) => str(c, "uuid")).filter(Boolean);
+
+  // execution counts + last date per contact_id
+  const execByContact: Record<string, { count: number; last: string | null }> = {};
+  if (uuids.length) {
+    const { data: rows } = await client
+      .from(N8N_WORKFLOW_RESULTS_TABLE)
+      .select("contact_id,created_at")
+      .in("contact_id", uuids)
+      .order("created_at", { ascending: false });
+    for (const r of (rows ?? []) as Json[]) {
+      const cid = str(r, "contact_id");
+      if (!cid) continue;
+      const e = execByContact[cid] ?? { count: 0, last: null };
+      e.count += 1;
+      if (!e.last) e.last = str(r, "created_at");
+      execByContact[cid] = e;
+    }
+  }
+
+  const items = contacts.map((c) => {
+    const uuid = str(c, "uuid");
+    const e = execByContact[uuid];
+    return {
+      uuid,
+      name: str(c, "name", "first_name"),
+      company_name: str(c, "company_name"),
+      position: str(c, "position"),
+      linkedin: str(c, "linkedin"),
+      execution_count: e ? e.count : 0,
+      last_execution_at: e ? e.last : null,
+    };
+  });
+  sendJson(res, 200, { items });
+}
+
+// --- GET /api/inmail-review/contact-executions?contactUuid= -------------------
+export async function handleInmailContactExecutions(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+  const contactUuid = queryParam(req, "contactUuid") || queryParam(req, "uuid");
+  if (!contactUuid) return sendJson(res, 400, { error: "contactUuid is required" });
+
+  const { data, error } = await getN8nWorkflowResultsByForeignIds(client, {
+    column: "contact_id",
+    ids: [contactUuid],
+    limit: 100,
+  });
+  if (error) return sendJson(res, 500, { error });
+  const executions = (data ?? []).map((row) => {
+    const result = (row.result as Json) ?? {};
+    const pipeline = pipelineOf(result);
+    return {
+      result_id: str(row as unknown as Json, "id"),
+      created_at: str(row as unknown as Json, "created_at"),
+      workflow: str(row as unknown as Json, "workflow"),
+      pipeline: pipeline ?? "research",
+      has_inmail: typeof result.inmail_body === "string" && result.inmail_body.length > 0,
+      has_followup: typeof result.followup_body === "string" && result.followup_body.length > 0,
+    };
+  });
+  sendJson(res, 200, { executions });
+}
+
+// --- POST /api/inmail-review/run-new { leadUuid } ----------------------------
+// Triggers the single-contact full-research n8n webhook. Real n8n execution; result
+// lands via the existing ingest and shows up in contact-executions.
+export async function handleInmailRunNew(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  const body = await readJsonBody(req);
+  const leadUuid = str(body, "leadUuid", "lead_uuid");
+  if (!leadUuid) return sendJson(res, 400, { error: "leadUuid is required" });
+  const webhook = process.env.N8N_INMAIL_SINGLE_WEBHOOK_URL?.trim();
+  if (!webhook) return sendJson(res, 500, { error: "N8N_INMAIL_SINGLE_WEBHOOK_URL not configured" });
+
+  try {
+    const r = await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lead_uuid: leadUuid, projectId: SPRITES_PROJECT_ID }),
+    });
+    const text = await r.text();
+    if (!r.ok) return sendJson(res, 502, { error: `n8n webhook ${r.status}: ${text.slice(0, 300)}` });
+    sendJson(res, 200, { accepted: true, leadUuid });
   } catch (e) {
     sendJson(res, 502, { error: e instanceof Error ? e.message : String(e) });
   }
