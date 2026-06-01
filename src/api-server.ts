@@ -59,6 +59,7 @@ import {
   handleGetContactsByCompany,
   handleGetContactsByList,
   handleGetContactsGsByList,
+  handleGetContactsGsByUuid,
   handleGetContactsListSyncCheck,
   handleCreateCompany,
   handlePatchContactCompany,
@@ -115,6 +116,9 @@ import {
   handleInmailReviewRegenerate,
   handleInmailReviewApprove,
   handleInmailReviewPushGetsales,
+  handleInmailContactSearch,
+  handleInmailContactExecutions,
+  handleInmailRunNew,
 } from "./inmail-review-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
@@ -272,6 +276,7 @@ const server = createServer(async (req, res) => {
     pathname !== "/api/contacts/by-company" &&
     pathname !== "/api/contacts/by-list" &&
     pathname !== "/api/contacts/gs-by-list" &&
+    pathname !== "/api/contacts/gs-by-uuid" &&
     pathname !== "/api/contacts/list-sync-check" &&
     pathname !== "/api/contacts/list-sync-resync-missing" &&
     pathname !== "/api/contacts/find-by-uuid" &&
@@ -615,6 +620,14 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/contacts/gs-by-uuid":
+        if (req.method === "GET") {
+          await handleGetContactsGsByUuid(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/contacts/list-sync-check":
         if (req.method === "GET") {
           await handleGetContactsListSyncCheck(req, res);
@@ -682,6 +695,15 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/inmail-review/push-getsales":
         await handleInmailReviewPushGetsales(req, res);
+        return;
+      case "/api/inmail-review/contact-search":
+        await handleInmailContactSearch(req, res);
+        return;
+      case "/api/inmail-review/contact-executions":
+        await handleInmailContactExecutions(req, res);
+        return;
+      case "/api/inmail-review/run-new":
+        await handleInmailRunNew(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {

@@ -112,9 +112,10 @@ async function loadItems() {
 onMounted(loadItems);
 
 // ---- review drawer ----
+type ReviewActive = Pick<Item, "result_id" | "pipeline" | "workflow" | "research">;
 const drawerOpen = ref(false);
 const drawerLoading = ref(false);
-const active = ref<Item | null>(null);
+const active = ref<ReviewActive | null>(null);
 const versions = ref<Version[]>([]);
 const comments = ref<Comment[]>([]);
 const currentVersionId = ref<string | null>(null);
@@ -132,8 +133,8 @@ const inlineDraft = ref("");
 const pushPreview = ref<PushPreview | null>(null);
 const pushing = ref(false);
 
-async function openReview(item: Item) {
-  active.value = item;
+async function openReview(resultId: string) {
+  active.value = null;
   drawerOpen.value = true;
   drawerLoading.value = true;
   versions.value = [];
@@ -144,9 +145,13 @@ async function openReview(item: Item) {
     const r = await fetch("/api/inmail-review/open", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ resultId: item.result_id }),
+      body: JSON.stringify({ resultId }),
     });
     const data = (await r.json()) as {
+      result_id?: string;
+      pipeline?: Pipeline;
+      workflow?: string;
+      research?: Research;
       versions?: Version[];
       comments?: Comment[];
       current_version_id?: string | null;
@@ -154,6 +159,12 @@ async function openReview(item: Item) {
       error?: string;
     };
     if (!r.ok) throw new Error(data.error ?? "Failed to open");
+    active.value = {
+      result_id: data.result_id ?? resultId,
+      pipeline: (data.pipeline as Pipeline) ?? "inmail",
+      workflow: data.workflow ?? "",
+      research: data.research ?? ({} as Research),
+    };
     versions.value = data.versions ?? [];
     comments.value = data.comments ?? [];
     currentVersionId.value = data.current_version_id ?? null;
@@ -162,6 +173,109 @@ async function openReview(item: Item) {
     message.error(e instanceof Error ? e.message : "Failed to open");
   } finally {
     drawerLoading.value = false;
+  }
+}
+
+// ---- contact name search + run-new ----
+interface ContactHit {
+  uuid: string;
+  name: string;
+  company_name: string;
+  position: string;
+  linkedin: string;
+  execution_count: number;
+  last_execution_at: string | null;
+}
+interface ExecutionRow {
+  result_id: string;
+  created_at: string;
+  workflow: string;
+  pipeline: string;
+  has_inmail: boolean;
+  has_followup: boolean;
+}
+
+const searchName = ref("");
+const searching = ref(false);
+const contactHits = ref<ContactHit[]>([]);
+const selectedContact = ref<ContactHit | null>(null);
+const executions = ref<ExecutionRow[]>([]);
+const execLoading = ref(false);
+const runningNew = ref(false);
+
+function fmtDate(s: string | null): string {
+  if (!s) return "";
+  try {
+    return new Date(s).toLocaleString();
+  } catch {
+    return s;
+  }
+}
+
+async function searchContacts() {
+  const q = searchName.value.trim();
+  if (!q) return;
+  searching.value = true;
+  contactHits.value = [];
+  selectedContact.value = null;
+  executions.value = [];
+  try {
+    const r = await fetch(`/api/inmail-review/contact-search?name=${encodeURIComponent(q)}`);
+    const data = (await r.json()) as { items?: ContactHit[]; error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Search failed");
+    contactHits.value = data.items ?? [];
+    if (!contactHits.value.length) message.info("No contacts found.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Search failed");
+  } finally {
+    searching.value = false;
+  }
+}
+
+async function selectContact(c: ContactHit) {
+  selectedContact.value = c;
+  executions.value = [];
+  execLoading.value = true;
+  try {
+    const r = await fetch(`/api/inmail-review/contact-executions?contactUuid=${encodeURIComponent(c.uuid)}`);
+    const data = (await r.json()) as { executions?: ExecutionRow[]; error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed to load executions");
+    executions.value = data.executions ?? [];
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to load executions");
+  } finally {
+    execLoading.value = false;
+  }
+}
+
+async function runNew() {
+  const c = selectedContact.value;
+  if (!c) return;
+  runningNew.value = true;
+  try {
+    const before = new Set(executions.value.map((e) => e.result_id));
+    const r = await fetch("/api/inmail-review/run-new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leadUuid: c.uuid }),
+    });
+    const data = (await r.json()) as { accepted?: boolean; error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Run failed");
+    message.success("Run started. Waiting for results...");
+    for (let i = 0; i < 36; i++) {
+      await new Promise((res) => setTimeout(res, 5000));
+      await selectContact(c);
+      const fresh = executions.value.find((e) => !before.has(e.result_id));
+      if (fresh) {
+        message.success("Results are in.");
+        await openReview(fresh.result_id);
+        break;
+      }
+    }
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Run failed");
+  } finally {
+    runningNew.value = false;
   }
 }
 
@@ -334,7 +448,7 @@ const columns = computed<DataTableColumns<Item>>(() => [
     key: "action",
     width: 90,
     fixed: "right",
-    render: (row) => h(NButton, { size: "small", type: "primary", onClick: () => openReview(row) }, { default: () => "Review" }),
+    render: (row) => h(NButton, { size: "small", type: "primary", onClick: () => openReview(row.result_id) }, { default: () => "Review" }),
   },
 ]);
 </script>
@@ -354,6 +468,57 @@ const columns = computed<DataTableColumns<Item>>(() => [
         <NButton size="small" :disabled="loading" @click="loadItems">Refresh</NButton>
         <NText depth="3">{{ items.length }} items</NText>
       </NSpace>
+
+      <NCard size="small" title="Find a contact by name" embedded>
+        <NSpace vertical size="small" style="width: 100%">
+          <NSpace align="center">
+            <NInput
+              v-model:value="searchName"
+              placeholder="full name"
+              style="width: 260px"
+              @keyup.enter="searchContacts"
+            />
+            <NButton type="primary" size="small" :loading="searching" @click="searchContacts">Search</NButton>
+          </NSpace>
+
+          <NSpace v-if="contactHits.length" size="small" wrap>
+            <NButton
+              v-for="c in contactHits"
+              :key="c.uuid"
+              size="small"
+              :type="selectedContact?.uuid === c.uuid ? 'primary' : 'default'"
+              @click="selectContact(c)"
+            >
+              {{ c.name }}<span v-if="c.company_name" class="muted"> · {{ c.company_name }}</span>
+              <NTag size="tiny" :type="c.execution_count ? 'info' : 'default'" style="margin-left: 6px">
+                {{ c.execution_count ? c.execution_count + " runs" : "no runs" }}
+              </NTag>
+            </NButton>
+          </NSpace>
+
+          <div v-if="selectedContact">
+            <NSpace align="center" justify="space-between">
+              <strong>{{ selectedContact.name }}</strong>
+              <NButton type="primary" size="small" :loading="runningNew" @click="runNew">
+                Run new research + InMail
+              </NButton>
+            </NSpace>
+            <NSpin :show="execLoading">
+              <NSpace v-if="executions.length" vertical size="small" style="margin-top: 8px">
+                <div v-for="e in executions" :key="e.result_id" class="exec-row">
+                  <NTag size="tiny" :type="e.has_inmail ? 'success' : 'default'">
+                    {{ e.has_inmail ? "inmail" : e.pipeline }}
+                  </NTag>
+                  <span class="muted">{{ fmtDate(e.created_at) }}</span>
+                  <span class="muted">{{ e.workflow ? e.workflow.slice(0, 40) : "" }}</span>
+                  <NButton size="tiny" @click="openReview(e.result_id)">Use this</NButton>
+                </div>
+              </NSpace>
+              <NText v-else depth="3" style="font-size: 0.85rem">no prior executions for this contact</NText>
+            </NSpin>
+          </div>
+        </NSpace>
+      </NCard>
 
       <NAlert v-if="loadError" type="error">{{ loadError }}</NAlert>
 
@@ -509,6 +674,13 @@ const columns = computed<DataTableColumns<Item>>(() => [
   display: flex;
   gap: 0.4rem;
   align-items: baseline;
+  flex-wrap: wrap;
+}
+.exec-row {
+  font-size: 0.8rem;
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
   flex-wrap: wrap;
 }
 .preview {
