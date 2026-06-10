@@ -58,6 +58,18 @@ const router = createRouter({
       component: () => import("../views/ColdCallN8nPage.vue"),
       meta: { title: "Cold call — n8n | MCP Toolkit" },
     },
+    {
+      path: "/contact/:uuid",
+      name: "ContactCard",
+      component: () => import("../views/ContactCardPage.vue"),
+      meta: { title: "Contact | MCP Toolkit" },
+    },
+    {
+      path: "/company/:id",
+      name: "CompanyCard",
+      component: () => import("../views/CompanyCardPage.vue"),
+      meta: { title: "Company | MCP Toolkit" },
+    },
   ],
 });
 

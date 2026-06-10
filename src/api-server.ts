@@ -120,6 +120,11 @@ import {
   handleInmailContactExecutions,
   handleInmailRunNew,
 } from "./inmail-review-handlers.js";
+import {
+  handleGetContactCard,
+  handleGetCompanyCard,
+  handlePostCompanySummary,
+} from "./card-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -704,6 +709,15 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/inmail-review/run-new":
         await handleInmailRunNew(req, res);
+        return;
+      case "/api/cards/contact":
+        await handleGetContactCard(req, res);
+        return;
+      case "/api/cards/company":
+        await handleGetCompanyCard(req, res);
+        return;
+      case "/api/cards/company-summary":
+        await handlePostCompanySummary(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {

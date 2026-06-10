@@ -1038,7 +1038,14 @@ const filteredRelatedContacts = computed(() => {
               <!-- Row 1: receiver name + timestamp -->
               <div class="convpage__item-header">
                 <div class="convpage__receiver-wrap">
-                  <span class="convpage__receiver">{{ item.receiverDisplayName }}</span>
+                  <router-link
+                    v-if="item.leadUuid"
+                    :to="`/contact/${item.leadUuid}`"
+                    class="convpage__receiver"
+                    style="color: #2080f0; text-decoration: none"
+                    @click.stop
+                  >{{ item.receiverDisplayName }}</router-link>
+                  <span v-else class="convpage__receiver">{{ item.receiverDisplayName }}</span>
                   <div class="convpage__receiver-sub">
                     {{
                       [item.receiverCompanyName, item.receiverTitle]
