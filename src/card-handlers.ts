@@ -18,6 +18,8 @@ import {
   type MessageRow,
 } from "./services/account-context.js";
 import { buildLeadersList } from "./services/leaders-list.js";
+import { syncMarkersForContacts } from "./services/getsales-markers.js";
+import { CONTACTS_TABLE } from "./services/supabase.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
 
 const SUMMARY_MODEL = () => process.env.ACCOUNT_SUMMARY_MODEL?.trim() || "google/gemma-4-31b-it";
@@ -179,8 +181,11 @@ export async function handlePostCompanySummary(req: IncomingMessage, res: Server
   sendJson(res, 200, { account_summary: entry, account_summary_stale: false });
 }
 
-// --- PUT /api/contacts/:uuid/meta { lead_category?, priority? } ---------------
-// Saves editable metadata fields (category + priority) for a contact.
+// --- PUT /api/contacts/meta?uuid= { lead_category?, priority? } ----------------
+// Editable fields for the contact card: lead_category and priority.
+const VALID_CATEGORIES = ["Founder/CEO", "Business Leader", "Technical Leader", "Engineer", "Sales", "Other"] as const;
+const VALID_PRIORITIES = ["Top", "High", "Medium", "Low"] as const;
+
 export async function handlePutContactMeta(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "PUT") return sendJson(res, 405, { error: "Method not allowed" });
   const client = getSupabase();
@@ -188,25 +193,83 @@ export async function handlePutContactMeta(req: IncomingMessage, res: ServerResp
   const uuid = queryParam(req, "uuid");
   if (!UUID_RE.test(uuid)) return sendJson(res, 400, { error: "uuid must be a UUID" });
   const body = await readJsonBody(req);
-  const patch: Record<string, string | null> = {};
-  const CATEGORY_VALUES = ["Founder/CEO", "Business Leader", "Technical Leader", "Engineer", "Sales", "Other"] as const;
-  const PRIORITY_VALUES = ["Top", "High", "Medium", "Low"] as const;
-  if ("lead_category" in body) {
-    const v = body.lead_category;
-    if (v !== null && !CATEGORY_VALUES.includes(v as (typeof CATEGORY_VALUES)[number]))
-      return sendJson(res, 400, { error: `lead_category must be one of: ${CATEGORY_VALUES.join(", ")} or null` });
-    patch.lead_category = v == null ? null : String(v);
+  const patch: Record<string, string> = {};
+  if (body.lead_category !== undefined) {
+    const cat = typeof body.lead_category === "string" ? body.lead_category.trim() : "";
+    if (!VALID_CATEGORIES.includes(cat as typeof VALID_CATEGORIES[number])) {
+      return sendJson(res, 400, { error: `lead_category must be one of: ${VALID_CATEGORIES.join(", ")}` });
+    }
+    patch.lead_category = cat;
   }
-  if ("priority" in body) {
-    const v = body.priority;
-    if (v !== null && !PRIORITY_VALUES.includes(v as (typeof PRIORITY_VALUES)[number]))
-      return sendJson(res, 400, { error: `priority must be one of: ${PRIORITY_VALUES.join(", ")} or null` });
-    patch.priority = v == null ? null : String(v);
+  if (body.priority !== undefined) {
+    const pri = typeof body.priority === "string" ? body.priority.trim() : "";
+    if (!VALID_PRIORITIES.includes(pri as typeof VALID_PRIORITIES[number])) {
+      return sendJson(res, 400, { error: `priority must be one of: ${VALID_PRIORITIES.join(", ")}` });
+    }
+    patch.priority = pri;
   }
-  if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No updatable fields in body" });
+  if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No valid fields to update" });
   const { error } = await client.from("Contacts").update(patch).eq("uuid", uuid);
   if (error) return sendJson(res, 500, { error: error.message });
-  sendJson(res, 200, { ok: true });
+  sendJson(res, 200, { ok: true, updated: patch });
+}
+
+// --- POST /api/contacts/sync-markers { tag?, uuids? } -------------------------
+// Syncs GetSales lead markers (email counts, connection date) into Contacts columns.
+// Accepts either a tag UUID (syncs all tagged contacts) or an explicit uuids array.
+export async function handlePostSyncMarkers(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+
+  const apiKey = process.env.GETSALES_FEASIBLE_API_KEY?.trim() ?? "";
+  const teamId = process.env.GETSALES_FEASIBLE_TEAM_ID?.trim() ?? "";
+  if (!apiKey || !teamId) return sendJson(res, 500, { error: "GetSales credentials not configured" });
+
+  const body = await readJsonBody(req);
+  let uuids: string[] = [];
+
+  if (typeof body.tag === "string" && UUID_RE.test(body.tag)) {
+    // Resolve all contacts with this tag
+    const { data, error } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid")
+      .contains("tags", JSON.stringify([body.tag]));
+    if (error) return sendJson(res, 500, { error: error.message });
+    uuids = ((data ?? []) as { uuid: string }[]).map((r) => r.uuid).filter(Boolean);
+  } else if (Array.isArray(body.uuids)) {
+    uuids = (body.uuids as unknown[]).filter((v): v is string => typeof v === "string" && UUID_RE.test(v));
+  }
+
+  if (!uuids.length) return sendJson(res, 400, { error: "Provide tag (UUID) or uuids (array of UUIDs)" });
+  if (uuids.length > 500) return sendJson(res, 400, { error: "Batch too large (max 500)" });
+
+  const result = await syncMarkersForContacts(client, uuids, apiKey, teamId);
+  sendJson(res, 200, { ok: true, total: uuids.length, ...result });
+}
+
+// --- POST /api/lists/tagged/remove { tag, uuids } ----------------------------
+// Removes the given tag UUID from Contacts.tags for each listed contact UUID.
+// Uses the remove_tag_from_contacts Postgres function for an atomic batch update.
+export async function handlePostRemoveFromList(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+  const body = await readJsonBody(req);
+  const tag = typeof body.tag === "string" ? body.tag.trim() : "";
+  if (!UUID_RE.test(tag)) return sendJson(res, 400, { error: "tag must be a UUID" });
+  const uuids = Array.isArray(body.uuids)
+    ? (body.uuids as unknown[]).filter((v): v is string => typeof v === "string" && UUID_RE.test(v))
+    : [];
+  if (!uuids.length) return sendJson(res, 400, { error: "uuids must be a non-empty array of UUIDs" });
+  if (uuids.length > 200) return sendJson(res, 400, { error: "Batch too large (max 200)" });
+
+  const { data, error } = await client.rpc("remove_tag_from_contacts", {
+    p_uuids: uuids,
+    p_tag_uuid: tag,
+  });
+  if (error) return sendJson(res, 500, { error: error.message });
+  sendJson(res, 200, { ok: true, removed: data as number });
 }
 
 // re-export for tests

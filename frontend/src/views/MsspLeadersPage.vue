@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { ref, computed, h, onMounted } from "vue";
 import {
-  NCard, NDataTable, NInput, NButton, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip,
+  NCard, NDataTable, NInput, NButton, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
 } from "naive-ui";
-import type { DataTableColumns } from "naive-ui";
-import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon } from "lucide-vue-next";
+import type { DataTableColumns, DataTableRowKey } from "naive-ui";
+import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 
 const TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
@@ -37,11 +37,14 @@ interface LeaderRecord {
 
 const data = ref<LeaderRecord[]>([]);
 const loading = ref(false);
+const syncing = ref(false);
+const removing = ref(false);
 const error = ref("");
 const search = ref("");
 const statusFilter = ref<string | null>(null);
 const connFilter = ref<string | null>(null);
 const typeFilter = ref<string | null>(null);
+const checkedKeys = ref<DataTableRowKey[]>([]);
 
 async function fetchList() {
   loading.value = true;
@@ -51,6 +54,7 @@ async function fetchList() {
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Failed to load list");
     data.value = (j.data ?? []) as LeaderRecord[];
+    checkedKeys.value = [];
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to load list";
     data.value = [];
@@ -58,6 +62,48 @@ async function fetchList() {
     loading.value = false;
   }
 }
+
+async function syncEmails() {
+  syncing.value = true;
+  error.value = "";
+  try {
+    const r = await fetch("/api/contacts/sync-markers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag: TAG_UUID }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Sync failed");
+    await fetchList();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Sync failed";
+  } finally {
+    syncing.value = false;
+  }
+}
+
+async function removeFromList(uuids: string[]) {
+  if (!uuids.length) return;
+  removing.value = true;
+  error.value = "";
+  try {
+    const r = await fetch("/api/lists/tagged/remove", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tag: TAG_UUID, uuids }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Remove failed");
+    // Optimistically remove from local data, then refresh
+    data.value = data.value.filter((d) => !uuids.includes(d.uuid));
+    checkedKeys.value = checkedKeys.value.filter((k) => !uuids.includes(String(k)));
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Remove failed";
+  } finally {
+    removing.value = false;
+  }
+}
+
 onMounted(fetchList);
 
 function uniq(vals: (string | null)[]): { label: string; value: string }[] {
@@ -87,6 +133,8 @@ const filtered = computed(() => {
   });
 });
 
+const selectedUuids = computed(() => checkedKeys.value.map(String));
+
 const connType = (s: string) => (s === "accepted" ? "success" : s === "sent" ? "warning" : "default");
 const statusType = (s: string) => {
   const l = s.toLowerCase();
@@ -102,6 +150,7 @@ function fmtDate(s: string | null): string {
 }
 
 const columns = computed<DataTableColumns<LeaderRecord>>(() => [
+  { type: "selection", width: 36, fixed: "left" },
   {
     title: "", key: "linkedin", width: 36,
     render: (row) =>
@@ -124,10 +173,10 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
         ? h(RouterLink, { to: `/company/${row.company_id}`, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name ?? "—" })
         : (row.company_name ?? "—"),
   },
-  { title: "Location", key: "location", width: 140, ellipsis: { tooltip: true }, render: (r) => r.location ?? "—" },
-  { title: "Company HQ", key: "company_hq", width: 140, ellipsis: { tooltip: true }, render: (r) => r.company_hq ?? "—" },
+  { title: "Location", key: "location", width: 130, ellipsis: { tooltip: true }, render: (r) => r.location ?? "—" },
+  { title: "Company HQ", key: "company_hq", width: 130, ellipsis: { tooltip: true }, render: (r) => r.company_hq ?? "—" },
   {
-    title: "Employees", key: "employee_count", width: 100,
+    title: "Employees", key: "employee_count", width: 96,
     sorter: (a, b) => (a.employee_count ?? 0) - (b.employee_count ?? 0),
     render: (r) => r.employee_count != null ? r.employee_count.toLocaleString() : "—",
   },
@@ -145,16 +194,16 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     title: "Automations", key: "automations", width: 160, ellipsis: { tooltip: true },
     render: (r) => (r.automations.length ? r.automations.join(", ") : "—"),
   },
-  { title: "Out", key: "outgoing_count", width: 60, sorter: (a, b) => a.outgoing_count - b.outgoing_count, render: (r) => r.outgoing_count },
-  { title: "Replies", key: "reply_count", width: 70, sorter: (a, b) => a.reply_count - b.reply_count, render: (r) => r.reply_count },
-  { title: "Emails", key: "email_count", width: 68, sorter: (a, b) => a.email_count - b.email_count, render: (r) => r.email_count },
+  { title: "Out", key: "outgoing_count", width: 56, sorter: (a, b) => a.outgoing_count - b.outgoing_count, render: (r) => r.outgoing_count },
+  { title: "Replies", key: "reply_count", width: 68, sorter: (a, b) => a.reply_count - b.reply_count, render: (r) => r.reply_count },
+  { title: "Emails", key: "email_count", width: 64, sorter: (a, b) => a.email_count - b.email_count, render: (r) => r.email_count },
   {
     title: "Status", key: "status", width: 160, ellipsis: { tooltip: true },
     sorter: (a, b) => a.status.localeCompare(b.status),
     render: (r) => h(NTag, { size: "small", bordered: false, type: statusType(r.status) }, { default: () => r.status }),
   },
   {
-    title: "Actions", key: "actions", width: 120, fixed: "right",
+    title: "Actions", key: "actions", width: 130, fixed: "right",
     render: (row) =>
       h(NSpace, { size: 4, wrap: false }, {
         default: () => [
@@ -167,6 +216,12 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
             trigger: () => h(RouterLink, { to: { path: "/conversations", query: { search: row.name } } },
               { default: () => h(NButton, { size: "tiny", quaternary: true }, { icon: () => h(MessageCircleIcon, { size: 14 }) }) }),
             default: () => "Open conversation",
+          }),
+          h(NPopconfirm, {
+            onPositiveClick: () => removeFromList([row.uuid]),
+          }, {
+            trigger: () => h(NButton, { size: "tiny", quaternary: true, type: "error" }, { icon: () => h(TrashIcon, { size: 14 }) }),
+            default: () => `Remove ${row.name} from this list?`,
           }),
         ],
       }),
@@ -184,24 +239,48 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
           <NTag size="small" :bordered="false" type="info">{{ filtered.length }} / {{ data.length }}</NTag>
           <span v-if="loading" style="opacity:.6;font-size:.82rem">Loading…</span>
         </div>
-        <NSpace size="small" align="center">
-          <NInput v-model:value="search" placeholder="Search name, company, title…" clearable size="small" style="width: 240px" />
-          <NSelect v-model:value="statusFilter" :options="statusOptions" placeholder="Status" clearable size="small" style="width: 160px" />
-          <NSelect v-model:value="connFilter" :options="connOptions" placeholder="Connection" clearable size="small" style="width: 130px" />
-          <NSelect v-model:value="typeFilter" :options="typeOptions" placeholder="Company type" clearable size="small" style="width: 150px" />
+        <NSpace size="small" align="center" wrap>
+          <NInput v-model:value="search" placeholder="Search name, company, title…" clearable size="small" style="width: 220px" />
+          <NSelect v-model:value="statusFilter" :options="statusOptions" placeholder="Status" clearable size="small" style="width: 150px" />
+          <NSelect v-model:value="connFilter" :options="connOptions" placeholder="Connection" clearable size="small" style="width: 120px" />
+          <NSelect v-model:value="typeFilter" :options="typeOptions" placeholder="Company type" clearable size="small" style="width: 140px" />
+          <NTooltip v-if="selectedUuids.length > 0">
+            <template #trigger>
+              <NPopconfirm @positive-click="removeFromList(selectedUuids)">
+                <template #trigger>
+                  <NButton size="small" type="error" secondary :loading="removing">
+                    <template #icon><TrashIcon :size="14" /></template>
+                    Remove {{ selectedUuids.length }} selected
+                  </NButton>
+                </template>
+                Remove {{ selectedUuids.length }} contacts from this list?
+              </NPopconfirm>
+            </template>
+            Remove selected contacts from "MSSP Leaders in MENA" tag
+          </NTooltip>
+          <NTooltip>
+            <template #trigger>
+              <NButton size="small" secondary :loading="syncing" @click="syncEmails">
+                <template #icon><RefreshCwIcon :size="14" /></template>
+                Sync emails
+              </NButton>
+            </template>
+            Fetch email + connection stats from GetSales API for all {{ data.length }} contacts
+          </NTooltip>
           <NButton size="small" @click="fetchList" :loading="loading">Refresh</NButton>
         </NSpace>
       </div>
     </template>
 
-    <NAlert v-if="error" type="error" :show-icon="false">{{ error }}</NAlert>
+    <NAlert v-if="error" type="error" :show-icon="false" style="margin-bottom:8px">{{ error }}</NAlert>
     <NEmpty v-else-if="!loading && data.length === 0" description="No contacts tagged for this list." />
     <NDataTable
       v-else
       :columns="columns"
       :data="filtered"
-      :scroll-x="1960"
+      :scroll-x="2000"
       :row-key="(r: LeaderRecord) => r.uuid"
+      v-model:checked-row-keys="checkedKeys"
       :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"
       :loading="loading"
     />

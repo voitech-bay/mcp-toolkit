@@ -4,10 +4,10 @@
  *
  * Read-only. Joins existing tables/views only:
  *   Contacts (tags jsonb of GetSalesTags uuids) → identity + pipeline stage,
- *   PipelineStages (status label/category), companies (HQ location + employee count),
+ *   PipelineStages (status label/category), companies (HQ location),
  *   company_workflow_latest / n8n_workflow_results (POV: phase_b_company),
  *   FlowLeads + Flows (automations enrolled), LinkedinMessages (out/replies,
- *   connection state, email count). Marker derivation reuses account-context helpers.
+ *   connection state). Marker derivation reuses account-context helpers.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -29,7 +29,7 @@ const PHASE_B_WORKFLOW = "phase_b_company";
 
 type Json = Record<string, unknown>;
 
-/** A message row plus linkedin_type and subject, used to detect connection + email events. */
+/** A message row plus linkedin_type, used to detect connection-request events. */
 interface ListMessageRow extends MessageRow {
   linkedin_type: string | null;
   reply_received: boolean | null;
@@ -67,46 +67,6 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v : null;
 }
 
-/**
- * Parse a location value that may be a JSON string {"city":"..","country":".."}
- * or a plain-text address. Returns "City, Country" or null.
- */
-function parseCityCountry(loc: unknown): string | null {
-  if (!loc) return null;
-  if (typeof loc === "string") {
-    if (loc.trim().startsWith("{")) {
-      try {
-        const parsed = JSON.parse(loc) as Json;
-        const city = str(parsed.city);
-        const country = str(parsed.country);
-        return [city, country].filter(Boolean).join(", ") || null;
-      } catch {
-        // fall through to return raw
-      }
-    }
-    return loc.trim() || null;
-  }
-  if (typeof loc === "object" && loc !== null) {
-    const o = loc as Json;
-    const city = str(o.city);
-    const country = str(o.country);
-    return [city, country].filter(Boolean).join(", ") || null;
-  }
-  return null;
-}
-
-/** Ensure a LinkedIn value becomes a full https URL. */
-function normalizeLinkedinUrl(raw: unknown): string | null {
-  const s = str(raw);
-  if (!s) return null;
-  if (s.startsWith("http")) return s;
-  if (s.startsWith("linkedin.com")) return `https://www.${s}`;
-  if (s.startsWith("www.linkedin.com")) return `https://${s}`;
-  // bare handle: in/username or just username
-  if (s.startsWith("in/")) return `https://www.linkedin.com/${s}`;
-  return `https://www.linkedin.com/in/${s}`;
-}
-
 /** Map a GetSales pipeline-stage name to the rep-facing status, else derive from activity. */
 function deriveStatus(stageName: string | null, outgoing: number, replyStatus: string): string {
   if (stageName) {
@@ -136,6 +96,38 @@ function arrField(result: Json | undefined, ...keys: string[]): string[] {
   return [];
 }
 
+/** Parse location stored as JSON string {"city":"X","country":"Y",...} or plain text. */
+function parseCityCountry(loc: unknown): string | null {
+  if (!loc) return null;
+  if (typeof loc === "string") {
+    if (loc.trim().startsWith("{")) {
+      try {
+        const parsed = JSON.parse(loc) as Json;
+        const city = str(parsed.city);
+        const country = str(parsed.country);
+        return [city, country].filter(Boolean).join(", ") || null;
+      } catch { /* not JSON */ }
+    }
+    return loc.trim() || null;
+  }
+  if (typeof loc === "object" && loc !== null) {
+    const o = loc as Json;
+    return [str(o.city), str(o.country)].filter(Boolean).join(", ") || null;
+  }
+  return null;
+}
+
+/** Normalize a partial LinkedIn path/URL to a full https URL. */
+function normalizeLinkedinUrl(raw: unknown): string | null {
+  const s = str(raw);
+  if (!s) return null;
+  if (s.startsWith("http")) return s;
+  if (s.startsWith("linkedin.com")) return `https://www.${s}`;
+  if (s.startsWith("www.linkedin.com")) return `https://${s}`;
+  if (s.startsWith("in/")) return `https://www.linkedin.com/${s}`;
+  return `https://www.linkedin.com/in/${s}`;
+}
+
 export async function buildLeadersList(
   client: SupabaseClient,
   tagUuid: string
@@ -146,7 +138,7 @@ export async function buildLeadersList(
   const { data: contacts, error: cErr } = await client
     .from(CONTACTS_TABLE)
     .select(
-      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, company_id, company_uuid, company_name, pipeline_stage_uuid"
+      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, gs_connection_accepted_at, markers_synced_at"
     )
     // tags is a jsonb array of GetSalesTags uuids → containment needs a JSON string,
     // not a JS array (which supabase-js would serialize as a PostgREST array literal).
@@ -172,10 +164,7 @@ export async function buildLeadersList(
       ? client.from(PIPELINE_STAGES_TABLE).select("uuid, name, category").in("uuid", stageUuids)
       : Promise.resolve({ data: [], error: null }),
     companyIds.length
-      ? client
-          .from(COMPANIES_TABLE)
-          .select("id, name, hq_location, hq_raw_address, employees_on_linkedin, employees_range")
-          .in("id", companyIds)
+      ? client.from(COMPANIES_TABLE).select("id, name, hq_location, hq_raw_address, employees_on_linkedin, employees_range").in("id", companyIds)
       : Promise.resolve({ data: [], error: null }),
     companyIds.length
       ? client
@@ -207,7 +196,6 @@ export async function buildLeadersList(
   const companyById = new Map<string, { name: string | null; hq: string | null; employee_count: number | null }>();
   for (const c of ((companiesRes as { data: Json[] }).data ?? []) as Json[]) {
     let hq: string | null = null;
-    // prefer jsonb hq_location → city, country
     if (c.hq_location && typeof c.hq_location === "object") {
       const loc = c.hq_location as Json;
       hq = [str(loc.city), str(loc.country)].filter(Boolean).join(", ") || null;
@@ -274,9 +262,8 @@ export async function buildLeadersList(
     const replies = activity?.inbox_count ?? 0;
     const replyStatus = activity?.reply_status ?? "no_response";
 
-    // Connection state: any linkedin_type='message' means the connection was accepted
-    // (LinkedIn only allows messaging 1st-degree connections). A lone connection_note
-    // with no subsequent message means the request was sent but not yet accepted.
+    // Connection state: any linkedin_type='message' = accepted (you can only message
+    // 1st-degree connections). A lone connection_note with no subsequent message = sent.
     const hasMessage = leadMsgs.some((m) => (m.linkedin_type ?? "") === "message");
     const sentConn = leadMsgs.some((m) => (m.linkedin_type ?? "") === "connection_note");
     const connection_status: LeaderListRecord["connection_status"] = hasMessage
@@ -285,19 +272,22 @@ export async function buildLeadersList(
         ? "sent"
         : "none";
 
-    // Accepted-at: earliest message-type message (could be outbox OR inbox)
+    // Accepted-at: prefer GS-synced value (accurate); fall back to earliest message-type msg.
+    const gsAcceptedAt = str(r.gs_connection_accepted_at);
     const messageDates = leadMsgs
       .filter((m) => (m.linkedin_type ?? "") === "message")
       .map((m) => m.sent_at ?? m.created_at ?? "")
       .filter(Boolean)
       .sort();
-    const connection_accepted_at = messageDates.length ? messageDates[0] : null;
+    const connection_accepted_at = gsAcceptedAt ?? (messageDates.length ? messageDates[0] : null);
 
-    // Email count: messages with a subject set (GetSales email sequences have subjects;
-    // LinkedIn messages do not).
-    const email_count = leadMsgs.filter(
-      (m) => m.subject && m.subject.trim() && (m.type ?? "").toLowerCase() === "outbox"
-    ).length;
+    // Email count: prefer GS-synced value; fall back to subject-bearing outbox msgs.
+    const email_count =
+      typeof r.email_sent_count === "number"
+        ? r.email_sent_count
+        : leadMsgs.filter(
+            (m) => m.subject && m.subject.trim() && (m.type ?? "").toLowerCase() === "outbox"
+          ).length;
 
     const name =
       str(r.name) ?? ([str(r.first_name), str(r.last_name)].filter(Boolean).join(" ").trim() || "—");

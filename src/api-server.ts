@@ -126,8 +126,9 @@ import {
   handlePostCompanySummary,
   handleGetTaggedList,
   handlePutContactMeta,
+  handlePostSyncMarkers,
+  handlePostRemoveFromList,
 } from "./card-handlers.js";
-import { handlePostReplyGenerate, handlePostReplySend } from "./reply-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -725,14 +726,14 @@ const server = createServer(async (req, res) => {
       case "/api/lists/tagged":
         await handleGetTaggedList(req, res);
         return;
+      case "/api/lists/tagged/remove":
+        await handlePostRemoveFromList(req, res);
+        return;
       case "/api/contacts/meta":
         await handlePutContactMeta(req, res);
         return;
-      case "/api/reply/generate":
-        await handlePostReplyGenerate(req, res);
-        return;
-      case "/api/reply/send":
-        await handlePostReplySend(req, res);
+      case "/api/contacts/sync-markers":
+        await handlePostSyncMarkers(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {
