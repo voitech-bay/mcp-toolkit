@@ -16,6 +16,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { ApiCredentials } from "./source-api.js";
 
 const CONTACTS_TABLE = "Contacts";
+export const MSSP_LEADERS_TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
 
 interface GsMarker {
   sender_profile_uuid: string | null;
