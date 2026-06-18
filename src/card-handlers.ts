@@ -19,7 +19,7 @@ import {
 } from "./services/account-context.js";
 import { buildLeadersList } from "./services/leaders-list.js";
 import { syncMarkersForContacts } from "./services/getsales-markers.js";
-import { CONTACTS_TABLE } from "./services/supabase.js";
+import { CONTACTS_TABLE, getGetSalesCredentials } from "./services/supabase.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
 
 const SUMMARY_MODEL = () => process.env.ACCOUNT_SUMMARY_MODEL?.trim() || "google/gemma-4-31b-it";
@@ -75,6 +75,13 @@ export async function handleGetCompanyCard(req: IncomingMessage, res: ServerResp
   if (!UUID_RE.test(id)) return sendJson(res, 400, { error: "id must be a UUID" });
   const { data, error } = await buildCompanyCard(client, id);
   if (error) return sendJson(res, error === "Company not found" ? 404 : 500, { error });
+  const tag = queryParam(req, "tag");
+  if (tag && UUID_RE.test(tag)) {
+    const list = await buildLeadersList(client, tag);
+    if (list.error) return sendJson(res, 500, { error: list.error });
+    const listRecords = list.data.filter((row) => row.company_id === id);
+    return sendJson(res, 200, { ...data, list_records: listRecords, list_tag: tag });
+  }
   sendJson(res, 200, data);
 }
 
@@ -215,18 +222,20 @@ export async function handlePutContactMeta(req: IncomingMessage, res: ServerResp
 }
 
 // --- POST /api/contacts/sync-markers { tag?, uuids? } -------------------------
-// Syncs GetSales lead markers (email counts, connection date) into Contacts columns.
+// Syncs GetSales lead markers (email counts, connection date) into Contacts columns
+// using the selected project's encrypted GetSales integration secret.
 // Accepts either a tag UUID (syncs all tagged contacts) or an explicit uuids array.
 export async function handlePostSyncMarkers(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
   const client = getSupabase();
   if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
 
-  const apiKey = process.env.GETSALES_FEASIBLE_API_KEY?.trim() ?? "";
-  const teamId = process.env.GETSALES_FEASIBLE_TEAM_ID?.trim() ?? "";
-  if (!apiKey || !teamId) return sendJson(res, 500, { error: "GetSales credentials not configured" });
-
   const body = await readJsonBody(req);
+  const projectId = typeof body.projectId === "string" ? body.projectId.trim() : "";
+  if (!UUID_RE.test(projectId)) return sendJson(res, 400, { error: "projectId must be a UUID" });
+  const credentialsResult = await getGetSalesCredentials(client, projectId);
+  if (credentialsResult.error) return sendJson(res, 500, { error: credentialsResult.error });
+  if (!credentialsResult.credentials) return sendJson(res, 500, { error: "GetSales credentials not configured for project" });
   let uuids: string[] = [];
 
   if (typeof body.tag === "string" && UUID_RE.test(body.tag)) {
@@ -244,7 +253,7 @@ export async function handlePostSyncMarkers(req: IncomingMessage, res: ServerRes
   if (!uuids.length) return sendJson(res, 400, { error: "Provide tag (UUID) or uuids (array of UUIDs)" });
   if (uuids.length > 500) return sendJson(res, 400, { error: "Batch too large (max 500)" });
 
-  const result = await syncMarkersForContacts(client, uuids, apiKey, teamId);
+  const result = await syncMarkersForContacts(client, uuids, credentialsResult.credentials);
   sendJson(res, 200, { ok: true, total: uuids.length, ...result });
 }
 

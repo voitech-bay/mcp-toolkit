@@ -216,8 +216,16 @@ export async function getGetSalesCredentials(
   if (secretError) return { credentials: null, error: secretError };
   const secretBaseUrl = pickSecretString(secret, "base_url", "baseUrl");
   const secretApiKey = pickSecretString(secret, "api_key", "apiKey");
+  const secretTeamId = pickSecretString(secret, "team_id", "teamId");
   if (secretBaseUrl && secretApiKey) {
-    return { credentials: { baseUrl: secretBaseUrl.replace(/\/$/, ""), apiKey: secretApiKey }, error: null };
+    return {
+      credentials: {
+        baseUrl: secretBaseUrl.replace(/\/$/, ""),
+        apiKey: secretApiKey,
+        ...(secretTeamId ? { teamId: secretTeamId } : {}),
+      },
+      error: null,
+    };
   }
 
   const { data: project, error: projectError } = await getProjectById(client, projectId);
@@ -228,7 +236,11 @@ export async function getGetSalesCredentials(
   const legacyApiKey = project.source_api_key ?? process.env.SOURCE_API_KEY;
   if (!legacyBaseUrl || !legacyApiKey) return { credentials: null, error: null };
   return {
-    credentials: { baseUrl: legacyBaseUrl.replace(/\/$/, ""), apiKey: legacyApiKey },
+    credentials: {
+      baseUrl: legacyBaseUrl.replace(/\/$/, ""),
+      apiKey: legacyApiKey,
+      ...(process.env.SOURCE_TEAM_ID?.trim() ? { teamId: process.env.SOURCE_TEAM_ID.trim() } : {}),
+    },
     error: null,
   };
 }

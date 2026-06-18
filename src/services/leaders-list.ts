@@ -59,7 +59,7 @@ export interface LeaderListRecord {
   automations: string[];
   outgoing_count: number;
   reply_count: number;
-  email_count: number;
+  email_count: number | null;
   status: string;
 }
 
@@ -126,6 +126,19 @@ function normalizeLinkedinUrl(raw: unknown): string | null {
   if (s.startsWith("www.linkedin.com")) return `https://${s}`;
   if (s.startsWith("in/")) return `https://www.linkedin.com/${s}`;
   return `https://www.linkedin.com/in/${s}`;
+}
+
+/** A zero from the app-maintained columns is real only after marker sync ran. */
+export function resolveEmailCount(
+  syncedAt: unknown,
+  storedCount: unknown,
+  messages: MessageRow[]
+): number | null {
+  if (str(syncedAt) && typeof storedCount === "number") return storedCount;
+  const localCount = messages.filter(
+    (m) => m.subject && m.subject.trim() && (m.type ?? "").toLowerCase() === "outbox"
+  ).length;
+  return localCount > 0 ? localCount : null;
 }
 
 export async function buildLeadersList(
@@ -281,13 +294,8 @@ export async function buildLeadersList(
       .sort();
     const connection_accepted_at = gsAcceptedAt ?? (messageDates.length ? messageDates[0] : null);
 
-    // Email count: prefer GS-synced value; fall back to subject-bearing outbox msgs.
-    const email_count =
-      typeof r.email_sent_count === "number"
-        ? r.email_sent_count
-        : leadMsgs.filter(
-            (m) => m.subject && m.subject.trim() && (m.type ?? "").toLowerCase() === "outbox"
-          ).length;
+    // A database default of zero is not evidence. Trust it only after marker sync.
+    const email_count = resolveEmailCount(r.markers_synced_at, r.email_sent_count, leadMsgs);
 
     const name =
       str(r.name) ?? ([str(r.first_name), str(r.last_name)].filter(Boolean).join(" ").trim() || "—");
