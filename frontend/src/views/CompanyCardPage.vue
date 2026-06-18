@@ -90,6 +90,20 @@ const nameByLead = computed(() => {
   return m;
 });
 
+/** City, Country from hq_location jsonb or hq_raw_address fallback. */
+const companyHq = computed<string | null>(() => {
+  const loc = company.value.hq_location;
+  if (loc && typeof loc === "object") {
+    const o = loc as Json;
+    const city = typeof o.city === "string" ? o.city : null;
+    const country = typeof o.country === "string" ? o.country : null;
+    const r = [city, country].filter(Boolean).join(", ");
+    if (r) return r;
+  }
+  const raw = company.value.hq_raw_address;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+});
+
 function fmtDate(s: unknown): string {
   if (typeof s !== "string" || !s) return "";
   try {
@@ -232,7 +246,7 @@ watch(companyId, load);
         <NSpace align="center" justify="space-between" wrap>
           <div>
             <h2 style="margin: 0">{{ company.name || company.domain }}</h2>
-            <NSpace size="small" align="center" style="margin-top: 4px" wrap>
+            <NSpace size="small" align="center" style="margin-top: 6px" wrap>
               <a
                 v-if="company.domain"
                 :href="String(company.website || `https://${company.domain}`)"
@@ -241,8 +255,11 @@ watch(companyId, load);
                 class="card-link"
               >{{ company.domain }} ↗</a>
               <NTag v-if="company.industry" size="small">{{ company.industry }}</NTag>
-              <NTag v-if="company.employees_range" size="small">{{ company.employees_range }} employees</NTag>
-              <NText v-if="company.hq_location" depth="3" style="font-size: 0.85rem">{{ company.hq_location }}</NText>
+              <NTag v-if="company.employees_on_linkedin" size="small" type="info">
+                {{ Number(company.employees_on_linkedin).toLocaleString() }} employees on LinkedIn
+              </NTag>
+              <NTag v-else-if="company.employees_range" size="small">{{ company.employees_range }} employees</NTag>
+              <NText v-if="companyHq" depth="3" style="font-size: 0.85rem">{{ companyHq }}</NText>
             </NSpace>
           </div>
         </NSpace>

@@ -16,10 +16,20 @@ import {
   NDivider,
   NDrawer,
   NDrawerContent,
+  NSelect,
   useMessage,
 } from "naive-ui";
 
 type Json = Record<string, unknown>;
+
+interface ExperienceEntry {
+  company_name: string | null;
+  position: string | null;
+  employment_type: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  description: string | null;
+}
 
 interface Thread {
   conversation_uuid: string;
@@ -29,8 +39,23 @@ interface Thread {
   last_message_at: string | null;
   last_message_text: string | null;
   reply_status: string;
-  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject: string | null }>;
+  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject: string | null; linkedin_type?: string | null }>;
 }
+
+const CATEGORY_OPTIONS = [
+  { label: "Founder / CEO", value: "Founder/CEO" },
+  { label: "Business Leader", value: "Business Leader" },
+  { label: "Technical Leader", value: "Technical Leader" },
+  { label: "Engineer", value: "Engineer" },
+  { label: "Sales", value: "Sales" },
+  { label: "Other", value: "Other" },
+];
+const PRIORITY_OPTIONS = [
+  { label: "Top", value: "Top" },
+  { label: "High", value: "High" },
+  { label: "Medium", value: "Medium" },
+  { label: "Low", value: "Low" },
+];
 
 const route = useRoute();
 const router = useRouter();
@@ -45,6 +70,7 @@ const runningResearch = ref(false);
 const rawDrawerOpen = ref(false);
 const rawDrawerTitle = ref("");
 const rawDrawerJson = ref("");
+const savingMeta = ref(false);
 
 const contactUuid = computed(() => String(route.params.uuid ?? ""));
 const contact = computed<Json>(() => (card.value?.contact as Json) ?? {});
@@ -55,6 +81,9 @@ const threads = computed<Thread[]>(() => (card.value?.conversations as Thread[])
 const contextEntries = computed<Json[]>(() => (card.value?.context_entries as Json[]) ?? []);
 const generatedMessages = computed<Json[]>(() => (card.value?.generated_messages as Json[]) ?? []);
 
+const leadCategory = ref<string | null>(null);
+const priority = ref<string | null>(null);
+
 const displayName = computed(() => {
   const c = contact.value;
   return (
@@ -62,6 +91,47 @@ const displayName = computed(() => {
     [c.first_name, c.last_name].filter((x) => typeof x === "string" && x).join(" ") ||
     contactUuid.value.slice(0, 8)
   );
+});
+
+/** Parse experience JSON string from Contacts.experience */
+const parsedExperience = computed<ExperienceEntry[]>(() => {
+  const raw = contact.value.experience;
+  if (!raw || typeof raw !== "string") return [];
+  try {
+    const arr = JSON.parse(raw) as unknown;
+    if (!Array.isArray(arr)) return [];
+    return arr as ExperienceEntry[];
+  } catch {
+    return [];
+  }
+});
+
+/** Latest experience entry at the current target company. */
+const targetExperience = computed<ExperienceEntry | null>(() => {
+  if (!parsedExperience.value.length) return null;
+  const companyName = (company.value?.name as string | null) ?? (contact.value.company_name as string | null) ?? "";
+  if (!companyName) return parsedExperience.value[0] ?? null;
+  const match = parsedExperience.value.find(
+    (e) => e.company_name && companyName.toLowerCase().includes(e.company_name.toLowerCase())
+  ) ?? parsedExperience.value[0];
+  return match ?? null;
+});
+
+/** Connection status derived from messages: any linkedin_type='message' = accepted. */
+const connectionStatus = computed<"accepted" | "sent" | "none">(() => {
+  const allMsgs = threads.value.flatMap((t) => t.messages);
+  const hasMsg = allMsgs.some((m) => (m.linkedin_type ?? "") === "message");
+  if (hasMsg) return "accepted";
+  const hasSentConn = allMsgs.some((m) => (m.linkedin_type ?? "") === "connection_note");
+  return hasSentConn ? "sent" : "none";
+});
+
+/** Aggregate reply status across all threads. */
+const overallReplyStatus = computed<string>(() => {
+  const statuses = threads.value.map((t) => t.reply_status);
+  if (statuses.includes("got_response")) return "got_response";
+  if (statuses.includes("waiting_for_response")) return "waiting_for_response";
+  return "no_response";
 });
 
 function fmtDate(s: unknown): string {
@@ -73,13 +143,27 @@ function fmtDate(s: unknown): string {
   }
 }
 
-function statusType(s: string): "default" | "success" | "warning" {
+function fmtYear(s: string | null): string {
+  if (!s) return "";
+  try {
+    return new Date(s).getFullYear().toString();
+  } catch {
+    return "";
+  }
+}
+
+function replyStatusType(s: string): "default" | "success" | "warning" {
   if (s === "got_response") return "success";
   if (s === "waiting_for_response") return "warning";
   return "default";
 }
 
-/** Top-level scalar fields of an n8n result, for the organized key-value view. */
+function connTagType(s: string): "default" | "success" | "warning" {
+  if (s === "accepted") return "success";
+  if (s === "sent") return "warning";
+  return "default";
+}
+
 function scalarFields(result: unknown): Array<[string, string]> {
   if (!result || typeof result !== "object") return [];
   const skip = new Set(["full_json", "clean_full_json", "lead", "row_data", "workflow_context", "experience", "posts"]);
@@ -109,11 +193,31 @@ async function load() {
     const data = (await r.json()) as Json & { error?: string };
     if (!r.ok) throw new Error(data.error ?? "Failed to load");
     card.value = data;
+    leadCategory.value = (data.contact as Json)?.lead_category as string | null ?? null;
+    priority.value = (data.contact as Json)?.priority as string | null ?? null;
   } catch (e) {
     loadError.value = e instanceof Error ? e.message : "Failed to load";
     card.value = null;
   } finally {
     loading.value = false;
+  }
+}
+
+async function saveMeta() {
+  savingMeta.value = true;
+  try {
+    const r = await fetch(`/api/contacts/meta?uuid=${encodeURIComponent(contactUuid.value)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ lead_category: leadCategory.value, priority: priority.value }),
+    });
+    const data = (await r.json()) as { error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed");
+    message.success("Saved.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to save");
+  } finally {
+    savingMeta.value = false;
   }
 }
 
@@ -175,8 +279,13 @@ watch(contactUuid, load);
             </NAvatar>
             <div>
               <h2 style="margin: 0">{{ displayName }}</h2>
-              <NText depth="3">{{ contact.position || contact.headline || "" }}</NText>
-              <div style="margin-top: 4px">
+              <div style="margin-top: 2px">
+                <NText depth="2" style="font-size:0.95rem;font-weight:500">{{ contact.position || "—" }}</NText>
+              </div>
+              <div v-if="contact.headline && contact.headline !== contact.position" style="margin-top: 2px">
+                <NText depth="3" style="font-size:0.85rem">{{ contact.headline }}</NText>
+              </div>
+              <div style="margin-top: 6px">
                 <router-link
                   v-if="company"
                   :to="`/company/${company.id}`"
@@ -184,8 +293,8 @@ watch(contactUuid, load);
                 >{{ company.name || company.domain }}</router-link>
                 <NText v-else-if="contact.company_name" depth="3">{{ contact.company_name }} (unlinked)</NText>
                 <a
-                  v-if="contact.linkedin"
-                  :href="String(contact.linkedin).startsWith('http') ? String(contact.linkedin) : `https://www.linkedin.com/in/${contact.linkedin}`"
+                  v-if="contact.linkedin_url || contact.linkedin"
+                  :href="String(contact.linkedin_url || contact.linkedin).startsWith('http') ? String(contact.linkedin_url || contact.linkedin) : `https://www.linkedin.com/in/${contact.linkedin_url || contact.linkedin}`"
                   target="_blank"
                   rel="noopener"
                   class="card-link"
@@ -200,12 +309,45 @@ watch(contactUuid, load);
           </NSpace>
         </NSpace>
         <NDivider style="margin: 12px 0" />
+        <!-- Status badges row -->
         <NSpace size="small" wrap>
-          <NTag v-if="contact.status" size="small">{{ contact.status }}</NTag>
+          <NTag size="small" :type="connTagType(connectionStatus)">{{ connectionStatus === 'accepted' ? 'Connected' : connectionStatus === 'sent' ? 'Connection sent' : 'Not connected' }}</NTag>
+          <NTag size="small" :type="replyStatusType(overallReplyStatus)">{{ overallReplyStatus.replace(/_/g, ' ') }}</NTag>
           <NTag v-if="contact.email_status" size="small">email: {{ contact.email_status }}</NTag>
           <NTag v-if="contact.work_email" size="small" type="info">{{ contact.work_email }}</NTag>
           <NText depth="3" style="font-size: 0.8rem">synced {{ fmtDate(contact.updated_at) }}</NText>
         </NSpace>
+        <NDivider style="margin: 12px 0" />
+        <!-- Editable: Category + Priority -->
+        <NSpace size="small" align="center" wrap>
+          <NSelect
+            v-model:value="leadCategory"
+            :options="CATEGORY_OPTIONS"
+            placeholder="Category"
+            clearable
+            size="small"
+            style="width: 180px"
+          />
+          <NSelect
+            v-model:value="priority"
+            :options="PRIORITY_OPTIONS"
+            placeholder="Priority"
+            clearable
+            size="small"
+            style="width: 130px"
+          />
+          <NButton size="small" type="primary" :loading="savingMeta" @click="saveMeta">Save</NButton>
+        </NSpace>
+      </NCard>
+
+      <!-- Profile snapshot (experience at target company) -->
+      <NCard v-if="targetExperience" title="Profile" size="small">
+        <div style="font-weight:600;margin-bottom:4px">{{ targetExperience.position }}</div>
+        <NText depth="3" style="font-size:0.82rem">
+          {{ targetExperience.company_name }}
+          <template v-if="targetExperience.start_date"> · {{ fmtYear(targetExperience.start_date) }}–{{ targetExperience.end_date ? fmtYear(targetExperience.end_date) : 'present' }}</template>
+        </NText>
+        <div v-if="targetExperience.description" style="margin-top:8px;font-size:0.85rem;white-space:pre-wrap">{{ targetExperience.description }}</div>
       </NCard>
 
       <!-- Research -->
@@ -245,7 +387,7 @@ watch(contactUuid, load);
           >
             <template #header>
               <NSpace align="center" size="small">
-                <NTag size="tiny" :type="statusType(t.reply_status)">{{ t.reply_status }}</NTag>
+                <NTag size="tiny" :type="replyStatusType(t.reply_status)">{{ t.reply_status }}</NTag>
                 <span>{{ t.message_count }} msgs · {{ fmtDate(t.last_message_at) }}</span>
                 <NText depth="3" style="font-size: 0.8rem">{{ (t.last_message_text || "").slice(0, 70) }}</NText>
               </NSpace>

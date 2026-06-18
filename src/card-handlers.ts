@@ -179,5 +179,35 @@ export async function handlePostCompanySummary(req: IncomingMessage, res: Server
   sendJson(res, 200, { account_summary: entry, account_summary_stale: false });
 }
 
+// --- PUT /api/contacts/:uuid/meta { lead_category?, priority? } ---------------
+// Saves editable metadata fields (category + priority) for a contact.
+export async function handlePutContactMeta(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "PUT") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+  const uuid = queryParam(req, "uuid");
+  if (!UUID_RE.test(uuid)) return sendJson(res, 400, { error: "uuid must be a UUID" });
+  const body = await readJsonBody(req);
+  const patch: Record<string, string | null> = {};
+  const CATEGORY_VALUES = ["Founder/CEO", "Business Leader", "Technical Leader", "Engineer", "Sales", "Other"] as const;
+  const PRIORITY_VALUES = ["Top", "High", "Medium", "Low"] as const;
+  if ("lead_category" in body) {
+    const v = body.lead_category;
+    if (v !== null && !CATEGORY_VALUES.includes(v as (typeof CATEGORY_VALUES)[number]))
+      return sendJson(res, 400, { error: `lead_category must be one of: ${CATEGORY_VALUES.join(", ")} or null` });
+    patch.lead_category = v == null ? null : String(v);
+  }
+  if ("priority" in body) {
+    const v = body.priority;
+    if (v !== null && !PRIORITY_VALUES.includes(v as (typeof PRIORITY_VALUES)[number]))
+      return sendJson(res, 400, { error: `priority must be one of: ${PRIORITY_VALUES.join(", ")} or null` });
+    patch.priority = v == null ? null : String(v);
+  }
+  if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No updatable fields in body" });
+  const { error } = await client.from("Contacts").update(patch).eq("uuid", uuid);
+  if (error) return sendJson(res, 500, { error: error.message });
+  sendJson(res, 200, { ok: true });
+}
+
 // re-export for tests
 export type { MessageRow };

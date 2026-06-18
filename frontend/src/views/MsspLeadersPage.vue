@@ -7,7 +7,6 @@ import type { DataTableColumns } from "naive-ui";
 import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 
-// "MSSP Leaders in MENA" GetSalesTags uuid (membership marker).
 const TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
 
 interface LeaderRecord {
@@ -22,7 +21,7 @@ interface LeaderRecord {
   company_id: string | null;
   company_name: string | null;
   company_hq: string | null;
-  description: string | null;
+  employee_count: number | null;
   pov_markdown: string | null;
   company_type: string | null;
   services: string[];
@@ -32,6 +31,7 @@ interface LeaderRecord {
   automations: string[];
   outgoing_count: number;
   reply_count: number;
+  email_count: number;
   status: string;
 }
 
@@ -96,67 +96,72 @@ const statusType = (s: string) => {
   return "default";
 };
 function fmtDate(s: string | null): string {
-  if (!s) return "N/A";
+  if (!s) return "—";
   const d = new Date(s);
-  return isNaN(d.getTime()) ? "N/A" : d.toLocaleDateString();
+  return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
 }
 
 const columns = computed<DataTableColumns<LeaderRecord>>(() => [
   {
-    title: "", key: "linkedin", width: 40,
+    title: "", key: "linkedin", width: 36,
     render: (row) =>
       row.linkedin_url
-        ? h("a", { href: row.linkedin_url, target: "_blank", rel: "noopener", title: "Open LinkedIn", style: "color:#0a66c2;display:inline-flex" },
+        ? h("a", { href: row.linkedin_url, target: "_blank", rel: "noopener noreferrer", title: "Open LinkedIn", style: "color:#0a66c2;display:inline-flex;align-items:center" },
             h(LinkedinIcon, { size: 16 }))
         : "",
   },
   {
-    title: "Name", key: "name", width: 170, fixed: "left", ellipsis: { tooltip: true },
+    title: "Name", key: "name", width: 160, fixed: "left", ellipsis: { tooltip: true },
     sorter: (a, b) => a.name.localeCompare(b.name),
     render: (row) => h(RouterLink, { to: `/contact/${row.uuid}`, style: "color:#2080f0;text-decoration:none" }, { default: () => row.name }),
   },
   { title: "Title", key: "position", width: 190, ellipsis: { tooltip: true }, render: (r) => r.position ?? "—" },
   {
-    title: "Company", key: "company_name", width: 180, ellipsis: { tooltip: true },
+    title: "Company", key: "company_name", width: 170, ellipsis: { tooltip: true },
     sorter: (a, b) => (a.company_name ?? "").localeCompare(b.company_name ?? ""),
     render: (row) =>
       row.company_id
         ? h(RouterLink, { to: `/company/${row.company_id}`, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name ?? "—" })
         : (row.company_name ?? "—"),
   },
-  { title: "Location", key: "location", width: 130, ellipsis: { tooltip: true }, render: (r) => r.location ?? "—" },
-  { title: "Company HQ", key: "company_hq", width: 150, ellipsis: { tooltip: true }, render: (r) => r.company_hq ?? "—" },
+  { title: "Location", key: "location", width: 140, ellipsis: { tooltip: true }, render: (r) => r.location ?? "—" },
+  { title: "Company HQ", key: "company_hq", width: 140, ellipsis: { tooltip: true }, render: (r) => r.company_hq ?? "—" },
   {
-    title: "Type", key: "company_type", width: 130, ellipsis: { tooltip: true },
+    title: "Employees", key: "employee_count", width: 100,
+    sorter: (a, b) => (a.employee_count ?? 0) - (b.employee_count ?? 0),
+    render: (r) => r.employee_count != null ? r.employee_count.toLocaleString() : "—",
+  },
+  {
+    title: "Type", key: "company_type", width: 120, ellipsis: { tooltip: true },
     render: (r) => (r.company_type ? h(NTag, { size: "small", bordered: false, type: "info" }, { default: () => r.company_type }) : "—"),
   },
-  { title: "Description", key: "description", width: 240, ellipsis: { tooltip: true }, render: (r) => r.description ?? "—" },
   {
     title: "Connection", key: "connection_status", width: 110,
     sorter: (a, b) => a.connection_status.localeCompare(b.connection_status),
     render: (r) => h(NTag, { size: "small", bordered: false, type: connType(r.connection_status) }, { default: () => r.connection_status }),
   },
-  { title: "Accepted", key: "connection_accepted_at", width: 100, render: (r) => fmtDate(r.connection_accepted_at) },
+  { title: "Accepted", key: "connection_accepted_at", width: 96, render: (r) => fmtDate(r.connection_accepted_at) },
   {
     title: "Automations", key: "automations", width: 160, ellipsis: { tooltip: true },
     render: (r) => (r.automations.length ? r.automations.join(", ") : "—"),
   },
-  { title: "Out", key: "outgoing_count", width: 64, sorter: (a, b) => a.outgoing_count - b.outgoing_count, render: (r) => r.outgoing_count },
-  { title: "Replies", key: "reply_count", width: 74, sorter: (a, b) => a.reply_count - b.reply_count, render: (r) => r.reply_count },
+  { title: "Out", key: "outgoing_count", width: 60, sorter: (a, b) => a.outgoing_count - b.outgoing_count, render: (r) => r.outgoing_count },
+  { title: "Replies", key: "reply_count", width: 70, sorter: (a, b) => a.reply_count - b.reply_count, render: (r) => r.reply_count },
+  { title: "Emails", key: "email_count", width: 68, sorter: (a, b) => a.email_count - b.email_count, render: (r) => r.email_count },
   {
     title: "Status", key: "status", width: 160, ellipsis: { tooltip: true },
     sorter: (a, b) => a.status.localeCompare(b.status),
     render: (r) => h(NTag, { size: "small", bordered: false, type: statusType(r.status) }, { default: () => r.status }),
   },
   {
-    title: "Actions", key: "actions", width: 150, fixed: "right",
+    title: "Actions", key: "actions", width: 120, fixed: "right",
     render: (row) =>
       h(NSpace, { size: 4, wrap: false }, {
         default: () => [
           h(NTooltip, null, {
             trigger: () => h(RouterLink, { to: `/contact/${row.uuid}` },
               { default: () => h(NButton, { size: "tiny", type: "primary", secondary: true }, { icon: () => h(IdCardIcon, { size: 14 }), default: () => "POV" }) }),
-            default: () => "Open POV card",
+            default: () => "Open contact card",
           }),
           h(NTooltip, null, {
             trigger: () => h(RouterLink, { to: { path: "/conversations", query: { search: row.name } } },
@@ -195,7 +200,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       v-else
       :columns="columns"
       :data="filtered"
-      :scroll-x="2050"
+      :scroll-x="1960"
       :row-key="(r: LeaderRecord) => r.uuid"
       :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"
       :loading="loading"

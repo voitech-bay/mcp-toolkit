@@ -125,7 +125,9 @@ import {
   handleGetCompanyCard,
   handlePostCompanySummary,
   handleGetTaggedList,
+  handlePutContactMeta,
 } from "./card-handlers.js";
+import { handlePostReplyGenerate, handlePostReplySend } from "./reply-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -722,6 +724,15 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/lists/tagged":
         await handleGetTaggedList(req, res);
+        return;
+      case "/api/contacts/meta":
+        await handlePutContactMeta(req, res);
+        return;
+      case "/api/reply/generate":
+        await handlePostReplyGenerate(req, res);
+        return;
+      case "/api/reply/send":
+        await handlePostReplySend(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {

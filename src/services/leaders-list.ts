@@ -4,10 +4,10 @@
  *
  * Read-only. Joins existing tables/views only:
  *   Contacts (tags jsonb of GetSalesTags uuids) → identity + pipeline stage,
- *   PipelineStages (status label/category), companies (HQ location),
+ *   PipelineStages (status label/category), companies (HQ location + employee count),
  *   company_workflow_latest / n8n_workflow_results (POV: phase_b_company),
  *   FlowLeads + Flows (automations enrolled), LinkedinMessages (out/replies,
- *   connection state). Marker derivation reuses account-context helpers.
+ *   connection state, email count). Marker derivation reuses account-context helpers.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
 import {
@@ -29,7 +29,7 @@ const PHASE_B_WORKFLOW = "phase_b_company";
 
 type Json = Record<string, unknown>;
 
-/** A message row plus linkedin_type, used to detect connection-request events. */
+/** A message row plus linkedin_type and subject, used to detect connection + email events. */
 interface ListMessageRow extends MessageRow {
   linkedin_type: string | null;
   reply_received: boolean | null;
@@ -47,8 +47,8 @@ export interface LeaderListRecord {
   company_id: string | null;
   company_name: string | null;
   company_hq: string | null;
+  employee_count: number | null;
   // POV (n8n phase_b_company only; null where absent)
-  description: string | null;
   pov_markdown: string | null;
   company_type: string | null;
   services: string[];
@@ -59,11 +59,52 @@ export interface LeaderListRecord {
   automations: string[];
   outgoing_count: number;
   reply_count: number;
+  email_count: number;
   status: string;
 }
 
 function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v : null;
+}
+
+/**
+ * Parse a location value that may be a JSON string {"city":"..","country":".."}
+ * or a plain-text address. Returns "City, Country" or null.
+ */
+function parseCityCountry(loc: unknown): string | null {
+  if (!loc) return null;
+  if (typeof loc === "string") {
+    if (loc.trim().startsWith("{")) {
+      try {
+        const parsed = JSON.parse(loc) as Json;
+        const city = str(parsed.city);
+        const country = str(parsed.country);
+        return [city, country].filter(Boolean).join(", ") || null;
+      } catch {
+        // fall through to return raw
+      }
+    }
+    return loc.trim() || null;
+  }
+  if (typeof loc === "object" && loc !== null) {
+    const o = loc as Json;
+    const city = str(o.city);
+    const country = str(o.country);
+    return [city, country].filter(Boolean).join(", ") || null;
+  }
+  return null;
+}
+
+/** Ensure a LinkedIn value becomes a full https URL. */
+function normalizeLinkedinUrl(raw: unknown): string | null {
+  const s = str(raw);
+  if (!s) return null;
+  if (s.startsWith("http")) return s;
+  if (s.startsWith("linkedin.com")) return `https://www.${s}`;
+  if (s.startsWith("www.linkedin.com")) return `https://${s}`;
+  // bare handle: in/username or just username
+  if (s.startsWith("in/")) return `https://www.linkedin.com/${s}`;
+  return `https://www.linkedin.com/in/${s}`;
 }
 
 /** Map a GetSales pipeline-stage name to the rep-facing status, else derive from activity. */
@@ -131,7 +172,10 @@ export async function buildLeadersList(
       ? client.from(PIPELINE_STAGES_TABLE).select("uuid, name, category").in("uuid", stageUuids)
       : Promise.resolve({ data: [], error: null }),
     companyIds.length
-      ? client.from(COMPANIES_TABLE).select("id, name, hq_location, hq_raw_address").in("id", companyIds)
+      ? client
+          .from(COMPANIES_TABLE)
+          .select("id, name, hq_location, hq_raw_address, employees_on_linkedin, employees_range")
+          .in("id", companyIds)
       : Promise.resolve({ data: [], error: null }),
     companyIds.length
       ? client
@@ -160,14 +204,20 @@ export async function buildLeadersList(
   for (const s of ((stagesRes as { data: Json[] }).data ?? []) as Json[])
     stageById.set(String(s.uuid), { name: str(s.name), category: str(s.category) });
 
-  const companyById = new Map<string, { name: string | null; hq: string | null }>();
+  const companyById = new Map<string, { name: string | null; hq: string | null; employee_count: number | null }>();
   for (const c of ((companiesRes as { data: Json[] }).data ?? []) as Json[]) {
-    let hq: string | null = str(c.hq_raw_address);
-    if (!hq && c.hq_location && typeof c.hq_location === "object") {
+    let hq: string | null = null;
+    // prefer jsonb hq_location → city, country
+    if (c.hq_location && typeof c.hq_location === "object") {
       const loc = c.hq_location as Json;
       hq = [str(loc.city), str(loc.country)].filter(Boolean).join(", ") || null;
     }
-    companyById.set(String(c.id), { name: str(c.name), hq });
+    if (!hq) hq = parseCityCountry(c.hq_raw_address);
+    companyById.set(String(c.id), {
+      name: str(c.name),
+      hq,
+      employee_count: typeof c.employees_on_linkedin === "number" ? c.employees_on_linkedin : null,
+    });
   }
 
   const povByCompany = new Map<string, Json>();
@@ -224,19 +274,30 @@ export async function buildLeadersList(
     const replies = activity?.inbox_count ?? 0;
     const replyStatus = activity?.reply_status ?? "no_response";
 
-    // connection state: connection_note sent ⇒ "sent"; any inbound message ⇒ "accepted"
+    // Connection state: any linkedin_type='message' means the connection was accepted
+    // (LinkedIn only allows messaging 1st-degree connections). A lone connection_note
+    // with no subsequent message means the request was sent but not yet accepted.
+    const hasMessage = leadMsgs.some((m) => (m.linkedin_type ?? "") === "message");
     const sentConn = leadMsgs.some((m) => (m.linkedin_type ?? "") === "connection_note");
-    const inbound = leadMsgs
-      .filter((m) => (m.type ?? "").toLowerCase() === "inbox")
-      .map((m) => m.sent_at ?? m.created_at ?? "")
-      .filter(Boolean)
-      .sort();
-    const accepted = inbound.length > 0 || replies > 0;
-    const connection_status: LeaderListRecord["connection_status"] = accepted
+    const connection_status: LeaderListRecord["connection_status"] = hasMessage
       ? "accepted"
       : sentConn
         ? "sent"
         : "none";
+
+    // Accepted-at: earliest message-type message (could be outbox OR inbox)
+    const messageDates = leadMsgs
+      .filter((m) => (m.linkedin_type ?? "") === "message")
+      .map((m) => m.sent_at ?? m.created_at ?? "")
+      .filter(Boolean)
+      .sort();
+    const connection_accepted_at = messageDates.length ? messageDates[0] : null;
+
+    // Email count: messages with a subject set (GetSales email sequences have subjects;
+    // LinkedIn messages do not).
+    const email_count = leadMsgs.filter(
+      (m) => m.subject && m.subject.trim() && (m.type ?? "").toLowerCase() === "outbox"
+    ).length;
 
     const name =
       str(r.name) ?? ([str(r.first_name), str(r.last_name)].filter(Boolean).join(" ").trim() || "—");
@@ -246,23 +307,24 @@ export async function buildLeadersList(
       name,
       position: str(r.position),
       headline: str(r.headline),
-      linkedin_url: str(r.linkedin_url) ?? str(r.linkedin),
-      location: str(r.location),
+      linkedin_url: normalizeLinkedinUrl(r.linkedin_url) ?? normalizeLinkedinUrl(r.linkedin),
+      location: parseCityCountry(r.location),
       email: str(r.work_email) ?? str(r.email) ?? str(r.personal_email),
       email_status: str(r.email_status),
       company_id: cid,
       company_name: co?.name ?? str(r.company_name),
       company_hq: co?.hq ?? null,
-      description: str(pov?.research_summary) ?? str(pov?.company_description),
+      employee_count: co?.employee_count ?? null,
       pov_markdown: str(pov?.pov_markdown),
       company_type: str(pov?.company_type_tag),
       services: arrField(pov, "services", "services_list"),
       vendors: arrField(pov, "vendors", "vendor_list", "technologies"),
       connection_status,
-      connection_accepted_at: accepted && inbound.length ? inbound[0] : null,
+      connection_accepted_at,
       automations: [...(automationsByLead.get(uuid) ?? [])],
       outgoing_count: outgoing,
       reply_count: replies,
+      email_count,
       status: deriveStatus(stage?.name ?? null, outgoing, replyStatus),
     };
   });
