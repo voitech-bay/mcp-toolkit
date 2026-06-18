@@ -22,6 +22,7 @@ import {
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon } from "lucide-vue-next";
+import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 
 const projectStore = useProjectStore();
@@ -284,7 +285,11 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     title: "Name",
     ellipsis: { tooltip: true },
     render: (row) => {
-      const label = row.name ?? row.domain;
+      const label = h(
+        RouterLink,
+        { to: `/company/${row.id}`, style: "color: #2080f0; text-decoration: none" },
+        { default: () => row.name ?? row.domain }
+      );
       if (!row.in_project) return label;
       return h(NSpace, { align: "center", size: 6, wrap: false }, [
         label,

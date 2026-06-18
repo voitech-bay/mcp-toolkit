@@ -1,0 +1,338 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, watch } from "vue";
+import { useRoute, useRouter } from "vue-router";
+import {
+  NCard,
+  NSpace,
+  NTag,
+  NAlert,
+  NSpin,
+  NButton,
+  NAvatar,
+  NCollapse,
+  NCollapseItem,
+  NInput,
+  NText,
+  NDivider,
+  NDrawer,
+  NDrawerContent,
+  useMessage,
+} from "naive-ui";
+
+type Json = Record<string, unknown>;
+
+interface Thread {
+  conversation_uuid: string;
+  message_count: number;
+  inbox_count: number;
+  outbox_count: number;
+  last_message_at: string | null;
+  last_message_text: string | null;
+  reply_status: string;
+  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject: string | null }>;
+}
+
+const route = useRoute();
+const router = useRouter();
+const message = useMessage();
+
+const loading = ref(false);
+const loadError = ref("");
+const card = ref<Json | null>(null);
+const noteDraft = ref("");
+const savingNote = ref(false);
+const runningResearch = ref(false);
+const rawDrawerOpen = ref(false);
+const rawDrawerTitle = ref("");
+const rawDrawerJson = ref("");
+
+const contactUuid = computed(() => String(route.params.uuid ?? ""));
+const contact = computed<Json>(() => (card.value?.contact as Json) ?? {});
+const company = computed<Json | null>(() => (card.value?.company as Json) ?? null);
+const latestResults = computed<Json[]>(() => (card.value?.latest_results as Json[]) ?? []);
+const executions = computed<Json[]>(() => (card.value?.executions as Json[]) ?? []);
+const threads = computed<Thread[]>(() => (card.value?.conversations as Thread[]) ?? []);
+const contextEntries = computed<Json[]>(() => (card.value?.context_entries as Json[]) ?? []);
+const generatedMessages = computed<Json[]>(() => (card.value?.generated_messages as Json[]) ?? []);
+
+const displayName = computed(() => {
+  const c = contact.value;
+  return (
+    (typeof c.name === "string" && c.name) ||
+    [c.first_name, c.last_name].filter((x) => typeof x === "string" && x).join(" ") ||
+    contactUuid.value.slice(0, 8)
+  );
+});
+
+function fmtDate(s: unknown): string {
+  if (typeof s !== "string" || !s) return "";
+  try {
+    return new Date(s).toLocaleString();
+  } catch {
+    return s;
+  }
+}
+
+function statusType(s: string): "default" | "success" | "warning" {
+  if (s === "got_response") return "success";
+  if (s === "waiting_for_response") return "warning";
+  return "default";
+}
+
+/** Top-level scalar fields of an n8n result, for the organized key-value view. */
+function scalarFields(result: unknown): Array<[string, string]> {
+  if (!result || typeof result !== "object") return [];
+  const skip = new Set(["full_json", "clean_full_json", "lead", "row_data", "workflow_context", "experience", "posts"]);
+  const out: Array<[string, string]> = [];
+  for (const [k, v] of Object.entries(result as Json)) {
+    if (skip.has(k)) continue;
+    if (v == null || v === "") continue;
+    if (typeof v === "string" && v.length <= 600) out.push([k, v]);
+    else if (typeof v === "number" || typeof v === "boolean") out.push([k, String(v)]);
+    else if (Array.isArray(v) && v.every((x) => typeof x === "string") && v.length <= 12) out.push([k, v.join(" | ")]);
+  }
+  return out;
+}
+
+function openRaw(title: string, obj: unknown) {
+  rawDrawerTitle.value = title;
+  rawDrawerJson.value = JSON.stringify(obj, null, 2);
+  rawDrawerOpen.value = true;
+}
+
+async function load() {
+  if (!contactUuid.value) return;
+  loading.value = true;
+  loadError.value = "";
+  try {
+    const r = await fetch(`/api/cards/contact?uuid=${encodeURIComponent(contactUuid.value)}`);
+    const data = (await r.json()) as Json & { error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed to load");
+    card.value = data;
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : "Failed to load";
+    card.value = null;
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function addNote() {
+  const text = noteDraft.value.trim();
+  if (!text) return;
+  savingNote.value = true;
+  try {
+    const r = await fetch("/api/contact-context", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contact_id: contactUuid.value, rootContext: text }),
+    });
+    const data = (await r.json()) as { error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed");
+    noteDraft.value = "";
+    message.success("Context saved.");
+    await load();
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to save context");
+  } finally {
+    savingNote.value = false;
+  }
+}
+
+async function runResearch() {
+  runningResearch.value = true;
+  try {
+    const r = await fetch("/api/inmail-review/run-new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ leadUuid: contactUuid.value }),
+    });
+    const data = (await r.json()) as { error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Run failed");
+    message.success("Research run started. Results land here in a few minutes — refresh to see them.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Run failed");
+  } finally {
+    runningResearch.value = false;
+  }
+}
+
+onMounted(load);
+watch(contactUuid, load);
+</script>
+
+<template>
+  <NSpin :show="loading">
+    <NAlert v-if="loadError" type="error" style="margin-bottom: 12px">{{ loadError }}</NAlert>
+
+    <NSpace v-if="card" vertical size="medium" style="width: 100%">
+      <!-- Header -->
+      <NCard>
+        <NSpace align="center" justify="space-between" wrap>
+          <NSpace align="center" size="large">
+            <NAvatar round :size="56" :src="(contact.avatar_url as string) || undefined">
+              {{ displayName.charAt(0).toUpperCase() }}
+            </NAvatar>
+            <div>
+              <h2 style="margin: 0">{{ displayName }}</h2>
+              <NText depth="3">{{ contact.position || contact.headline || "" }}</NText>
+              <div style="margin-top: 4px">
+                <router-link
+                  v-if="company"
+                  :to="`/company/${company.id}`"
+                  class="card-link"
+                >{{ company.name || company.domain }}</router-link>
+                <NText v-else-if="contact.company_name" depth="3">{{ contact.company_name }} (unlinked)</NText>
+                <a
+                  v-if="contact.linkedin"
+                  :href="String(contact.linkedin).startsWith('http') ? String(contact.linkedin) : `https://www.linkedin.com/in/${contact.linkedin}`"
+                  target="_blank"
+                  rel="noopener"
+                  class="card-link"
+                  style="margin-left: 12px"
+                >LinkedIn ↗</a>
+              </div>
+            </div>
+          </NSpace>
+          <NSpace>
+            <NButton size="small" :loading="runningResearch" @click="runResearch">Run research + InMail</NButton>
+            <NButton size="small" @click="router.push('/inmail-review')">InMail review</NButton>
+          </NSpace>
+        </NSpace>
+        <NDivider style="margin: 12px 0" />
+        <NSpace size="small" wrap>
+          <NTag v-if="contact.status" size="small">{{ contact.status }}</NTag>
+          <NTag v-if="contact.email_status" size="small">email: {{ contact.email_status }}</NTag>
+          <NTag v-if="contact.work_email" size="small" type="info">{{ contact.work_email }}</NTag>
+          <NText depth="3" style="font-size: 0.8rem">synced {{ fmtDate(contact.updated_at) }}</NText>
+        </NSpace>
+      </NCard>
+
+      <!-- Research -->
+      <NCard title="Research (n8n)" size="small">
+        <template #header-extra>
+          <NText depth="3" style="font-size: 0.8rem">{{ executions.length }} executions total</NText>
+        </template>
+        <NText v-if="!latestResults.length" depth="3">no research yet — use Run research + InMail above</NText>
+        <NCollapse v-else>
+          <NCollapseItem
+            v-for="r in latestResults"
+            :key="String(r.id)"
+            :title="`${r.workflow_name || 'result'} — ${fmtDate(r.created_at)}`"
+            :name="String(r.id)"
+          >
+            <template #header-extra>
+              <NButton size="tiny" quaternary @click.stop="openRaw(String(r.workflow_name || 'result'), r.result)">raw JSON</NButton>
+            </template>
+            <div class="kv-grid">
+              <template v-for="[k, v] in scalarFields(r.result)" :key="k">
+                <div class="kv-key">{{ k }}</div>
+                <div class="kv-val">{{ v }}</div>
+              </template>
+            </div>
+          </NCollapseItem>
+        </NCollapse>
+      </NCard>
+
+      <!-- Conversations -->
+      <NCard :title="`Conversations (${threads.length})`" size="small">
+        <NText v-if="!threads.length" depth="3">no conversations yet</NText>
+        <NCollapse v-else>
+          <NCollapseItem
+            v-for="t in threads"
+            :key="t.conversation_uuid"
+            :name="t.conversation_uuid"
+          >
+            <template #header>
+              <NSpace align="center" size="small">
+                <NTag size="tiny" :type="statusType(t.reply_status)">{{ t.reply_status }}</NTag>
+                <span>{{ t.message_count }} msgs · {{ fmtDate(t.last_message_at) }}</span>
+                <NText depth="3" style="font-size: 0.8rem">{{ (t.last_message_text || "").slice(0, 70) }}</NText>
+              </NSpace>
+            </template>
+            <div v-for="(m, i) in t.messages" :key="i" class="msg" :class="{ inbox: (m.type || '').toLowerCase() === 'inbox' }">
+              <NText depth="3" style="font-size: 0.72rem">{{ (m.type || '').toLowerCase() === 'inbox' ? displayName : 'us' }} · {{ fmtDate(m.sent_at) }}</NText>
+              <div>{{ m.text }}</div>
+            </div>
+          </NCollapseItem>
+        </NCollapse>
+      </NCard>
+
+      <!-- Generated messages -->
+      <NCard v-if="generatedMessages.length" :title="`Generated messages (${generatedMessages.length})`" size="small">
+        <div v-for="g in generatedMessages" :key="String(g.id)" class="msg">
+          <NText depth="3" style="font-size: 0.72rem">{{ fmtDate(g.created_at) }}</NText>
+          <div style="white-space: pre-wrap">{{ g.content }}</div>
+        </div>
+      </NCard>
+
+      <!-- Context notes -->
+      <NCard :title="`Context notes (${contextEntries.length})`" size="small">
+        <NSpace vertical size="small">
+          <div v-for="e in contextEntries" :key="String(e.id)" class="msg">
+            <NText depth="3" style="font-size: 0.72rem">{{ fmtDate(e.created_at) }}</NText>
+            <div style="white-space: pre-wrap">{{ e.rootContext }}</div>
+          </div>
+          <NSpace align="center" style="width: 100%">
+            <NInput
+              v-model:value="noteDraft"
+              type="textarea"
+              :autosize="{ minRows: 1, maxRows: 4 }"
+              placeholder="add a context note for this contact"
+              style="flex: 1; min-width: 320px"
+            />
+            <NButton size="small" type="primary" :loading="savingNote" :disabled="!noteDraft.trim()" @click="addNote">Add</NButton>
+          </NSpace>
+        </NSpace>
+      </NCard>
+    </NSpace>
+
+    <NDrawer v-model:show="rawDrawerOpen" :width="560" placement="right">
+      <NDrawerContent :title="rawDrawerTitle" closable>
+        <pre class="json-pre">{{ rawDrawerJson }}</pre>
+      </NDrawerContent>
+    </NDrawer>
+  </NSpin>
+</template>
+
+<style scoped>
+.card-link {
+  color: #2080f0;
+  text-decoration: none;
+}
+.card-link:hover {
+  text-decoration: underline;
+}
+.kv-grid {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 4px 12px;
+  font-size: 0.85rem;
+}
+.kv-key {
+  opacity: 0.65;
+  word-break: break-word;
+}
+.kv-val {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.msg {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.07);
+  margin-bottom: 6px;
+  font-size: 0.85rem;
+}
+.msg.inbox {
+  background: rgba(32, 128, 240, 0.09);
+}
+.json-pre {
+  margin: 0;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 80vh;
+  overflow: auto;
+}
+</style>

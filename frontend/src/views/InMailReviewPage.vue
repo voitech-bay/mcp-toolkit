@@ -17,6 +17,7 @@ import {
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, SelectOption } from "naive-ui";
+import { RouterLink } from "vue-router";
 
 type Pipeline = "inmail" | "followup";
 
@@ -405,6 +406,13 @@ const columns = computed<DataTableColumns<Item>>(() => [
     render(row) {
       const r = row.research;
       const label = r.name || r.first_name || r.lead_uuid || "—";
+      if (r.lead_uuid) {
+        return h(
+          RouterLink,
+          { to: `/contact/${r.lead_uuid}`, class: "ln-link" },
+          { default: () => label }
+        );
+      }
       if (r.linkedin_url) {
         return h(
           "a",

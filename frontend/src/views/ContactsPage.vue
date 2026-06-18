@@ -19,6 +19,7 @@ import {
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { UsersIcon, FileTextIcon, BuildingIcon } from "lucide-vue-next";
+import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
 
@@ -298,7 +299,15 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
     title: "Name",
     width: 200,
     ellipsis: { tooltip: true },
-    render: (row) => fullName(row),
+    render: (row) => {
+      const uuid = row.uuid ?? row.id;
+      if (!uuid) return fullName(row);
+      return h(
+        RouterLink,
+        { to: `/contact/${uuid}`, style: "color: #2080f0; text-decoration: none" },
+        { default: () => fullName(row) }
+      );
+    },
   },
   {
     key: "position",
