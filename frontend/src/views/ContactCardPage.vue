@@ -81,6 +81,7 @@ const executions = computed<Json[]>(() => (card.value?.executions as Json[]) ?? 
 const threads = computed<Thread[]>(() => (card.value?.conversations as Thread[]) ?? []);
 const contextEntries = computed<Json[]>(() => (card.value?.context_entries as Json[]) ?? []);
 const generatedMessages = computed<Json[]>(() => (card.value?.generated_messages as Json[]) ?? []);
+const isFeasibleContact = computed(() => contact.value.project_id === "94dc3b92-1cae-4360-a958-917a58063309");
 
 const leadCategory = ref<string | null>(null);
 const priority = ref<string | null>(null);
@@ -352,7 +353,7 @@ watch(contactUuid, load);
       </NCard>
 
       <!-- Feasible message agent -->
-      <NCard title="Feasible message agent" size="small">
+      <NCard v-if="isFeasibleContact" title="Feasible message agent" size="small">
         <FeasibleComposer :lead-uuid="contactUuid" :contact-name="displayName" />
       </NCard>
 

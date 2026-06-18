@@ -33,7 +33,7 @@ export function senderForUuid(uuid: string): FeasibleSender | null {
   return FEASIBLE_SENDERS.find((s) => s.sender_profile_uuid === uuid) ?? null;
 }
 
-export type FeasibleChannel = "linkedin" | "inmail" | "email";
+export type FeasibleChannel = "linkedin" | "inmail";
 export type FeasibleAngle = "productize" | "scale" | "win_rate" | "margin" | "practitioner";
 
 /** Conservative partner-level new-recurring-revenue line by employee count. Null if unknown. */
@@ -92,9 +92,7 @@ export interface FeasiblePromptOptions {
 /** Build the system prompt for the Feasible message agent. */
 export function buildFeasibleSystemPrompt(opts: FeasiblePromptOptions): string {
   const channelGuide =
-    opts.channel === "email"
-      ? "FORMAT: email, ~120-160 words, prose, short paragraphs. Subject = 3-4 words, internal topic."
-      : opts.channel === "inmail"
+    opts.channel === "inmail"
         ? "FORMAT: LinkedIn InMail. Provide a short subject (under 50 chars) and a body under ~120 words. Lowercase by default except proper nouns."
         : "FORMAT: LinkedIn direct message, short (2-5 sentences), no subject. Lowercase by default except proper nouns. Conversational, like a real operator.";
 

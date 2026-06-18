@@ -38,7 +38,7 @@ import {
 const MODEL_CHEAP = () => process.env.FEASIBLE_MODEL_CHEAP?.trim() || "google/gemma-4-31b-it";
 const MODEL_PREMIUM = () => process.env.FEASIBLE_MODEL_PREMIUM?.trim() || "anthropic/claude-opus-4.6";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const VALID_CHANNELS = new Set(["linkedin", "inmail", "email"]);
+const VALID_CHANNELS = new Set(["linkedin", "inmail"]);
 const VALID_ANGLES = new Set(["productize", "scale", "win_rate", "margin", "practitioner"]);
 
 type Json = Record<string, unknown>;
@@ -101,6 +101,8 @@ async function resolveSender(
       .from(LINKEDIN_MESSAGES_TABLE)
       .select("sender_profile_uuid")
       .eq("lead_uuid", leadUuid)
+      .eq("project_id", FEASIBLE_PROJECT_ID)
+      .eq("type", "outbox")
       .not("sender_profile_uuid", "is", null)
       .order("sent_at", { ascending: false })
       .limit(1);
@@ -129,6 +131,10 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
 
   const { data: card, error: cardErr } = await buildContactCard(client, leadUuid);
   if (cardErr || !card) return sendJson(res, cardErr === "Contact not found" ? 404 : 500, { error: cardErr ?? "load failed" });
+  const contact = (card.contact as Json) ?? {};
+  if (str(contact, "project_id") !== FEASIBLE_PROJECT_ID) {
+    return sendJson(res, 403, { error: "This message agent is restricted to Feasible contacts" });
+  }
 
   const { sender, source: senderSource } = await resolveSender(client, leadUuid, str(body, "senderProfileUuid", "sender_profile_uuid"));
   const employees = parseEmployeeCount(card);
@@ -152,7 +158,6 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     }
   }
 
-  const contact = (card.contact as Json) ?? {};
   const name = str(contact, "name", "first_name") || "the contact";
   const results = (card.latest_results as Json[]) ?? [];
   const research = results
@@ -178,7 +183,7 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     accountKeyPoints ? `\nColleagues at this account have said:\n${accountKeyPoints}` : "",
     `\nConversation so far:\n${convo}`,
     instructions ? `\nReviewer instructions: ${instructions}` : "",
-    channel === "inmail" || channel === "email"
+    channel === "inmail"
       ? `\nWrite the message. First line "Subject: <3-4 word subject>", then a blank line, then the body.`
       : `\nWrite the next message.`,
   ]
@@ -199,7 +204,7 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     }
     let subject = "";
     let text = gen.text.trim();
-    if (channel === "inmail" || channel === "email") {
+    if (channel === "inmail") {
       const m = text.match(/^subject:\s*(.+)$/im);
       if (m) {
         subject = m[1].trim();
@@ -233,11 +238,26 @@ export async function handlePostFeasibleSend(req: IncomingMessage, res: ServerRe
   const body = await readJsonBody(req);
   const leadUuid = str(body, "leadUuid", "lead_uuid");
   const senderProfileUuid = str(body, "senderProfileUuid", "sender_profile_uuid");
+  const channelRaw = str(body, "channel");
+  if (!VALID_CHANNELS.has(channelRaw)) return sendJson(res, 400, { error: "channel must be linkedin or inmail" });
+  const channel = channelRaw as FeasibleChannel;
   const text = str(body, "text");
   const subject = str(body, "subject");
   if (!UUID_RE.test(leadUuid)) return sendJson(res, 400, { error: "leadUuid must be a UUID" });
   if (!senderForUuid(senderProfileUuid)) return sendJson(res, 400, { error: "senderProfileUuid must be a Feasible sender profile" });
   if (!text.trim()) return sendJson(res, 400, { error: "text is required" });
+  if (channel === "inmail" && !subject) return sendJson(res, 400, { error: "subject is required for InMail" });
+
+  const { data: contact, error: contactErr } = await client
+    .from(CONTACTS_TABLE)
+    .select("project_id, company_id, company_uuid")
+    .eq("uuid", leadUuid)
+    .maybeSingle();
+  if (contactErr) return sendJson(res, 500, { error: contactErr.message });
+  if (!contact) return sendJson(res, 404, { error: "Contact not found" });
+  if (str(contact as Json, "project_id") !== FEASIBLE_PROJECT_ID) {
+    return sendJson(res, 403, { error: "This message agent is restricted to Feasible contacts" });
+  }
 
   const { credentials, error: credErr } = await getGetSalesCredentials(client, FEASIBLE_PROJECT_ID);
   if (credErr) return sendJson(res, 400, { error: `GetSales credentials: ${credErr}` });
@@ -249,6 +269,7 @@ export async function handlePostFeasibleSend(req: IncomingMessage, res: ServerRe
       senderProfileUuid,
       leadUuid,
       text,
+      channel,
       subject: subject || undefined,
     });
   } catch (e) {
@@ -257,11 +278,6 @@ export async function handlePostFeasibleSend(req: IncomingMessage, res: ServerRe
 
   // Best-effort record under generated_messages if a project_company_id resolves.
   try {
-    const { data: contact } = await client
-      .from(CONTACTS_TABLE)
-      .select("company_id, company_uuid")
-      .eq("uuid", leadUuid)
-      .maybeSingle();
     const companyKey = contact ? str(contact as Json, "company_id") || str(contact as Json, "company_uuid") : "";
     if (companyKey) {
       const { data: pc } = await client
@@ -276,7 +292,7 @@ export async function handlePostFeasibleSend(req: IncomingMessage, res: ServerRe
           contactId: leadUuid,
           projectCompanyId,
           content: text,
-          generationContext: { kind: "feasible_message_sent", sender_profile_uuid: senderProfileUuid, getsales_message_uuid: str(sent, "uuid") },
+          generationContext: { kind: "feasible_message_sent", channel, subject, sender_profile_uuid: senderProfileUuid, getsales_message_uuid: str(sent, "uuid") },
         });
       }
     }

@@ -835,12 +835,9 @@ export async function updateLeadCustomFields(
  * Returns the created LinkedInMessage row. Throws SourceApiRequestError on 404
  * (lead not connected) / 422 (validation) so callers can surface the reason.
  */
-export async function sendLinkedInMessage(
-  credentials: ApiCredentials | undefined,
-  params: { senderProfileUuid: string; leadUuid: string; text: string; subject?: string; messengerType?: string }
-): Promise<Record<string, unknown>> {
-  const config = resolveCredentials(credentials);
-  if (!config) throw new Error("Source API credentials are not configured.");
+export function buildLinkedInMessagePayload(
+  params: { senderProfileUuid: string; leadUuid: string; text: string; channel: "linkedin" | "inmail"; subject?: string }
+): Record<string, unknown> {
   const sender = params.senderProfileUuid?.trim();
   const lead = params.leadUuid?.trim();
   const text = params.text?.trim();
@@ -848,10 +845,22 @@ export async function sendLinkedInMessage(
   if (!lead) throw new Error("sendLinkedInMessage: leadUuid required");
   if (!text) throw new Error("sendLinkedInMessage: text required");
   const body: Record<string, unknown> = { sender_profile_uuid: sender, lead_uuid: lead, text };
-  if (params.subject?.trim()) {
-    body.subject = params.subject.trim();
-    body.linkedin_messenger_type = params.messengerType?.trim() || "basic";
+  if (params.channel === "inmail") {
+    const subject = params.subject?.trim();
+    if (!subject) throw new Error("sendLinkedInMessage: subject required for InMail");
+    body.subject = subject;
+    body.linkedin_messenger_type = "inmail";
   }
+  return body;
+}
+
+export async function sendLinkedInMessage(
+  credentials: ApiCredentials | undefined,
+  params: { senderProfileUuid: string; leadUuid: string; text: string; channel: "linkedin" | "inmail"; subject?: string }
+): Promise<Record<string, unknown>> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const body = buildLinkedInMessagePayload(params);
   const url = `${config.baseUrl}/flows/api/linkedin-messages`;
   return fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "POST", body: JSON.stringify(body) });
 }

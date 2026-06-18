@@ -40,7 +40,6 @@ interface Variant {
 const CHANNELS: SelectOption[] = [
   { label: "LinkedIn message", value: "linkedin" },
   { label: "LinkedIn InMail", value: "inmail" },
-  { label: "Email", value: "email" },
 ];
 const ANGLES: SelectOption[] = [
   { label: "Auto (model picks)", value: "" },
@@ -60,7 +59,6 @@ const genTier = ref<"cheap" | "premium">("cheap");
 const variants = ref<Variant[]>([]);
 const senders = ref<Sender[]>([]);
 const senderUuid = ref<string>("");
-const senderPersona = ref<string>("");
 const senderSource = ref<string>("");
 const revenueLine = ref<string | null>(null);
 const employees = ref<number | null>(null);
@@ -75,7 +73,7 @@ const sending = ref(false);
 const senderOptions = computed<SelectOption[]>(() =>
   senders.value.map((s) => ({ label: `${s.persona} (signs "${s.signature}")`, value: s.sender_profile_uuid }))
 );
-const isInmailOrEmail = computed(() => channel.value === "inmail" || channel.value === "email");
+const isInmail = computed(() => channel.value === "inmail");
 
 async function generate(tier: "cheap" | "premium") {
   generating.value = true;
@@ -99,7 +97,6 @@ async function generate(tier: "cheap" | "premium") {
     variants.value = data.variants ?? [];
     senders.value = data.senders ?? [];
     senderUuid.value = data.sender_profile_uuid ?? senderUuid.value;
-    senderPersona.value = data.sender_persona ?? "";
     senderSource.value = data.sender_source ?? "";
     revenueLine.value = data.revenue_line ?? null;
     employees.value = data.employees ?? null;
@@ -117,6 +114,26 @@ function selectVariant(i: number) {
   selectedIdx.value = i;
   editText.value = v.text ?? "";
   editSubject.value = v.subject ?? "";
+}
+
+function changeSender(value: string) {
+  if (value === senderUuid.value) return;
+  senderUuid.value = value;
+  senderSource.value = "explicit";
+  variants.value = [];
+  selectedIdx.value = null;
+  editText.value = "";
+  editSubject.value = "";
+  message.info("Sender changed. Generate again so the signature matches.");
+}
+
+function changeChannel(value: string) {
+  if (value === channel.value) return;
+  channel.value = value;
+  variants.value = [];
+  selectedIdx.value = null;
+  editText.value = "";
+  editSubject.value = "";
 }
 
 function openConfirm() {
@@ -140,8 +157,9 @@ async function doSend() {
       body: JSON.stringify({
         leadUuid: props.leadUuid,
         senderProfileUuid: senderUuid.value,
+        channel: channel.value,
         text: editText.value,
-        subject: isInmailOrEmail.value ? editSubject.value : undefined,
+        subject: isInmail.value ? editSubject.value : undefined,
       }),
     });
     const data = await r.json();
@@ -158,12 +176,13 @@ async function doSend() {
 }
 
 const currentSenderSig = computed(() => senders.value.find((s) => s.sender_profile_uuid === senderUuid.value)?.signature ?? "");
+const currentSenderPersona = computed(() => senders.value.find((s) => s.sender_profile_uuid === senderUuid.value)?.persona ?? "");
 </script>
 
 <template>
   <div class="fc">
     <NSpace align="center" wrap size="small">
-      <NSelect v-model:value="channel" :options="CHANNELS" style="width: 170px" size="small" />
+      <NSelect :value="channel" :options="CHANNELS" style="width: 170px" size="small" @update:value="changeChannel" />
       <NSelect v-model:value="angle" :options="ANGLES" style="width: 190px" size="small" />
       <NButton type="primary" size="small" :loading="generating && genTier === 'cheap'" @click="generate('cheap')">Generate</NButton>
       <NButton size="small" :loading="generating && genTier === 'premium'" @click="generate('premium')">Try Opus</NButton>
@@ -180,7 +199,7 @@ const currentSenderSig = computed(() => senders.value.find((s) => s.sender_profi
 
     <NSpace v-if="senders.length" align="center" size="small" style="margin-top: 8px">
       <NText depth="3" style="font-size: 0.8rem">sender:</NText>
-      <NSelect v-model:value="senderUuid" :options="senderOptions" size="small" style="width: 260px" />
+      <NSelect :value="senderUuid" :options="senderOptions" size="small" style="width: 260px" @update:value="changeSender" />
       <NTag v-if="senderSource" size="tiny" :type="senderSource === 'thread' ? 'success' : 'default'">
         {{ senderSource === "thread" ? "matched to thread" : senderSource }}
       </NTag>
@@ -218,7 +237,7 @@ const currentSenderSig = computed(() => senders.value.find((s) => s.sender_profi
     <!-- edit + send -->
     <div v-if="selectedIdx !== null" class="fc-edit">
       <NInput
-        v-if="isInmailOrEmail"
+        v-if="isInmail"
         v-model:value="editSubject"
         placeholder="subject"
         size="small"
@@ -241,9 +260,9 @@ const currentSenderSig = computed(() => senders.value.find((s) => s.sender_profi
       @positive-click="doSend"
     >
       <NText depth="3" style="font-size: 0.8rem">
-        To {{ props.contactName || props.leadUuid.slice(0, 8) }} · from {{ senderPersona }} · {{ channel }}
+        To {{ props.contactName || props.leadUuid.slice(0, 8) }} · from {{ currentSenderPersona }} · {{ channel }}
       </NText>
-      <div v-if="isInmailOrEmail && editSubject" style="margin-top: 8px"><strong>Subject:</strong> {{ editSubject }}</div>
+      <div v-if="isInmail && editSubject" style="margin-top: 8px"><strong>Subject:</strong> {{ editSubject }}</div>
       <pre class="fc-confirm">{{ editText }}</pre>
     </NModal>
   </div>

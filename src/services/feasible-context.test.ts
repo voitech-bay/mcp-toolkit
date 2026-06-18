@@ -41,7 +41,6 @@ test("buildFeasibleSystemPrompt: includes persona signature, $ only when angle a
 test("buildFeasibleSystemPrompt: channel format guidance differs", () => {
   const s = FEASIBLE_SENDERS[0];
   assert.match(buildFeasibleSystemPrompt({ channel: "inmail", sender: s }), /InMail/);
-  assert.match(buildFeasibleSystemPrompt({ channel: "email", sender: s }), /email/);
   assert.match(buildFeasibleSystemPrompt({ channel: "linkedin", sender: s }), /LinkedIn direct message/);
 });
 
