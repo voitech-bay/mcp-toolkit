@@ -129,6 +129,7 @@ import {
   handlePostSyncMarkers,
   handlePostRemoveFromList,
 } from "./card-handlers.js";
+import { handlePostFeasibleGenerate, handlePostFeasibleSend } from "./feasible-agent-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -722,6 +723,12 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/cards/company-summary":
         await handlePostCompanySummary(req, res);
+        return;
+      case "/api/feasible/generate":
+        await handlePostFeasibleGenerate(req, res);
+        return;
+      case "/api/feasible/send":
+        await handlePostFeasibleSend(req, res);
         return;
       case "/api/lists/tagged":
         await handleGetTaggedList(req, res);

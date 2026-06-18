@@ -2,10 +2,17 @@
 import { ref, computed, h, onMounted } from "vue";
 import {
   NCard, NDataTable, NInput, NButton, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
+  NDrawer, NDrawerContent,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon } from "lucide-vue-next";
+import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon, MailIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
+import FeasibleComposer from "../components/FeasibleComposer.vue";
+
+const composerLead = ref<{ uuid: string; name: string } | null>(null);
+function openComposer(uuid: string, name: string) {
+  composerLead.value = { uuid, name };
+}
 
 const TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
 
@@ -217,6 +224,11 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
               { default: () => h(NButton, { size: "tiny", quaternary: true }, { icon: () => h(MessageCircleIcon, { size: 14 }) }) }),
             default: () => "Open conversation",
           }),
+          h(NTooltip, null, {
+            trigger: () => h(NButton, { size: "tiny", quaternary: true, onClick: () => openComposer(row.uuid, row.name) },
+              { icon: () => h(MailIcon, { size: 14 }) }),
+            default: () => "Feasible message agent",
+          }),
           h(NPopconfirm, {
             onPositiveClick: () => removeFromList([row.uuid]),
           }, {
@@ -284,5 +296,11 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"
       :loading="loading"
     />
+
+    <NDrawer :show="!!composerLead" :width="620" placement="right" @update:show="(v: boolean) => { if (!v) composerLead = null; }">
+      <NDrawerContent :title="`Feasible message — ${composerLead?.name ?? ''}`" closable>
+        <FeasibleComposer v-if="composerLead" :lead-uuid="composerLead.uuid" :contact-name="composerLead.name" />
+      </NDrawerContent>
+    </NDrawer>
   </NCard>
 </template>

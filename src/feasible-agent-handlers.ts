@@ -1,0 +1,288 @@
+/**
+ * Feasible in-app message agent: generate + send, triggered from the contact card
+ * and the MSSP Leaders table.
+ *
+ * - POST /api/feasible/generate: builds Feasible-grounded context (product + angle +
+ *   revenue + contact research + conversation + colleague key points) and returns N
+ *   variants. Sender persona auto-matched per lead so the signature is truthful.
+ *   Tier 'cheap' = gemma, 'premium' = Opus 4.6. Read-only.
+ * - POST /api/feasible/send: sends a chosen/edited variant to the prospect in GetSales
+ *   (Feasible project) via the linkedin-messages API. Gated: explicit text + lead +
+ *   Feasible sender; never auto-invoked. Surfaces GetSales errors verbatim.
+ */
+import type { IncomingMessage, ServerResponse } from "node:http";
+import {
+  getSupabase,
+  getGetSalesCredentials,
+  listCompanyContextsByCompanyId,
+  createGeneratedMessage,
+  LINKEDIN_MESSAGES_TABLE,
+  PROJECT_COMPANIES_TABLE,
+  CONTACTS_TABLE,
+} from "./services/supabase.js";
+import { buildContactCard, parseAccountSummaryEntry } from "./services/account-context.js";
+import { generateOpenRouterMessage } from "./services/openrouter.js";
+import { sendLinkedInMessage } from "./services/source-api.js";
+import {
+  FEASIBLE_PROJECT_ID,
+  FEASIBLE_SENDERS,
+  senderForUuid,
+  feasibleRevenueLine,
+  buildFeasibleSystemPrompt,
+  feasibleViolations,
+  type FeasibleChannel,
+  type FeasibleAngle,
+  type FeasibleSender,
+} from "./services/feasible-context.js";
+
+const MODEL_CHEAP = () => process.env.FEASIBLE_MODEL_CHEAP?.trim() || "google/gemma-4-31b-it";
+const MODEL_PREMIUM = () => process.env.FEASIBLE_MODEL_PREMIUM?.trim() || "anthropic/claude-opus-4.6";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const VALID_CHANNELS = new Set(["linkedin", "inmail", "email"]);
+const VALID_ANGLES = new Set(["productize", "scale", "win_rate", "margin", "practitioner"]);
+
+type Json = Record<string, unknown>;
+
+function sendJson(res: ServerResponse, status: number, obj: unknown): void {
+  res.setHeader("Content-Type", "application/json");
+  res.writeHead(status);
+  res.end(JSON.stringify(obj));
+}
+
+async function readJsonBody(req: IncomingMessage): Promise<Json> {
+  const chunks: Buffer[] = [];
+  for await (const c of req) chunks.push(c as Buffer);
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return v && typeof v === "object" && !Array.isArray(v) ? (v as Json) : {};
+  } catch {
+    return {};
+  }
+}
+
+function str(o: Json, ...keys: string[]): string {
+  for (const k of keys) {
+    const v = o[k];
+    if (typeof v === "string" && v.trim()) return v;
+  }
+  return "";
+}
+
+/** First integer in an employees_range string ("51-200" -> 51) or a research number. */
+function parseEmployeeCount(card: Json): number | null {
+  const company = (card.company as Json) ?? {};
+  const range = str(company, "employees_range");
+  const m = range.match(/\d+/);
+  if (m) return parseInt(m[0], 10);
+  const results = (card.latest_results as Json[]) ?? [];
+  for (const r of results) {
+    const res = (r.result as Json) ?? {};
+    const ec = str(res, "company_employees", "employees_on_linkedin");
+    const mm = ec.match(/\d+/);
+    if (mm) return parseInt(mm[0], 10);
+  }
+  return null;
+}
+
+/** Resolve the sender persona for a lead: explicit > latest outbox sender > Feasible default. */
+async function resolveSender(
+  client: ReturnType<typeof getSupabase>,
+  leadUuid: string,
+  explicitUuid: string
+): Promise<{ sender: FeasibleSender; source: "explicit" | "thread" | "default" }> {
+  if (explicitUuid) {
+    const s = senderForUuid(explicitUuid);
+    if (s) return { sender: s, source: "explicit" };
+  }
+  if (client) {
+    const { data } = await client
+      .from(LINKEDIN_MESSAGES_TABLE)
+      .select("sender_profile_uuid")
+      .eq("lead_uuid", leadUuid)
+      .not("sender_profile_uuid", "is", null)
+      .order("sent_at", { ascending: false })
+      .limit(1);
+    const uuid = Array.isArray(data) && data[0] ? String((data[0] as Json).sender_profile_uuid ?? "") : "";
+    const s = senderForUuid(uuid);
+    if (s) return { sender: s, source: "thread" };
+  }
+  return { sender: FEASIBLE_SENDERS[0], source: "default" };
+}
+
+// --- POST /api/feasible/generate ----------------------------------------------
+export async function handlePostFeasibleGenerate(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+  const body = await readJsonBody(req);
+  const leadUuid = str(body, "leadUuid", "lead_uuid");
+  if (!UUID_RE.test(leadUuid)) return sendJson(res, 400, { error: "leadUuid must be a UUID" });
+  const tier = str(body, "tier") === "premium" ? "premium" : "cheap";
+  const channel = (VALID_CHANNELS.has(str(body, "channel")) ? str(body, "channel") : "linkedin") as FeasibleChannel;
+  const angleRaw = str(body, "angle");
+  const angle = (VALID_ANGLES.has(angleRaw) ? angleRaw : null) as FeasibleAngle | null;
+  const variants = Math.min(Math.max(Number(body.variants) || 2, 1), 3);
+  const instructions = str(body, "instructions");
+  const model = tier === "premium" ? MODEL_PREMIUM() : MODEL_CHEAP();
+
+  const { data: card, error: cardErr } = await buildContactCard(client, leadUuid);
+  if (cardErr || !card) return sendJson(res, cardErr === "Contact not found" ? 404 : 500, { error: cardErr ?? "load failed" });
+
+  const { sender, source: senderSource } = await resolveSender(client, leadUuid, str(body, "senderProfileUuid", "sender_profile_uuid"));
+  const employees = parseEmployeeCount(card);
+  const revenueLine = angle === "productize" || angle === "scale" ? feasibleRevenueLine(employees) : null;
+
+  // Colleague key points from cached account summary.
+  let accountKeyPoints = "";
+  const company = (card.company as Json) ?? null;
+  if (company && typeof company.id === "string") {
+    const { data: ctx } = await listCompanyContextsByCompanyId(client, company.id);
+    for (const row of ctx) {
+      const parsed = parseAccountSummaryEntry(row);
+      if (parsed) {
+        const per = (parsed.data.per_contact as Array<{ name?: string; key_points?: string[] }>) ?? [];
+        accountKeyPoints = per
+          .filter((p) => (p.key_points ?? []).length)
+          .map((p) => `- ${p.name}: ${(p.key_points ?? []).join("; ")}`)
+          .join("\n");
+        break;
+      }
+    }
+  }
+
+  const contact = (card.contact as Json) ?? {};
+  const name = str(contact, "name", "first_name") || "the contact";
+  const results = (card.latest_results as Json[]) ?? [];
+  const research = results
+    .map((r) => {
+      const rs = (r.result as Json) ?? {};
+      return str(rs, "pov", "their_icp_summary", "mssp_research_summary", "company_description");
+    })
+    .filter(Boolean)
+    .join("\n")
+    .slice(0, 1200);
+  const threads = (card.conversations as Array<{ messages?: Array<{ text: string | null; type: string | null }> }>) ?? [];
+  const convo = threads[0]?.messages
+    ? threads[0].messages
+        .map((m) => `${(m.type ?? "").toLowerCase() === "inbox" ? name : "us"}: ${(m.text ?? "").slice(0, 600)}`)
+        .filter((l) => l.length > 5)
+        .join("\n")
+    : "(no prior messages — this is a cold or first touch)";
+
+  const systemPrompt = buildFeasibleSystemPrompt({ channel, sender, angle, revenueLine });
+  const userPrompt = [
+    `Recipient: ${name}${contact.position ? `, ${String(contact.position)}` : ""}${company ? ` at ${String(company.name ?? "")}` : ""}${employees ? ` (~${employees} employees)` : ""}`,
+    research ? `\nInternal research (context only — do NOT paste back to them):\n${research}` : "",
+    accountKeyPoints ? `\nColleagues at this account have said:\n${accountKeyPoints}` : "",
+    `\nConversation so far:\n${convo}`,
+    instructions ? `\nReviewer instructions: ${instructions}` : "",
+    channel === "inmail" || channel === "email"
+      ? `\nWrite the message. First line "Subject: <3-4 word subject>", then a blank line, then the body.`
+      : `\nWrite the next message.`,
+  ]
+    .filter((s) => s !== "")
+    .join("\n");
+
+  const out: Array<Json> = [];
+  for (let i = 0; i < variants; i++) {
+    const { data: gen, error: genErr } = await generateOpenRouterMessage({
+      model,
+      systemPrompt,
+      userPrompt,
+      temperature: i === 0 ? 0.5 : 0.8,
+    });
+    if (genErr || !gen) {
+      out.push({ error: genErr ?? "generation failed", model });
+      continue;
+    }
+    let subject = "";
+    let text = gen.text.trim();
+    if (channel === "inmail" || channel === "email") {
+      const m = text.match(/^subject:\s*(.+)$/im);
+      if (m) {
+        subject = m[1].trim();
+        text = text.replace(/^subject:\s*.+$/im, "").trim();
+      }
+    }
+    text = text.replace(/^["']|["']$/g, "");
+    out.push({ subject, text, model: gen.model, tier, violations: feasibleViolations(text) });
+  }
+
+  sendJson(res, 200, {
+    variants: out,
+    channel,
+    angle,
+    employees,
+    revenue_line: revenueLine,
+    sender_profile_uuid: sender.sender_profile_uuid,
+    sender_persona: sender.persona,
+    sender_source: senderSource,
+    senders: FEASIBLE_SENDERS,
+    model,
+    tier,
+  });
+}
+
+// --- POST /api/feasible/send --------------------------------------------------
+export async function handlePostFeasibleSend(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+  const body = await readJsonBody(req);
+  const leadUuid = str(body, "leadUuid", "lead_uuid");
+  const senderProfileUuid = str(body, "senderProfileUuid", "sender_profile_uuid");
+  const text = str(body, "text");
+  const subject = str(body, "subject");
+  if (!UUID_RE.test(leadUuid)) return sendJson(res, 400, { error: "leadUuid must be a UUID" });
+  if (!senderForUuid(senderProfileUuid)) return sendJson(res, 400, { error: "senderProfileUuid must be a Feasible sender profile" });
+  if (!text.trim()) return sendJson(res, 400, { error: "text is required" });
+
+  const { credentials, error: credErr } = await getGetSalesCredentials(client, FEASIBLE_PROJECT_ID);
+  if (credErr) return sendJson(res, 400, { error: `GetSales credentials: ${credErr}` });
+  if (!credentials) return sendJson(res, 400, { error: "Feasible GetSales credentials not configured" });
+
+  let sent: Json;
+  try {
+    sent = await sendLinkedInMessage(credentials, {
+      senderProfileUuid,
+      leadUuid,
+      text,
+      subject: subject || undefined,
+    });
+  } catch (e) {
+    return sendJson(res, 502, { error: e instanceof Error ? e.message : String(e) });
+  }
+
+  // Best-effort record under generated_messages if a project_company_id resolves.
+  try {
+    const { data: contact } = await client
+      .from(CONTACTS_TABLE)
+      .select("company_id, company_uuid")
+      .eq("uuid", leadUuid)
+      .maybeSingle();
+    const companyKey = contact ? str(contact as Json, "company_id") || str(contact as Json, "company_uuid") : "";
+    if (companyKey) {
+      const { data: pc } = await client
+        .from(PROJECT_COMPANIES_TABLE)
+        .select("id")
+        .eq("project_id", FEASIBLE_PROJECT_ID)
+        .eq("company_id", companyKey)
+        .maybeSingle();
+      const projectCompanyId = pc ? str(pc as Json, "id") : "";
+      if (projectCompanyId) {
+        await createGeneratedMessage(client, {
+          contactId: leadUuid,
+          projectCompanyId,
+          content: text,
+          generationContext: { kind: "feasible_message_sent", sender_profile_uuid: senderProfileUuid, getsales_message_uuid: str(sent, "uuid") },
+        });
+      }
+    }
+  } catch {
+    /* persistence best-effort */
+  }
+
+  sendJson(res, 200, { ok: true, message: sent });
+}

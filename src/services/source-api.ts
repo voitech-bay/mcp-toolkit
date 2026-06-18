@@ -830,6 +830,33 @@ export async function updateLeadCustomFields(
 }
 
 /**
+ * POST /flows/api/linkedin-messages — send a LinkedIn message (or InMail) to a lead
+ * on behalf of a sender profile. The lead must be connected to that sender's account.
+ * Returns the created LinkedInMessage row. Throws SourceApiRequestError on 404
+ * (lead not connected) / 422 (validation) so callers can surface the reason.
+ */
+export async function sendLinkedInMessage(
+  credentials: ApiCredentials | undefined,
+  params: { senderProfileUuid: string; leadUuid: string; text: string; subject?: string; messengerType?: string }
+): Promise<Record<string, unknown>> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const sender = params.senderProfileUuid?.trim();
+  const lead = params.leadUuid?.trim();
+  const text = params.text?.trim();
+  if (!sender) throw new Error("sendLinkedInMessage: senderProfileUuid required");
+  if (!lead) throw new Error("sendLinkedInMessage: leadUuid required");
+  if (!text) throw new Error("sendLinkedInMessage: text required");
+  const body: Record<string, unknown> = { sender_profile_uuid: sender, lead_uuid: lead, text };
+  if (params.subject?.trim()) {
+    body.subject = params.subject.trim();
+    body.linkedin_messenger_type = params.messengerType?.trim() || "basic";
+  }
+  const url = `${config.baseUrl}/flows/api/linkedin-messages`;
+  return fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "POST", body: JSON.stringify(body) });
+}
+
+/**
  * Fetch many contacts by UUID via a bounded concurrency pool of `GET /leads/api/leads/{uuid}` calls.
  * Never throws: per-UUID failures collected in `errors`; 404s recorded in `missing`.
  * Cancellation: `onBefore` is awaited before each dequeue (wire to sync cancellation token).

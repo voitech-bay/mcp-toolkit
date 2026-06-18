@@ -19,6 +19,7 @@ import {
   NSelect,
   useMessage,
 } from "naive-ui";
+import FeasibleComposer from "../components/FeasibleComposer.vue";
 
 type Json = Record<string, unknown>;
 
@@ -348,6 +349,11 @@ watch(contactUuid, load);
           <template v-if="targetExperience.start_date"> · {{ fmtYear(targetExperience.start_date) }}–{{ targetExperience.end_date ? fmtYear(targetExperience.end_date) : 'present' }}</template>
         </NText>
         <div v-if="targetExperience.description" style="margin-top:8px;font-size:0.85rem;white-space:pre-wrap">{{ targetExperience.description }}</div>
+      </NCard>
+
+      <!-- Feasible message agent -->
+      <NCard title="Feasible message agent" size="small">
+        <FeasibleComposer :lead-uuid="contactUuid" :contact-name="displayName" />
       </NCard>
 
       <!-- Research -->
