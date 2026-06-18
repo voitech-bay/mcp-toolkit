@@ -9,6 +9,7 @@ import {
   PlusIcon, UsersIcon, SearchIcon, LinkIcon, XIcon, SparklesIcon,
 } from "lucide-vue-next";
 import { useDebounceFn } from "@vueuse/core";
+import { useRoute } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
 import ReplyContextModal from "../components/ReplyContextModal.vue";
@@ -166,9 +167,14 @@ function onMouseUp() {
   }
 }
 
+const route = useRoute();
+
 onMounted(() => {
   window.addEventListener("mousemove", onMouseMove);
   window.addEventListener("mouseup", onMouseUp);
+  // Deep-link from the lists-checker: ?search=<contact name> preselects the thread.
+  const q = route.query.search;
+  if (typeof q === "string" && q.trim()) searchInput.value = q.trim();
 });
 
 onBeforeUnmount(() => {

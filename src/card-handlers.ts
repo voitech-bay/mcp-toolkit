@@ -17,6 +17,7 @@ import {
   type AccountSummaryEntry,
   type MessageRow,
 } from "./services/account-context.js";
+import { buildLeadersList } from "./services/leaders-list.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
 
 const SUMMARY_MODEL = () => process.env.ACCOUNT_SUMMARY_MODEL?.trim() || "google/gemma-4-31b-it";
@@ -73,6 +74,20 @@ export async function handleGetCompanyCard(req: IncomingMessage, res: ServerResp
   const { data, error } = await buildCompanyCard(client, id);
   if (error) return sendJson(res, error === "Company not found" ? 404 : 500, { error });
   sendJson(res, 200, data);
+}
+
+// --- GET /api/lists/tagged?tag=<GetSalesTags uuid> ----------------------------
+// Tag-backed record list for the lists-checker view (e.g. "MSSP Leaders in MENA").
+// Read-only assembly across Contacts/companies/PipelineStages/n8n/FlowLeads/LinkedinMessages.
+export async function handleGetTaggedList(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+  const tag = queryParam(req, "tag");
+  if (!UUID_RE.test(tag)) return sendJson(res, 400, { error: "tag must be a UUID" });
+  const { data, error } = await buildLeadersList(client, tag);
+  if (error) return sendJson(res, 500, { error });
+  sendJson(res, 200, { data, total: data.length });
 }
 
 // --- POST /api/cards/company-summary { companyId } -----------------------------

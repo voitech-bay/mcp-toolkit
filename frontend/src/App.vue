@@ -57,7 +57,7 @@ const isAnalyticsGroupActive = computed(
 );
 
 /** Grouped routes — highlight parent when any child is active. */
-const DATA_PATHS = ["/tables", "/companies", "/contacts", "/conversations", "/getsales-tags"] as const;
+const DATA_PATHS = ["/tables", "/companies", "/contacts", "/mssp-leaders", "/conversations", "/getsales-tags"] as const;
 const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses", "/hypothesis-tag-contacts"] as const;
 const PIPELINE_PATHS = [
   "/sync",
@@ -91,6 +91,11 @@ const dataMenuOptions: DropdownOption[] = [
   {
     label: "Contacts",
     key: "/contacts",
+    icon: () => h(UsersIcon, { size: 14 }),
+  },
+  {
+    label: "MSSP Leaders in MENA",
+    key: "/mssp-leaders",
     icon: () => h(UsersIcon, { size: 14 }),
   },
   {
