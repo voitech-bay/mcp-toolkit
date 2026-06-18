@@ -47,8 +47,8 @@ export interface LeaderListRecord {
   company_id: string | null;
   company_name: string | null;
   company_hq: string | null;
+  employee_count: number | null;
   // POV (n8n phase_b_company only; null where absent)
-  description: string | null;
   pov_markdown: string | null;
   company_type: string | null;
   services: string[];
@@ -59,6 +59,7 @@ export interface LeaderListRecord {
   automations: string[];
   outgoing_count: number;
   reply_count: number;
+  email_count: number;
   status: string;
 }
 
@@ -95,6 +96,38 @@ function arrField(result: Json | undefined, ...keys: string[]): string[] {
   return [];
 }
 
+/** Parse location stored as JSON string {"city":"X","country":"Y",...} or plain text. */
+function parseCityCountry(loc: unknown): string | null {
+  if (!loc) return null;
+  if (typeof loc === "string") {
+    if (loc.trim().startsWith("{")) {
+      try {
+        const parsed = JSON.parse(loc) as Json;
+        const city = str(parsed.city);
+        const country = str(parsed.country);
+        return [city, country].filter(Boolean).join(", ") || null;
+      } catch { /* not JSON */ }
+    }
+    return loc.trim() || null;
+  }
+  if (typeof loc === "object" && loc !== null) {
+    const o = loc as Json;
+    return [str(o.city), str(o.country)].filter(Boolean).join(", ") || null;
+  }
+  return null;
+}
+
+/** Normalize a partial LinkedIn path/URL to a full https URL. */
+function normalizeLinkedinUrl(raw: unknown): string | null {
+  const s = str(raw);
+  if (!s) return null;
+  if (s.startsWith("http")) return s;
+  if (s.startsWith("linkedin.com")) return `https://www.${s}`;
+  if (s.startsWith("www.linkedin.com")) return `https://${s}`;
+  if (s.startsWith("in/")) return `https://www.linkedin.com/${s}`;
+  return `https://www.linkedin.com/in/${s}`;
+}
+
 export async function buildLeadersList(
   client: SupabaseClient,
   tagUuid: string
@@ -105,7 +138,7 @@ export async function buildLeadersList(
   const { data: contacts, error: cErr } = await client
     .from(CONTACTS_TABLE)
     .select(
-      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, company_id, company_uuid, company_name, pipeline_stage_uuid"
+      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, gs_connection_accepted_at, markers_synced_at"
     )
     // tags is a jsonb array of GetSalesTags uuids → containment needs a JSON string,
     // not a JS array (which supabase-js would serialize as a PostgREST array literal).
@@ -131,7 +164,7 @@ export async function buildLeadersList(
       ? client.from(PIPELINE_STAGES_TABLE).select("uuid, name, category").in("uuid", stageUuids)
       : Promise.resolve({ data: [], error: null }),
     companyIds.length
-      ? client.from(COMPANIES_TABLE).select("id, name, hq_location, hq_raw_address").in("id", companyIds)
+      ? client.from(COMPANIES_TABLE).select("id, name, hq_location, hq_raw_address, employees_on_linkedin, employees_range").in("id", companyIds)
       : Promise.resolve({ data: [], error: null }),
     companyIds.length
       ? client
@@ -160,14 +193,19 @@ export async function buildLeadersList(
   for (const s of ((stagesRes as { data: Json[] }).data ?? []) as Json[])
     stageById.set(String(s.uuid), { name: str(s.name), category: str(s.category) });
 
-  const companyById = new Map<string, { name: string | null; hq: string | null }>();
+  const companyById = new Map<string, { name: string | null; hq: string | null; employee_count: number | null }>();
   for (const c of ((companiesRes as { data: Json[] }).data ?? []) as Json[]) {
-    let hq: string | null = str(c.hq_raw_address);
-    if (!hq && c.hq_location && typeof c.hq_location === "object") {
+    let hq: string | null = null;
+    if (c.hq_location && typeof c.hq_location === "object") {
       const loc = c.hq_location as Json;
       hq = [str(loc.city), str(loc.country)].filter(Boolean).join(", ") || null;
     }
-    companyById.set(String(c.id), { name: str(c.name), hq });
+    if (!hq) hq = parseCityCountry(c.hq_raw_address);
+    companyById.set(String(c.id), {
+      name: str(c.name),
+      hq,
+      employee_count: typeof c.employees_on_linkedin === "number" ? c.employees_on_linkedin : null,
+    });
   }
 
   const povByCompany = new Map<string, Json>();
@@ -224,19 +262,32 @@ export async function buildLeadersList(
     const replies = activity?.inbox_count ?? 0;
     const replyStatus = activity?.reply_status ?? "no_response";
 
-    // connection state: connection_note sent ⇒ "sent"; any inbound message ⇒ "accepted"
+    // Connection state: any linkedin_type='message' = accepted (you can only message
+    // 1st-degree connections). A lone connection_note with no subsequent message = sent.
+    const hasMessage = leadMsgs.some((m) => (m.linkedin_type ?? "") === "message");
     const sentConn = leadMsgs.some((m) => (m.linkedin_type ?? "") === "connection_note");
-    const inbound = leadMsgs
-      .filter((m) => (m.type ?? "").toLowerCase() === "inbox")
-      .map((m) => m.sent_at ?? m.created_at ?? "")
-      .filter(Boolean)
-      .sort();
-    const accepted = inbound.length > 0 || replies > 0;
-    const connection_status: LeaderListRecord["connection_status"] = accepted
+    const connection_status: LeaderListRecord["connection_status"] = hasMessage
       ? "accepted"
       : sentConn
         ? "sent"
         : "none";
+
+    // Accepted-at: prefer GS-synced value (accurate); fall back to earliest message-type msg.
+    const gsAcceptedAt = str(r.gs_connection_accepted_at);
+    const messageDates = leadMsgs
+      .filter((m) => (m.linkedin_type ?? "") === "message")
+      .map((m) => m.sent_at ?? m.created_at ?? "")
+      .filter(Boolean)
+      .sort();
+    const connection_accepted_at = gsAcceptedAt ?? (messageDates.length ? messageDates[0] : null);
+
+    // Email count: prefer GS-synced value; fall back to subject-bearing outbox msgs.
+    const email_count =
+      typeof r.email_sent_count === "number"
+        ? r.email_sent_count
+        : leadMsgs.filter(
+            (m) => m.subject && m.subject.trim() && (m.type ?? "").toLowerCase() === "outbox"
+          ).length;
 
     const name =
       str(r.name) ?? ([str(r.first_name), str(r.last_name)].filter(Boolean).join(" ").trim() || "—");
@@ -246,23 +297,24 @@ export async function buildLeadersList(
       name,
       position: str(r.position),
       headline: str(r.headline),
-      linkedin_url: str(r.linkedin_url) ?? str(r.linkedin),
-      location: str(r.location),
+      linkedin_url: normalizeLinkedinUrl(r.linkedin_url) ?? normalizeLinkedinUrl(r.linkedin),
+      location: parseCityCountry(r.location),
       email: str(r.work_email) ?? str(r.email) ?? str(r.personal_email),
       email_status: str(r.email_status),
       company_id: cid,
       company_name: co?.name ?? str(r.company_name),
       company_hq: co?.hq ?? null,
-      description: str(pov?.research_summary) ?? str(pov?.company_description),
+      employee_count: co?.employee_count ?? null,
       pov_markdown: str(pov?.pov_markdown),
       company_type: str(pov?.company_type_tag),
       services: arrField(pov, "services", "services_list"),
       vendors: arrField(pov, "vendors", "vendor_list", "technologies"),
       connection_status,
-      connection_accepted_at: accepted && inbound.length ? inbound[0] : null,
+      connection_accepted_at,
       automations: [...(automationsByLead.get(uuid) ?? [])],
       outgoing_count: outgoing,
       reply_count: replies,
+      email_count,
       status: deriveStatus(stage?.name ?? null, outgoing, replyStatus),
     };
   });

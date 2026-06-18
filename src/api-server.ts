@@ -125,6 +125,9 @@ import {
   handleGetCompanyCard,
   handlePostCompanySummary,
   handleGetTaggedList,
+  handlePutContactMeta,
+  handlePostSyncMarkers,
+  handlePostRemoveFromList,
 } from "./card-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
@@ -722,6 +725,15 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/lists/tagged":
         await handleGetTaggedList(req, res);
+        return;
+      case "/api/lists/tagged/remove":
+        await handlePostRemoveFromList(req, res);
+        return;
+      case "/api/contacts/meta":
+        await handlePutContactMeta(req, res);
+        return;
+      case "/api/contacts/sync-markers":
+        await handlePostSyncMarkers(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {
