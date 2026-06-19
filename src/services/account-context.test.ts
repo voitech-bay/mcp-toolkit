@@ -19,6 +19,7 @@ function msg(partial: Partial<MessageRow>): MessageRow {
     status: partial.status ?? "sent",
     sent_at: partial.sent_at ?? null,
     created_at: partial.created_at ?? null,
+    linkedin_type: partial.linkedin_type ?? null,
   };
 }
 
@@ -35,6 +36,14 @@ test("groupMessagesIntoThreads: groups by conversation, orders messages chronolo
   assert.equal(c1.messages[0].text, "first");
   assert.equal(c1.messages[1].text, "second");
   assert.equal(c1.last_message_text, "second");
+});
+
+test("groupMessagesIntoThreads: preserves LinkedIn subtype for connection status", () => {
+  const [thread] = groupMessagesIntoThreads([
+    msg({ linkedin_type: "connection_note" }),
+    msg({ linkedin_type: "message" }),
+  ]);
+  assert.deepEqual(thread.messages.map((m) => m.linkedin_type), ["connection_note", "message"]);
 });
 
 test("groupMessagesIntoThreads: reply status no_response / waiting / got_response", () => {

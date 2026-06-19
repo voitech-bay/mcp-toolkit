@@ -72,6 +72,7 @@ import {
   type DateRangeFilter,
 } from "./source-api.js";
 import { syncEventBus } from "./sync-event-bus.js";
+import { MSSP_LEADERS_TAG_UUID, syncMarkersForContacts } from "./getsales-markers.js";
 import {
   SyncCancelledError,
   clearSyncCancellation,
@@ -1192,6 +1193,7 @@ export async function syncSupabaseFromSource(
   // --- Contacts second (incremental); stream pages → Supabase in buffers ---
   await logger.log("contacts: fetching from source", { fetchBufferRows: syncBufferRows });
   const contactBuf: Record<string, unknown>[] = [];
+  const contactUuidsForMarkers = new Set<string>();
   let contactUpsertTotal = 0;
   const contactErrorsAcc: string[] = [];
   const flushContactBuf = async (batch: Record<string, unknown>[]) => {
@@ -1202,6 +1204,10 @@ export async function syncSupabaseFromSource(
   const pushContactPage = async (rows: Record<string, unknown>[]) => {
     const mapped = rows.map(mapContactForSupabase);
     if (projectId) injectProjectId(mapped, projectId);
+    for (const row of mapped) {
+      const uuid = typeof row.uuid === "string" ? row.uuid.trim() : "";
+      if (uuid) contactUuidsForMarkers.add(uuid);
+    }
     contactBuf.push(...mapped);
     while (contactBuf.length >= syncBufferRows) {
       const batch = contactBuf.splice(0, syncBufferRows);
@@ -1232,6 +1238,42 @@ export async function syncSupabaseFromSource(
       result.contacts.error = `${contactErrorsAcc.length} chunk(s) failed: ${contactErrorsAcc.join("; ")}`;
     }
     await logger.log("contacts: upserted", { count: result.contacts.upserted });
+  }
+
+  // Lead search rows do not contain the aggregate marker object. Refresh markers
+  // for contacts touched by this run and every current member of the Supabase-
+  // managed MSSP list, using the same decrypted project secret.
+  if (!contactsRes.error && credentials) {
+    const { data: taggedContacts, error: taggedContactsError } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid")
+      .contains("tags", JSON.stringify([MSSP_LEADERS_TAG_UUID]));
+    if (taggedContactsError) {
+      await logger.logError("contacts: failed to resolve MSSP marker refresh membership", {
+        error: taggedContactsError.message,
+      });
+    } else {
+      for (const row of (taggedContacts ?? []) as Array<{ uuid: string | null }>) {
+        if (row.uuid) contactUuidsForMarkers.add(row.uuid);
+      }
+    }
+    if (contactUuidsForMarkers.size > 0) {
+      await logger.log("contacts: refreshing GetSales markers", { count: contactUuidsForMarkers.size });
+      const markerResult = await syncMarkersForContacts(client, [...contactUuidsForMarkers], credentials);
+      await logger.log("contacts: GetSales markers refreshed", {
+        requested: contactUuidsForMarkers.size,
+        synced: markerResult.synced,
+        skipped: markerResult.skipped,
+        errors: markerResult.errors.length,
+        duration_ms: markerResult.duration_ms,
+      });
+      if (markerResult.errors.length > 0) {
+        await logger.logError("contacts: GetSales marker refresh partially failed", {
+          errorCount: markerResult.errors.length,
+          sample: markerResult.errors.slice(0, 20),
+        });
+      }
+    }
   }
   }
 

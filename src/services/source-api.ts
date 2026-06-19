@@ -14,6 +14,7 @@ import { SyncCancelledError } from "./sync-cancellation.js";
 export interface ApiCredentials {
   baseUrl: string;
   apiKey: string;
+  teamId?: string;
 }
 
 const CONTACTS_PATH = "/leads/api/leads/search";

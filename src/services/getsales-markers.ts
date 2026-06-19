@@ -9,16 +9,14 @@
  * Columns written: email_sent_count, email_inbox_count, email_read_count,
  * email_click_count, gs_connection_accepted_at, markers_synced_at.
  *
- * Called from card-handlers.handlePostSyncMarkers and intended to be wired into
- * the existing Contacts sync path so markers stay current on each sync run.
+ * Called from both the manual list refresh and the normal Contacts sync. Both
+ * paths receive the selected project's decrypted GetSales credentials.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-
-const GS_BASE =
-  (typeof process !== "undefined" && process.env.GETSALES_API_BASE?.trim()) ||
-  "https://app.voitechsales.com";
+import type { ApiCredentials } from "./source-api.js";
 
 const CONTACTS_TABLE = "Contacts";
+export const MSSP_LEADERS_TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
 
 interface GsMarker {
   sender_profile_uuid: string | null;
@@ -35,11 +33,11 @@ interface GsLeadDetail {
   markers?: GsMarker[];
 }
 
-async function fetchLeadDetail(uuid: string, apiKey: string, teamId: string): Promise<GsLeadDetail> {
-  const resp = await fetch(`${GS_BASE}/leads/api/leads/${uuid}`, {
+async function fetchLeadDetail(uuid: string, credentials: ApiCredentials): Promise<GsLeadDetail> {
+  const resp = await fetch(`${credentials.baseUrl.replace(/\/$/, "")}/leads/api/leads/${uuid}`, {
     headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Team-ID": teamId,
+      Authorization: `Bearer ${credentials.apiKey}`,
+      ...(credentials.teamId ? { "Team-ID": credentials.teamId } : {}),
       "Content-Type": "application/json",
     },
   });
@@ -69,8 +67,7 @@ export interface MarkerSyncResult {
 export async function syncMarkersForContacts(
   client: SupabaseClient,
   contactUuids: string[],
-  apiKey: string,
-  teamId: string
+  credentials: ApiCredentials
 ): Promise<MarkerSyncResult> {
   const start = Date.now();
   let synced = 0;
@@ -79,7 +76,7 @@ export async function syncMarkersForContacts(
 
   for (const uuid of contactUuids) {
     try {
-      const detail = await fetchLeadDetail(uuid, apiKey, teamId);
+      const detail = await fetchLeadDetail(uuid, credentials);
       const m = pickAggregate(detail.markers ?? []);
       if (!m) {
         skipped++;

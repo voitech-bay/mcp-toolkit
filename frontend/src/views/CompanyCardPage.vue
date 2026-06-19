@@ -55,6 +55,28 @@ interface SummaryEntry {
     suggested_next_step?: string;
   };
 }
+interface ListRecord extends Json {
+  uuid: string;
+  name: string;
+  linkedin_url: string | null;
+  position: string | null;
+  location: string | null;
+  email: string | null;
+  email_status: string | null;
+  company_hq: string | null;
+  employee_count: number | null;
+  company_type: string | null;
+  pov_markdown: string | null;
+  services: string[];
+  vendors: string[];
+  connection_status: string;
+  connection_accepted_at: string | null;
+  automations: string[];
+  outgoing_count: number;
+  reply_count: number;
+  email_count: number | null;
+  status: string;
+}
 
 const route = useRoute();
 const message = useMessage();
@@ -77,6 +99,7 @@ const threads = computed<Thread[]>(() => (card.value?.conversations as Thread[])
 const contextEntries = computed<Json[]>(() => (card.value?.context_entries as Json[]) ?? []);
 const summary = computed<SummaryEntry | null>(() => (card.value?.account_summary as SummaryEntry) ?? null);
 const summaryStale = computed(() => Boolean(card.value?.account_summary_stale));
+const listRecords = computed<ListRecord[]>(() => (card.value?.list_records as ListRecord[]) ?? []);
 
 const nameByLead = computed(() => {
   const m = new Map<string, string>();
@@ -174,12 +197,37 @@ const rosterColumns = computed<DataTableColumns<RosterRow>>(() => [
   },
 ]);
 
+const listColumns = computed<DataTableColumns<ListRecord>>(() => [
+  {
+    title: "Contact", key: "name", minWidth: 180,
+    render: (row) => h(RouterLink, { to: `/contact/${row.uuid}`, class: "card-link" }, { default: () => row.name }),
+  },
+  {
+    title: "LinkedIn", key: "linkedin_url", width: 90,
+    render: (row) => row.linkedin_url ? h("a", { href: row.linkedin_url, target: "_blank", rel: "noopener noreferrer", class: "card-link" }, "Open ↗") : "—",
+  },
+  { title: "Title", key: "position", minWidth: 180, ellipsis: { tooltip: true }, render: (r) => r.position ?? "—" },
+  { title: "Location", key: "location", minWidth: 130, render: (r) => r.location ?? "—" },
+  { title: "Email", key: "email", minWidth: 210, ellipsis: { tooltip: true }, render: (r) => r.email ?? "—" },
+  { title: "Email status", key: "email_status", width: 120, render: (r) => r.email_status ?? "—" },
+  { title: "Connection", key: "connection_status", width: 110 },
+  { title: "Accepted", key: "connection_accepted_at", width: 110, render: (r) => r.connection_accepted_at ? fmtDate(r.connection_accepted_at) : "—" },
+  { title: "Automations", key: "automations", minWidth: 180, ellipsis: { tooltip: true }, render: (r) => r.automations.length ? r.automations.join(", ") : "—" },
+  { title: "Out", key: "outgoing_count", width: 60 },
+  { title: "Replies", key: "reply_count", width: 70 },
+  { title: "Emails sent", key: "email_count", width: 90, render: (r) => r.email_count ?? "—" },
+  { title: "Status", key: "status", minWidth: 160 },
+]);
+
 async function load() {
   if (!companyId.value) return;
   loading.value = true;
   loadError.value = "";
   try {
-    const r = await fetch(`/api/cards/company?id=${encodeURIComponent(companyId.value)}`);
+    const params = new URLSearchParams({ id: companyId.value });
+    const tag = typeof route.query.tag === "string" ? route.query.tag : "";
+    if (tag) params.set("tag", tag);
+    const r = await fetch(`/api/cards/company?${params.toString()}`);
     const data = (await r.json()) as Json & { error?: string };
     if (!r.ok) throw new Error(data.error ?? "Failed to load");
     card.value = data;
@@ -267,6 +315,31 @@ watch(companyId, load);
           <NDivider style="margin: 12px 0" />
           <NText depth="3" style="font-size: 0.85rem">{{ String(company.about).slice(0, 400) }}</NText>
         </template>
+      </NCard>
+
+      <!-- Fields carried from the MSSP Leaders list when opened from that list. -->
+      <NCard v-if="listRecords.length" title="MSSP Leaders list details" size="small">
+        <NSpace vertical size="small">
+          <NSpace wrap size="small">
+            <NTag v-if="listRecords[0].company_type" type="info" size="small">
+              {{ listRecords[0].company_type }}
+            </NTag>
+            <NTag v-if="listRecords[0].company_hq" size="small">HQ: {{ listRecords[0].company_hq }}</NTag>
+            <NTag v-if="listRecords[0].employee_count != null" size="small">
+              {{ listRecords[0].employee_count.toLocaleString() }} employees on LinkedIn
+            </NTag>
+          </NSpace>
+          <div v-if="listRecords[0].services.length"><strong>Services:</strong> {{ listRecords[0].services.join(", ") }}</div>
+          <div v-if="listRecords[0].vendors.length"><strong>Vendors:</strong> {{ listRecords[0].vendors.join(", ") }}</div>
+          <div v-if="listRecords[0].pov_markdown" style="white-space: pre-wrap">{{ listRecords[0].pov_markdown }}</div>
+          <NDataTable
+            :columns="listColumns"
+            :data="listRecords"
+            size="small"
+            striped
+            :scroll-x="1900"
+          />
+        </NSpace>
       </NCard>
 
       <!-- Account summary -->

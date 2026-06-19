@@ -61,7 +61,13 @@ export interface ConversationThread {
   last_message_text: string | null;
   last_message_type: string | null;
   reply_status: "no_response" | "waiting_for_response" | "got_response";
-  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject: string | null }>;
+  messages: Array<{
+    text: string | null;
+    type: string | null;
+    sent_at: string | null;
+    subject: string | null;
+    linkedin_type: string | null;
+  }>;
 }
 
 export interface ContactActivity {
@@ -112,7 +118,13 @@ export function groupMessagesIntoThreads(rows: MessageRow[], opts?: { messagesPe
       last_message_text: last?.text ?? null,
       last_message_type: last?.type ?? null,
       reply_status,
-      messages: msgs.slice(-cap).map((m) => ({ text: m.text, type: m.type, sent_at: msgTime(m) || null, subject: m.subject })),
+      messages: msgs.slice(-cap).map((m) => ({
+        text: m.text,
+        type: m.type,
+        sent_at: msgTime(m) || null,
+        subject: m.subject,
+        linkedin_type: m.linkedin_type ?? null,
+      })),
     });
   }
   threads.sort((a, b) => (b.last_message_at ?? "").localeCompare(a.last_message_at ?? ""));

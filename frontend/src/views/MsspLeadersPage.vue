@@ -8,6 +8,7 @@ import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon, MailIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
+import { useProjectStore } from "../stores/project";
 
 const composerLead = ref<{ uuid: string; name: string; connected: boolean; email?: string } | null>(null);
 function openComposer(row: LeaderRecord) {
@@ -43,7 +44,7 @@ interface LeaderRecord {
   automations: string[];
   outgoing_count: number;
   reply_count: number;
-  email_count: number;
+  email_count: number | null;
   status: string;
 }
 
@@ -57,6 +58,7 @@ const statusFilter = ref<string | null>(null);
 const connFilter = ref<string | null>(null);
 const typeFilter = ref<string | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
+const projectStore = useProjectStore();
 
 async function fetchList() {
   loading.value = true;
@@ -76,13 +78,17 @@ async function fetchList() {
 }
 
 async function syncEmails() {
+  if (!projectStore.selectedProjectId) {
+    error.value = "Select the Feasible project before syncing GetSales markers.";
+    return;
+  }
   syncing.value = true;
   error.value = "";
   try {
     const r = await fetch("/api/contacts/sync-markers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag: TAG_UUID }),
+      body: JSON.stringify({ tag: TAG_UUID, projectId: projectStore.selectedProjectId }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Sync failed");
@@ -206,7 +212,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     sorter: (a, b) => (a.company_name ?? "").localeCompare(b.company_name ?? ""),
     render: (row) =>
       row.company_id
-        ? h(RouterLink, { to: `/company/${row.company_id}`, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name ?? "—" })
+        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: TAG_UUID } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name ?? "—" })
         : (row.company_name ?? "—"),
   },
   { title: "Location", key: "location", width: 130, ellipsis: { tooltip: true }, render: (r) => r.location ?? "—" },
@@ -232,7 +238,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
   },
   { title: "Out", key: "outgoing_count", width: 56, sorter: (a, b) => a.outgoing_count - b.outgoing_count, render: (r) => r.outgoing_count },
   { title: "Replies", key: "reply_count", width: 68, sorter: (a, b) => a.reply_count - b.reply_count, render: (r) => r.reply_count },
-  { title: "Emails", key: "email_count", width: 64, sorter: (a, b) => a.email_count - b.email_count, render: (r) => r.email_count },
+  { title: "Emails", key: "email_count", width: 64, sorter: (a, b) => (a.email_count ?? -1) - (b.email_count ?? -1), render: (r) => r.email_count ?? "—" },
   {
     title: "Status", key: "status", width: 160, ellipsis: { tooltip: true },
     sorter: (a, b) => a.status.localeCompare(b.status),
