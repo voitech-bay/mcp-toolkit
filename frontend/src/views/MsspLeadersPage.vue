@@ -113,12 +113,35 @@ async function removeFromList(uuids: string[]) {
 
 onMounted(fetchList);
 
+const STATUS_FILTER_ORDER = [
+  "Not Contacted",
+  "No Reply",
+  "Contacted",
+  "Awaiting Their Reply",
+  "Waiting for Reply",
+  "Engaging",
+  "Positive Reply",
+  "Meeting / Opportunity",
+  "Bad Timing",
+  "Not Interested",
+  "Current Customer",
+];
+
 function uniq(vals: (string | null)[]): { label: string; value: string }[] {
   return [...new Set(vals.filter((v): v is string => Boolean(v)))]
     .sort()
     .map((v) => ({ label: v, value: v }));
 }
-const statusOptions = computed(() => uniq(data.value.map((d) => d.status)));
+const statusOptions = computed(() => {
+  const inData = new Set(data.value.map((d) => d.status));
+  const options = STATUS_FILTER_ORDER
+    .filter((s) => inData.has(s) || s === "No Reply")
+    .map((v) => ({ label: v, value: v }));
+  for (const s of [...inData].sort()) {
+    if (!STATUS_FILTER_ORDER.includes(s)) options.push({ label: s, value: s });
+  }
+  return options;
+});
 const typeOptions = computed(() => uniq(data.value.map((d) => d.company_type)));
 const connOptions = [
   { label: "Accepted", value: "accepted" },
@@ -147,6 +170,7 @@ const statusType = (s: string) => {
   const l = s.toLowerCase();
   if (l.includes("positive") || l.includes("opportunity") || l.includes("meeting") || l.includes("customer")) return "success";
   if (l.includes("not interested") || l.includes("bad timing")) return "error";
+  if (l.includes("no reply")) return "warning";
   if (l.includes("waiting")) return "info";
   return "default";
 };
