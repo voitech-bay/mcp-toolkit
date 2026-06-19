@@ -76,7 +76,21 @@ interface StatusInputs {
   stageCategory: string | null;
   replyStatus: string;
   replyCount: number;
+  outgoingCount: number;
+  emailCount: number | null;
   wasContacted: boolean;
+}
+
+function isPlainRepliedStage(name: string): boolean {
+  return name === "replied" || (name.includes("replied") && !name.includes("positive") && !name.includes("negative"));
+}
+
+function noReplyAfterManyMessages(input: StatusInputs): string | null {
+  const touchpoints = input.outgoingCount + (input.emailCount ?? 0);
+  if (touchpoints >= 3 && input.replyCount === 0 && input.replyStatus === "no_response") {
+    return "No reply after 3+ messages";
+  }
+  return null;
 }
 
 /** Map pipeline stage + outreach activity to the rep-facing status label. */
@@ -86,12 +100,15 @@ function deriveStatus(input: StatusInputs): string {
 
   if (name.includes("opportunity") || name.includes("meeting") || name.includes("active opportunity"))
     return "Meeting / Opportunity";
-  if (name.includes("positive") || (name.includes("replied") && !name.includes("negative")))
+  if (name.includes("replied - positive") || (name.includes("positive") && name.includes("replied")))
     return "Positive Reply";
+  if (name.includes("replied - negative") || (name.includes("negative") && name.includes("replied")))
+    return "Not Interested";
+  if (isPlainRepliedStage(name)) return "Replied";
   if (name.includes("customer")) return "Current Customer";
   if (name.includes("unresponsive")) return "No Reply";
   if (name.includes("bad timing")) return "Bad Timing";
-  if (name.includes("not interested") || name.includes("do not contact") || name.includes("negative"))
+  if (name.includes("not interested") || name.includes("do not contact"))
     return "Not Interested";
 
   if (cat === "positive") return "Positive Reply";
@@ -101,12 +118,17 @@ function deriveStatus(input: StatusInputs): string {
     return "Not Interested";
   }
   if (cat === "engaging") {
+    if (input.replyCount > 0 || input.replyStatus === "got_response") return "Replied";
+    const manyNoReply = noReplyAfterManyMessages(input);
+    if (manyNoReply) return manyNoReply;
     if (input.wasContacted && input.replyCount === 0 && input.replyStatus === "no_response") return "No Reply";
     return "Engaging";
   }
 
-  if (input.replyStatus === "got_response") return "Waiting for Reply";
+  if (input.replyStatus === "got_response") return "Replied";
   if (input.replyStatus === "waiting_for_response") return "Awaiting Their Reply";
+  const manyNoReply = noReplyAfterManyMessages(input);
+  if (manyNoReply) return manyNoReply;
   if (input.wasContacted && input.replyCount === 0 && input.replyStatus === "no_response") return "No Reply";
   if (input.wasContacted) return "Contacted";
   return "Not Contacted";
@@ -363,6 +385,8 @@ export async function buildLeadersList(
         stageCategory: stage?.category ?? null,
         replyStatus,
         replyCount: replies,
+        outgoingCount: outgoing,
+        emailCount: email_count,
         wasContacted,
       }),
     };
