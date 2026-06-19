@@ -20,7 +20,7 @@ import {
 } from "naive-ui";
 import type { SelectOption } from "naive-ui";
 
-const props = defineProps<{ leadUuid: string; contactName?: string }>();
+const props = defineProps<{ leadUuid: string; contactName?: string; connected?: boolean; email?: string }>();
 const message = useMessage();
 
 interface Sender {
@@ -37,10 +37,11 @@ interface Variant {
   error?: string;
 }
 
-const CHANNELS: SelectOption[] = [
-  { label: "LinkedIn message", value: "linkedin" },
-  { label: "LinkedIn InMail", value: "inmail" },
-];
+const CHANNELS = [
+  { label: "Send message", value: "linkedin" },
+  { label: "Send InMail", value: "inmail" },
+  { label: "Send email", value: "email" },
+] as const;
 const ANGLES: SelectOption[] = [
   { label: "Auto (model picks)", value: "" },
   { label: "1 - Productize ($)", value: "productize" },
@@ -50,9 +51,9 @@ const ANGLES: SelectOption[] = [
   { label: "Practitioner (technical)", value: "practitioner" },
 ];
 
-const channel = ref("linkedin");
+const channel = ref(props.connected ? "linkedin" : "inmail");
 const angle = ref("");
-const instructions = ref("");
+const prompts = ref<Record<string, string>>({ linkedin: "", inmail: "", email: "" });
 const generating = ref(false);
 const genTier = ref<"cheap" | "premium">("cheap");
 
@@ -73,9 +74,29 @@ const sending = ref(false);
 const senderOptions = computed<SelectOption[]>(() =>
   senders.value.map((s) => ({ label: `${s.persona} (signs "${s.signature}")`, value: s.sender_profile_uuid }))
 );
-const isInmail = computed(() => channel.value === "inmail");
+const needsSubject = computed(() => channel.value === "inmail" || channel.value === "email");
+const userPrompt = computed({
+  get: () => prompts.value[channel.value] ?? "",
+  set: (value: string) => { prompts.value[channel.value] = value; },
+});
+function channelDisabled(value: string) {
+  return (value === "linkedin" && !props.connected) || (value === "email" && !props.email);
+}
+const channelHint = computed(() => {
+  if (channel.value === "linkedin") return props.connected ? "Connected LinkedIn message" : "Unavailable until the connection is accepted";
+  if (channel.value === "email") return props.email ? `Email to ${props.email}` : "Unavailable because no work email is stored";
+  return "LinkedIn InMail does not require a connection";
+});
 
 async function generate(tier: "cheap" | "premium") {
+  if (channel.value === "linkedin" && !props.connected) {
+    message.warning("Send message is available only for accepted LinkedIn connections.");
+    return;
+  }
+  if (channel.value === "email" && !props.email) {
+    message.warning("This contact has no work email.");
+    return;
+  }
   generating.value = true;
   genTier.value = tier;
   try {
@@ -88,7 +109,7 @@ async function generate(tier: "cheap" | "premium") {
         angle: angle.value || undefined,
         tier,
         variants: 2,
-        instructions: instructions.value || undefined,
+        instructions: userPrompt.value || undefined,
         senderProfileUuid: senderUuid.value || undefined,
       }),
     });
@@ -159,7 +180,7 @@ async function doSend() {
         senderProfileUuid: senderUuid.value,
         channel: channel.value,
         text: editText.value,
-        subject: isInmail.value ? editSubject.value : undefined,
+        subject: needsSubject.value ? editSubject.value : undefined,
       }),
     });
     const data = await r.json();
@@ -181,21 +202,36 @@ const currentSenderPersona = computed(() => senders.value.find((s) => s.sender_p
 
 <template>
   <div class="fc">
+    <div class="fc-channels" role="group" aria-label="Outreach channel">
+      <NButton
+        v-for="option in CHANNELS"
+        :key="option.value"
+        :data-testid="`feasible-channel-${option.value}`"
+        :type="channel === option.value ? 'primary' : 'default'"
+        :secondary="channel !== option.value"
+        :disabled="channelDisabled(option.value)"
+        size="small"
+        @click="changeChannel(option.value)"
+      >
+        {{ option.label }}
+      </NButton>
+    </div>
+
     <NSpace align="center" wrap size="small">
-      <NSelect :value="channel" :options="CHANNELS" style="width: 170px" size="small" @update:value="changeChannel" />
       <NSelect v-model:value="angle" :options="ANGLES" style="width: 190px" size="small" />
       <NButton type="primary" size="small" :loading="generating && genTier === 'cheap'" @click="generate('cheap')">Generate</NButton>
       <NButton size="small" :loading="generating && genTier === 'premium'" @click="generate('premium')">Try Opus</NButton>
     </NSpace>
 
     <NInput
-      v-model:value="instructions"
+      v-model:value="userPrompt"
       type="textarea"
       :autosize="{ minRows: 1, maxRows: 3 }"
-      placeholder="optional instructions for the agent (angle nuance, what to reference, length)"
+      placeholder="Your instructions for this message. These are applied on top of Feasible's messaging rules and contact context."
       size="small"
       style="margin-top: 8px"
     />
+    <NText depth="3" style="display:block;margin-top:4px;font-size:0.75rem">{{ channelHint }}</NText>
 
     <NSpace v-if="senders.length" align="center" size="small" style="margin-top: 8px">
       <NText depth="3" style="font-size: 0.8rem">sender:</NText>
@@ -237,7 +273,7 @@ const currentSenderPersona = computed(() => senders.value.find((s) => s.sender_p
     <!-- edit + send -->
     <div v-if="selectedIdx !== null" class="fc-edit">
       <NInput
-        v-if="isInmail"
+        v-if="needsSubject"
         v-model:value="editSubject"
         placeholder="subject"
         size="small"
@@ -262,13 +298,19 @@ const currentSenderPersona = computed(() => senders.value.find((s) => s.sender_p
       <NText depth="3" style="font-size: 0.8rem">
         To {{ props.contactName || props.leadUuid.slice(0, 8) }} · from {{ currentSenderPersona }} · {{ channel }}
       </NText>
-      <div v-if="isInmail && editSubject" style="margin-top: 8px"><strong>Subject:</strong> {{ editSubject }}</div>
+      <div v-if="needsSubject && editSubject" style="margin-top: 8px"><strong>Subject:</strong> {{ editSubject }}</div>
       <pre class="fc-confirm">{{ editText }}</pre>
     </NModal>
   </div>
 </template>
 
 <style scoped>
+.fc-channels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
 .fc-selected {
   outline: 2px solid #2080f0;
 }

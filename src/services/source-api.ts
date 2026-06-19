@@ -865,6 +865,56 @@ export async function sendLinkedInMessage(
   return fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "POST", body: JSON.stringify(body) });
 }
 
+export interface SendEmailParams {
+  senderProfileUuid: string;
+  leadUuid: string;
+  fromName: string;
+  fromEmail: string;
+  toName: string;
+  toEmail: string;
+  subject: string;
+  body: string;
+}
+
+export function buildEmailPayload(params: SendEmailParams): Record<string, unknown> {
+  const required: Array<[string, string]> = [
+    ["senderProfileUuid", params.senderProfileUuid],
+    ["leadUuid", params.leadUuid],
+    ["fromName", params.fromName],
+    ["fromEmail", params.fromEmail],
+    ["toName", params.toName],
+    ["toEmail", params.toEmail],
+    ["subject", params.subject],
+    ["body", params.body],
+  ];
+  for (const [name, value] of required) {
+    if (!value?.trim()) throw new Error(`sendEmail: ${name} required`);
+  }
+  return {
+    sender_profile_uuid: params.senderProfileUuid.trim(),
+    lead_uuid: params.leadUuid.trim(),
+    from_name: params.fromName.trim(),
+    from_email: params.fromEmail.trim(),
+    to_name: params.toName.trim(),
+    to_email: params.toEmail.trim(),
+    cc: [],
+    bcc: [],
+    subject: params.subject.trim(),
+    body: params.body.trim(),
+  };
+}
+
+export async function sendEmail(
+  credentials: ApiCredentials | undefined,
+  params: SendEmailParams
+): Promise<Record<string, unknown>> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const body = buildEmailPayload(params);
+  const url = `${config.baseUrl}/emails/api/emails/send-email`;
+  return fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "POST", body: JSON.stringify(body) });
+}
+
 /**
  * Fetch many contacts by UUID via a bounded concurrency pool of `GET /leads/api/leads/{uuid}` calls.
  * Never throws: per-UUID failures collected in `errors`; 404s recorded in `missing`.

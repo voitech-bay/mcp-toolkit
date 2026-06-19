@@ -68,7 +68,13 @@ function str(v: unknown): string | null {
 }
 
 /** Map a GetSales pipeline-stage name to the rep-facing status, else derive from activity. */
-function deriveStatus(stageName: string | null, outgoing: number, replyStatus: string): string {
+function deriveStatus(
+  stageName: string | null,
+  outgoing: number,
+  replyStatus: string,
+  emailCount: number,
+  replyCount: number
+): string {
   if (stageName) {
     const s = stageName.toLowerCase();
     if (s.includes("opportunity") || s.includes("meeting")) return "Meeting / Opportunity";
@@ -81,8 +87,9 @@ function deriveStatus(stageName: string | null, outgoing: number, replyStatus: s
   }
   if (replyStatus === "got_response") return "Waiting for Reply";
   if (replyStatus === "waiting_for_response") return "Awaiting Their Reply";
-  if (outgoing >= 2) return "No reply after 2 messages";
-  if (outgoing > 0) return "Contacted";
+  const contacted = outgoing > 0 || emailCount > 0;
+  if (contacted && replyCount === 0 && replyStatus === "no_response") return "No Reply";
+  if (contacted) return "Contacted";
   return "Not Contacted";
 }
 
@@ -315,7 +322,7 @@ export async function buildLeadersList(
       outgoing_count: outgoing,
       reply_count: replies,
       email_count,
-      status: deriveStatus(stage?.name ?? null, outgoing, replyStatus),
+      status: deriveStatus(stage?.name ?? null, outgoing, replyStatus, email_count, replies),
     };
   });
 

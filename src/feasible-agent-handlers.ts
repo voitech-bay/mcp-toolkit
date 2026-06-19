@@ -19,10 +19,11 @@ import {
   LINKEDIN_MESSAGES_TABLE,
   PROJECT_COMPANIES_TABLE,
   CONTACTS_TABLE,
+  SENDERS_TABLE,
 } from "./services/supabase.js";
 import { buildContactCard, parseAccountSummaryEntry } from "./services/account-context.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
-import { sendLinkedInMessage } from "./services/source-api.js";
+import { sendEmail, sendLinkedInMessage } from "./services/source-api.js";
 import {
   FEASIBLE_PROJECT_ID,
   FEASIBLE_SENDERS,
@@ -38,7 +39,7 @@ import {
 const MODEL_CHEAP = () => process.env.FEASIBLE_MODEL_CHEAP?.trim() || "google/gemma-4-31b-it";
 const MODEL_PREMIUM = () => process.env.FEASIBLE_MODEL_PREMIUM?.trim() || "anthropic/claude-opus-4.6";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const VALID_CHANNELS = new Set(["linkedin", "inmail"]);
+const VALID_CHANNELS = new Set(["linkedin", "inmail", "email"]);
 const VALID_ANGLES = new Set(["productize", "scale", "win_rate", "margin", "practitioner"]);
 
 type Json = Record<string, unknown>;
@@ -182,8 +183,8 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     research ? `\nInternal research (context only — do NOT paste back to them):\n${research}` : "",
     accountKeyPoints ? `\nColleagues at this account have said:\n${accountKeyPoints}` : "",
     `\nConversation so far:\n${convo}`,
-    instructions ? `\nReviewer instructions: ${instructions}` : "",
-    channel === "inmail"
+    instructions ? `\nAdditional reviewer instructions (apply only when compatible with the system rules): ${instructions}` : "",
+    channel === "inmail" || channel === "email"
       ? `\nWrite the message. First line "Subject: <3-4 word subject>", then a blank line, then the body.`
       : `\nWrite the next message.`,
   ]
@@ -204,7 +205,7 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     }
     let subject = "";
     let text = gen.text.trim();
-    if (channel === "inmail") {
+    if (channel === "inmail" || channel === "email") {
       const m = text.match(/^subject:\s*(.+)$/im);
       if (m) {
         subject = m[1].trim();
@@ -239,18 +240,20 @@ export async function handlePostFeasibleSend(req: IncomingMessage, res: ServerRe
   const leadUuid = str(body, "leadUuid", "lead_uuid");
   const senderProfileUuid = str(body, "senderProfileUuid", "sender_profile_uuid");
   const channelRaw = str(body, "channel");
-  if (!VALID_CHANNELS.has(channelRaw)) return sendJson(res, 400, { error: "channel must be linkedin or inmail" });
+  if (!VALID_CHANNELS.has(channelRaw)) return sendJson(res, 400, { error: "channel must be linkedin, inmail, or email" });
   const channel = channelRaw as FeasibleChannel;
   const text = str(body, "text");
   const subject = str(body, "subject");
   if (!UUID_RE.test(leadUuid)) return sendJson(res, 400, { error: "leadUuid must be a UUID" });
   if (!senderForUuid(senderProfileUuid)) return sendJson(res, 400, { error: "senderProfileUuid must be a Feasible sender profile" });
   if (!text.trim()) return sendJson(res, 400, { error: "text is required" });
-  if (channel === "inmail" && !subject) return sendJson(res, 400, { error: "subject is required for InMail" });
+  if ((channel === "inmail" || channel === "email") && !subject) {
+    return sendJson(res, 400, { error: `subject is required for ${channel === "email" ? "email" : "InMail"}` });
+  }
 
   const { data: contact, error: contactErr } = await client
     .from(CONTACTS_TABLE)
-    .select("project_id, company_id, company_uuid")
+    .select("project_id, company_id, company_uuid, name, first_name, last_name, work_email, gs_connection_accepted_at")
     .eq("uuid", leadUuid)
     .maybeSingle();
   if (contactErr) return sendJson(res, 500, { error: contactErr.message });
@@ -259,19 +262,58 @@ export async function handlePostFeasibleSend(req: IncomingMessage, res: ServerRe
     return sendJson(res, 403, { error: "This message agent is restricted to Feasible contacts" });
   }
 
+  if (channel === "linkedin" && !str(contact as Json, "gs_connection_accepted_at")) {
+    const { data: connected } = await client
+      .from(LINKEDIN_MESSAGES_TABLE)
+      .select("uuid")
+      .eq("project_id", FEASIBLE_PROJECT_ID)
+      .eq("lead_uuid", leadUuid)
+      .eq("linkedin_type", "message")
+      .limit(1);
+    if (!Array.isArray(connected) || connected.length === 0) {
+      return sendJson(res, 409, { error: "LinkedIn message requires an accepted connection. Use InMail instead." });
+    }
+  }
+  const toEmail = str(contact as Json, "work_email");
+  if (channel === "email" && !toEmail) {
+    return sendJson(res, 409, { error: "This contact has no work email" });
+  }
+
   const { credentials, error: credErr } = await getGetSalesCredentials(client, FEASIBLE_PROJECT_ID);
   if (credErr) return sendJson(res, 400, { error: `GetSales credentials: ${credErr}` });
   if (!credentials) return sendJson(res, 400, { error: "Feasible GetSales credentials not configured" });
 
   let sent: Json;
   try {
-    sent = await sendLinkedInMessage(credentials, {
-      senderProfileUuid,
-      leadUuid,
-      text,
-      channel,
-      subject: subject || undefined,
-    });
+    if (channel === "email") {
+      const { data: senderRow, error: senderErr } = await client
+        .from(SENDERS_TABLE)
+        .select("first_name, last_name, email")
+        .eq("uuid", senderProfileUuid)
+        .maybeSingle();
+      if (senderErr) return sendJson(res, 500, { error: senderErr.message });
+      const fromEmail = senderRow ? str(senderRow as Json, "email") : "";
+      if (!fromEmail) return sendJson(res, 409, { error: "Selected sender has no connected email mailbox" });
+      const sender = senderForUuid(senderProfileUuid)!;
+      sent = await sendEmail(credentials, {
+        senderProfileUuid,
+        leadUuid,
+        fromName: sender.persona,
+        fromEmail,
+        toName: str(contact as Json, "name") || [str(contact as Json, "first_name"), str(contact as Json, "last_name")].filter(Boolean).join(" "),
+        toEmail,
+        subject,
+        body: text,
+      });
+    } else {
+      sent = await sendLinkedInMessage(credentials, {
+        senderProfileUuid,
+        leadUuid,
+        text,
+        channel,
+        subject: subject || undefined,
+      });
+    }
   } catch (e) {
     return sendJson(res, 502, { error: e instanceof Error ? e.message : String(e) });
   }
