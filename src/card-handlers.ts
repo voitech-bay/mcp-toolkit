@@ -94,6 +94,23 @@ export async function handleGetTaggedList(req: IncomingMessage, res: ServerRespo
   if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
   const tag = queryParam(req, "tag");
   if (!UUID_RE.test(tag)) return sendJson(res, 400, { error: "tag must be a UUID" });
+
+  // Refresh GetSales markers for contacts never synced so email/connection stats are accurate.
+  const baseUrl = process.env.SOURCE_API_BASE_URL?.trim() ?? "";
+  const apiKey = process.env.GETSALES_FEASIBLE_API_KEY?.trim() ?? "";
+  const teamId = process.env.GETSALES_FEASIBLE_TEAM_ID?.trim() ?? "";
+  if (baseUrl && apiKey && teamId) {
+    const { data: unsynced, error: unsyncedErr } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid")
+      .contains("tags", JSON.stringify([tag]))
+      .is("markers_synced_at", null);
+    if (!unsyncedErr && unsynced?.length) {
+      const uuids = ((unsynced ?? []) as { uuid: string }[]).map((r) => r.uuid).filter(Boolean);
+      if (uuids.length) await syncMarkersForContacts(client, uuids, { baseUrl, apiKey, teamId });
+    }
+  }
+
   const { data, error } = await buildLeadersList(client, tag);
   if (error) return sendJson(res, 500, { error });
   sendJson(res, 200, { data, total: data.length });

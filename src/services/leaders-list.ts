@@ -54,7 +54,7 @@ export interface LeaderListRecord {
   services: string[];
   vendors: string[];
   // markers
-  connection_status: "accepted" | "sent" | "none";
+  connection_status: "accepted" | "sent" | "withdrawn" | "none";
   connection_accepted_at: string | null;
   automations: string[];
   outgoing_count: number;
@@ -67,29 +67,48 @@ function str(v: unknown): string | null {
   return typeof v === "string" && v.trim() ? v : null;
 }
 
-/** Map a GetSales pipeline-stage name to the rep-facing status, else derive from activity. */
-function deriveStatus(
-  stageName: string | null,
-  outgoing: number,
-  replyStatus: string,
-  emailCount: number | null,
-  replyCount: number
-): string {
-  if (stageName) {
-    const s = stageName.toLowerCase();
-    if (s.includes("opportunity") || s.includes("meeting")) return "Meeting / Opportunity";
-    if (s.includes("positive")) return "Positive Reply";
-    if (s.includes("negative") || s.includes("do not contact")) return "Not Interested";
-    if (s.includes("customer")) return "Current Customer";
-    if (s.includes("unresponsive")) return "No Reply";
-    if (s.includes("bad timing")) return "Bad Timing";
-    if (s.includes("engaging")) return "Engaging";
+function num(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) ? v : 0;
+}
+
+interface StatusInputs {
+  stageName: string | null;
+  stageCategory: string | null;
+  replyStatus: string;
+  replyCount: number;
+  wasContacted: boolean;
+}
+
+/** Map pipeline stage + outreach activity to the rep-facing status label. */
+function deriveStatus(input: StatusInputs): string {
+  const name = (input.stageName ?? "").toLowerCase();
+  const cat = (input.stageCategory ?? "").toLowerCase();
+
+  if (name.includes("opportunity") || name.includes("meeting") || name.includes("active opportunity"))
+    return "Meeting / Opportunity";
+  if (name.includes("positive") || (name.includes("replied") && !name.includes("negative")))
+    return "Positive Reply";
+  if (name.includes("customer")) return "Current Customer";
+  if (name.includes("unresponsive")) return "No Reply";
+  if (name.includes("bad timing")) return "Bad Timing";
+  if (name.includes("not interested") || name.includes("do not contact") || name.includes("negative"))
+    return "Not Interested";
+
+  if (cat === "positive") return "Positive Reply";
+  if (cat === "negative") {
+    if (name.includes("unresponsive")) return "No Reply";
+    if (name.includes("bad timing")) return "Bad Timing";
+    return "Not Interested";
   }
-  if (replyStatus === "got_response") return "Waiting for Reply";
-  if (replyStatus === "waiting_for_response") return "Awaiting Their Reply";
-  const contacted = outgoing > 0 || (emailCount ?? 0) > 0;
-  if (contacted && replyCount === 0 && replyStatus === "no_response") return "No Reply";
-  if (contacted) return "Contacted";
+  if (cat === "engaging") {
+    if (input.wasContacted && input.replyCount === 0 && input.replyStatus === "no_response") return "No Reply";
+    return "Engaging";
+  }
+
+  if (input.replyStatus === "got_response") return "Waiting for Reply";
+  if (input.replyStatus === "waiting_for_response") return "Awaiting Their Reply";
+  if (input.wasContacted && input.replyCount === 0 && input.replyStatus === "no_response") return "No Reply";
+  if (input.wasContacted) return "Contacted";
   return "Not Contacted";
 }
 
@@ -158,7 +177,7 @@ export async function buildLeadersList(
   const { data: contacts, error: cErr } = await client
     .from(CONTACTS_TABLE)
     .select(
-      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, gs_connection_accepted_at, markers_synced_at"
+      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, email_inbox_count, gs_connection_sent_at, gs_connection_lost_at, gs_connection_accepted_at, markers_synced_at"
     )
     // tags is a jsonb array of GetSalesTags uuids → containment needs a JSON string,
     // not a JS array (which supabase-js would serialize as a PostgREST array literal).
@@ -279,21 +298,22 @@ export async function buildLeadersList(
     const threads = groupMessagesIntoThreads(leadMsgs);
     const activity = summarizeContactActivity(threads).get(uuid);
     const outgoing = activity?.outbox_count ?? 0;
-    const replies = activity?.inbox_count ?? 0;
+    const linkedinReplies = activity?.inbox_count ?? 0;
     const replyStatus = activity?.reply_status ?? "no_response";
 
-    // Connection state: any linkedin_type='message' = accepted (you can only message
-    // 1st-degree connections). A lone connection_note with no subsequent message = sent.
+    const gsAcceptedAt = str(r.gs_connection_accepted_at);
+    const gsConnectionSentAt = str(r.gs_connection_sent_at);
+    const gsConnectionLostAt = str(r.gs_connection_lost_at);
+
+    // Connection state: prefer GetSales marker columns (survives withdrawn requests
+    // that never land in LinkedinMessages), then fall back to message rows.
     const hasMessage = leadMsgs.some((m) => (m.linkedin_type ?? "") === "message");
     const sentConn = leadMsgs.some((m) => (m.linkedin_type ?? "") === "connection_note");
-    const connection_status: LeaderListRecord["connection_status"] = hasMessage
-      ? "accepted"
-      : sentConn
-        ? "sent"
-        : "none";
+    let connection_status: LeaderListRecord["connection_status"] = "none";
+    if (hasMessage || gsAcceptedAt) connection_status = "accepted";
+    else if (gsConnectionLostAt) connection_status = "withdrawn";
+    else if (sentConn || gsConnectionSentAt) connection_status = "sent";
 
-    // Accepted-at: prefer GS-synced value (accurate); fall back to earliest message-type msg.
-    const gsAcceptedAt = str(r.gs_connection_accepted_at);
     const messageDates = leadMsgs
       .filter((m) => (m.linkedin_type ?? "") === "message")
       .map((m) => m.sent_at ?? m.created_at ?? "")
@@ -303,6 +323,14 @@ export async function buildLeadersList(
 
     // A database default of zero is not evidence. Trust it only after marker sync.
     const email_count = resolveEmailCount(r.markers_synced_at, r.email_sent_count, leadMsgs);
+    const email_inbox = num(r.email_inbox_count);
+    const replies = linkedinReplies + email_inbox;
+
+    const wasContacted =
+      outgoing > 0 ||
+      (email_count ?? 0) > 0 ||
+      Boolean(gsConnectionSentAt) ||
+      Boolean(gsConnectionLostAt);
 
     const name =
       str(r.name) ?? ([str(r.first_name), str(r.last_name)].filter(Boolean).join(" ").trim() || "—");
@@ -330,7 +358,13 @@ export async function buildLeadersList(
       outgoing_count: outgoing,
       reply_count: replies,
       email_count,
-      status: deriveStatus(stage?.name ?? null, outgoing, replyStatus, email_count, replies),
+      status: deriveStatus({
+        stageName: stage?.name ?? null,
+        stageCategory: stage?.category ?? null,
+        replyStatus,
+        replyCount: replies,
+        wasContacted,
+      }),
     };
   });
 
