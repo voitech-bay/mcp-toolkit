@@ -733,6 +733,31 @@ export async function fetchContactByUuid(
   }
 }
 
+/** Marker row from GET /leads/api/leads/{uuid} → `markers[]` (aggregate row has sender_profile_uuid = null). */
+export interface LeadMarkerRow {
+  sender_profile_uuid: string | null;
+  linkedin_last_connection_sent_at?: string | null;
+  linkedin_last_connection_accepted_at?: string | null;
+  linkedin_last_connection_lost_at?: string | null;
+  email_sent_count?: number | null;
+  email_inbox_count?: number | null;
+  email_read_count?: number | null;
+  email_click_count?: number | null;
+}
+
+export async function fetchLeadMarkersByUuid(
+  credentials: ApiCredentials | undefined,
+  uuid: string
+): Promise<LeadMarkerRow[]> {
+  const config = resolveCredentials(credentials);
+  if (!config) throw new Error("Source API credentials are not configured.");
+  const trimmed = uuid.trim();
+  if (!trimmed) return [];
+  const url = `${config.baseUrl}/leads/api/leads/${encodeURIComponent(trimmed)}`;
+  const json = await fetchJson<{ markers?: LeadMarkerRow[] }>(url, config.apiKey, { method: "GET" });
+  return json.markers ?? [];
+}
+
 /**
  * GET /leads/api/companies/{uuid} — single company lookup. Returns unwrapped company row, or `null` on 404.
  */
