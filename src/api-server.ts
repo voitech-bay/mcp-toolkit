@@ -291,6 +291,8 @@ const server = createServer(async (req, res) => {
     pathname !== "/api/contacts/list-sync-resync-missing" &&
     pathname !== "/api/contacts/find-by-uuid" &&
     pathname !== "/api/contacts/search-global" &&
+    pathname !== "/api/contacts/meta" &&
+    pathname !== "/api/contacts/sync-markers" &&
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
   const generatedMessageIdMatch =
     pathname !== "/api/generated-messages/generate" &&
