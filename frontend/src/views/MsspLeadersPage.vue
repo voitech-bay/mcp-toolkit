@@ -33,7 +33,7 @@ interface LeaderRecord {
   company_type: string | null;
   services: string[];
   vendors: string[];
-  connection_status: "accepted" | "sent" | "none";
+  connection_status: "accepted" | "sent" | "withdrawn" | "none";
   connection_accepted_at: string | null;
   automations: string[];
   outgoing_count: number;
@@ -146,6 +146,7 @@ const typeOptions = computed(() => uniq(data.value.map((d) => d.company_type)));
 const connOptions = [
   { label: "Accepted", value: "accepted" },
   { label: "Sent", value: "sent" },
+  { label: "Withdrawn", value: "withdrawn" },
   { label: "None", value: "none" },
 ];
 
@@ -165,7 +166,8 @@ const filtered = computed(() => {
 
 const selectedUuids = computed(() => checkedKeys.value.map(String));
 
-const connType = (s: string) => (s === "accepted" ? "success" : s === "sent" ? "warning" : "default");
+const connType = (s: string) =>
+  s === "accepted" ? "success" : s === "sent" ? "warning" : s === "withdrawn" ? "error" : "default";
 const statusType = (s: string) => {
   const l = s.toLowerCase();
   if (l.includes("positive") || l.includes("opportunity") || l.includes("meeting") || l.includes("customer")) return "success";

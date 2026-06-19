@@ -7,7 +7,8 @@
  * sender-scoped rows are ignored.
  *
  * Columns written: email_sent_count, email_inbox_count, email_read_count,
- * email_click_count, gs_connection_accepted_at, markers_synced_at.
+ * email_click_count, gs_connection_sent_at, gs_connection_accepted_at,
+ * gs_connection_lost_at, markers_synced_at.
  *
  * Called from card-handlers.handlePostSyncMarkers and intended to be wired into
  * the existing Contacts sync path so markers stay current on each sync run.
@@ -28,7 +29,9 @@ interface GsMarker {
   email_click_count: number | null;
   email_first_message_sent_at: string | null;
   email_last_message_sent_at: string | null;
+  linkedin_last_connection_sent_at: string | null;
   linkedin_last_connection_accepted_at: string | null;
+  linkedin_last_connection_lost_at: string | null;
 }
 
 interface GsLeadDetail {
@@ -64,7 +67,7 @@ export interface MarkerSyncResult {
 
 /**
  * Sync GetSales lead markers for a batch of contact UUIDs.
- * Rate-limited to ~12 req/s (85 ms between requests).
+ * Uses modest concurrency (~8 in flight) to keep list loads fast.
  */
 export async function syncMarkersForContacts(
   client: SupabaseClient,
@@ -76,14 +79,15 @@ export async function syncMarkersForContacts(
   let synced = 0;
   let skipped = 0;
   const errors: MarkerSyncResult["errors"] = [];
+  const concurrency = 8;
 
-  for (const uuid of contactUuids) {
+  async function syncOne(uuid: string): Promise<void> {
     try {
       const detail = await fetchLeadDetail(uuid, apiKey, teamId);
       const m = pickAggregate(detail.markers ?? []);
       if (!m) {
         skipped++;
-        continue;
+        return;
       }
 
       const patch = {
@@ -91,7 +95,9 @@ export async function syncMarkersForContacts(
         email_inbox_count: m.email_inbox_count ?? 0,
         email_read_count: m.email_read_count ?? 0,
         email_click_count: m.email_click_count ?? 0,
+        gs_connection_sent_at: m.linkedin_last_connection_sent_at ?? null,
         gs_connection_accepted_at: m.linkedin_last_connection_accepted_at ?? null,
+        gs_connection_lost_at: m.linkedin_last_connection_lost_at ?? null,
         markers_synced_at: new Date().toISOString(),
       };
 
@@ -101,8 +107,10 @@ export async function syncMarkersForContacts(
     } catch (e) {
       errors.push({ uuid, message: e instanceof Error ? e.message : String(e) });
     }
-    // 85 ms gap = ~12 req/s, well within GetSales limits
-    await new Promise((r) => setTimeout(r, 85));
+  }
+
+  for (let i = 0; i < contactUuids.length; i += concurrency) {
+    await Promise.all(contactUuids.slice(i, i + concurrency).map((uuid) => syncOne(uuid)));
   }
 
   return { synced, skipped, errors, duration_ms: Date.now() - start };
