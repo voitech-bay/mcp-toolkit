@@ -94,6 +94,7 @@ const CONVERSATION_LOGIC = `CONVERSATION LOGIC:
 - Never bolt on a product pitch by default. A relevant first pitch is allowed; a repeated same channel pitch is not.
 - Company conversations are shared account context. You may truthfully mention colleagues by name and summarize what was discussed. Never imply the recipient personally said or saw something that came from a colleague.
 - When asked to combine prior prospect or company conversations, prioritize relevant people at the recipient's company. Do not substitute our own senders' names for the prospect names the reviewer asked for.
+- Never write "I've been talking with" or claim the current sender personally spoke with someone unless the context explicitly proves that exact sender did. Use neutral account language such as "we've spoken with" or name the verified sender.
 - Do not drop a list of names as empty social proof. Connect prior conversations to one useful executive topic: a decision, open question, partnership direction, delivery issue, or reason the recipient is the right person.
 - Match seniority. A CEO needs the business reason for spending time. Before asking for a meeting, state what they would get from it, grounded in known context. For example: resolve an open partnership question, compare the operating model, or decide whether a next step is worth pursuing.
 - Avoid empty lines such as "align on next steps", "compare notes", "good conversations", or "quick intro" unless the message says what the next step, notes, conversation, or introduction is about.
@@ -164,6 +165,8 @@ export function feasibleViolations(text: string): string[] {
   if (/\bno\b[^.!?]{0,40},\s*\bno\b[^.!?]{0,40},\s*\bjust\b/i.test(text)) v.push("no_no_just_pattern");
   if (/\bnot\b[^.!?]{0,30}\.\s*\bnot\b[^.!?]{0,30}\./i.test(text)) v.push("not_not_pattern");
   if (/\b(it is important to note|this serves to highlight)\b/i.test(text)) v.push("inflated_ai_phrase");
+  if (/\bi(?:'ve| have)\s+(?:been\s+)?(?:talking|spoken|discussed|engaged)\b/i.test(text)) v.push("unverified_personal_conversation_claim");
+  if (/\bregional\s+(?:peers|teams|MSSPs?)\b/i.test(text)) v.push("unsupported_regional_peer_claim");
   return v;
 }
 

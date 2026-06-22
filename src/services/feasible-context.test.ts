@@ -47,6 +47,7 @@ test("buildFeasibleSystemPrompt: defaults to universal conversation logic rather
   assert.match(prompt, /CEO needs the business reason for spending time/i);
   assert.match(prompt, /mention colleagues by name/i);
   assert.match(prompt, /prioritize relevant people at the recipient's company/i);
+  assert.match(prompt, /Never write "I've been talking with"/i);
   assert.match(prompt, /Do not drop a list of names as empty social proof/i);
   assert.match(prompt, /Avoid empty lines such as "align on next steps"/i);
   assert.match(prompt, /If the reviewer says no product pitch, treat that literally/i);
@@ -78,6 +79,8 @@ test("feasibleViolations: flags the hard bans", () => {
   assert.ok(feasibleViolations("No tools, no setup, just results.").includes("no_no_just_pattern"));
   assert.ok(feasibleViolations("Not a tool. Not a pitch. A system.").includes("not_not_pattern"));
   assert.ok(feasibleViolations("It is important to note this.").includes("inflated_ai_phrase"));
+  assert.ok(feasibleViolations("I've been talking with Miguel.").includes("unverified_personal_conversation_claim"));
+  assert.ok(feasibleViolations("Our founder works with regional peers.").includes("unsupported_regional_peer_claim"));
 });
 
 test("feasibleReviewerViolations enforces an explicit no-pitch request", () => {
