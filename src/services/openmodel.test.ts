@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildOpenModelRequestBody, parseOpenModelMessageResponse } from "./openmodel.js";
 
-test("buildOpenModelRequestBody disables DeepSeek thinking for short copy", () => {
+test("buildOpenModelRequestBody keeps DeepSeek thinking with enough final-answer budget", () => {
   const body = buildOpenModelRequestBody({
     model: "deepseek-v4-flash",
     systemPrompt: "system",
     userPrompt: "user",
   });
-  assert.deepEqual(body.thinking, { type: "disabled" });
-  assert.equal(body.max_tokens, 512);
+  assert.deepEqual(body.thinking, { type: "enabled" });
+  assert.equal(body.max_tokens, 4096);
 });
 
 test("parseOpenModelMessageResponse reads Anthropic Messages text and usage", () => {

@@ -19,11 +19,11 @@ export function buildOpenModelRequestBody(params: {
 }): Json {
   return {
     model: params.model.trim(),
-    max_tokens: params.maxTokens ?? 512,
+    max_tokens: params.maxTokens ?? 4_096,
     temperature: params.temperature ?? 0.7,
-    // DeepSeek defaults to thinking mode. Short copy can exhaust max_tokens on
-    // hidden reasoning before producing a final text block, so disable it here.
-    thinking: { type: "disabled" },
+    // Keep DeepSeek reasoning enabled for best output quality. The larger output
+    // budget leaves room for internal reasoning plus the short final message.
+    thinking: { type: "enabled" },
     system: params.systemPrompt,
     messages: [{ role: "user", content: params.userPrompt }],
   };
