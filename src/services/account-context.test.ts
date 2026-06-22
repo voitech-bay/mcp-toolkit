@@ -5,6 +5,8 @@ import {
   summarizeContactActivity,
   parseAccountSummaryEntry,
   messageChannelLabel,
+  companyReplyContacts,
+  contactConnectionStatus,
   type MessageRow,
 } from "./account-context.js";
 
@@ -102,6 +104,37 @@ test("summarizeContactActivity: aggregates per lead with latest-thread status", 
   assert.equal(a.reply_status, "got_response"); // latest thread (c2) got a reply
   const b = act.get("b")!;
   assert.equal(b.reply_status, "no_response");
+});
+
+test("companyReplyContacts includes every contact that ever replied and orders latest first", () => {
+  const roster = [
+    { uuid: "a", name: "Ana", position: "CEO" },
+    { uuid: "b", first_name: "Ben", last_name: "Lee", position: "CTO" },
+    { uuid: "c", name: "Cara", position: "CISO" },
+  ];
+  const replies = companyReplyContacts(roster, [
+    msg({ lead_uuid: "a", type: "inbox", sent_at: "2026-06-01T00:00:00Z" }),
+    msg({ lead_uuid: "a", type: "outbox", sent_at: "2026-06-02T00:00:00Z" }),
+    msg({ lead_uuid: "b", type: "inbox", sent_at: "2026-06-03T00:00:00Z" }),
+    msg({ lead_uuid: "b", type: "inbox", sent_at: "2026-06-04T00:00:00Z" }),
+  ]);
+  assert.deepEqual(replies, [
+    { uuid: "b", name: "Ben Lee", position: "CTO", inbound_count: 2, latest_reply_at: "2026-06-04T00:00:00Z" },
+    { uuid: "a", name: "Ana", position: "CEO", inbound_count: 1, latest_reply_at: "2026-06-01T00:00:00Z" },
+  ]);
+});
+
+test("contactConnectionStatus uses accepted, withdrawn, sent, none precedence", () => {
+  const acceptedThread = groupMessagesIntoThreads([
+    msg({ lead_uuid: "a", linkedin_type: "message", type: "outbox" }),
+  ]);
+  assert.equal(
+    contactConnectionStatus({ uuid: "a", gs_connection_lost_at: "2026-06-01" }, acceptedThread),
+    "accepted"
+  );
+  assert.equal(contactConnectionStatus({ uuid: "b", gs_connection_lost_at: "2026-06-01" }, []), "withdrawn");
+  assert.equal(contactConnectionStatus({ uuid: "c", gs_connection_sent_at: "2026-06-01" }, []), "sent");
+  assert.equal(contactConnectionStatus({ uuid: "d" }, []), "none");
 });
 
 test("parseAccountSummaryEntry: parses typed entries, ignores plain notes", () => {

@@ -62,7 +62,7 @@ export async function handleGetContactCard(req: IncomingMessage, res: ServerResp
   if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
   const uuid = queryParam(req, "uuid");
   if (!UUID_RE.test(uuid)) return sendJson(res, 400, { error: "uuid must be a UUID" });
-  const { data, error } = await buildContactCard(client, uuid);
+  const { data, error } = await buildContactCard(client, uuid, { includeCompanyReplyContacts: true });
   if (error) return sendJson(res, error === "Contact not found" ? 404 : 500, { error });
   sendJson(res, 200, data);
 }
