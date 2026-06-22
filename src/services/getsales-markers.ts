@@ -14,45 +14,16 @@
  * paths receive the selected project's decrypted GetSales credentials.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { ApiCredentials } from "./source-api.js";
+import {
+  fetchLeadMarkersByUuid,
+  type ApiCredentials,
+  type LeadMarkerRow,
+} from "./source-api.js";
 
 const CONTACTS_TABLE = "Contacts";
 export const MSSP_LEADERS_TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
 
-interface GsMarker {
-  sender_profile_uuid: string | null;
-  email_sent_count: number | null;
-  email_inbox_count: number | null;
-  email_read_count: number | null;
-  email_click_count: number | null;
-  email_first_message_sent_at: string | null;
-  email_last_message_sent_at: string | null;
-  linkedin_last_connection_sent_at: string | null;
-  linkedin_last_connection_accepted_at: string | null;
-  linkedin_last_connection_lost_at: string | null;
-}
-
-interface GsLeadDetail {
-  markers?: GsMarker[];
-}
-
-async function fetchLeadDetail(uuid: string, credentials: ApiCredentials): Promise<GsLeadDetail> {
-  const resp = await fetch(`${credentials.baseUrl.replace(/\/$/, "")}/leads/api/leads/${uuid}`, {
-    headers: {
-      Authorization: `Bearer ${credentials.apiKey}`,
-      ...(credentials.teamId ? { "Team-ID": credentials.teamId } : {}),
-      "Content-Type": "application/json",
-    },
-  });
-  if (!resp.ok) {
-    const body = await resp.text().catch(() => "");
-    throw new Error(`GetSales ${resp.status}: ${body.slice(0, 200)}`);
-  }
-  return resp.json() as Promise<GsLeadDetail>;
-}
-
-function pickAggregate(markers: GsMarker[]): GsMarker | null {
-  // Prefer the aggregate row (null sender) — it has team-wide totals.
+function pickAggregate(markers: LeadMarkerRow[]): LeadMarkerRow | null {
   return markers.find((m) => m.sender_profile_uuid === null) ?? markers[0] ?? null;
 }
 
@@ -80,8 +51,8 @@ export async function syncMarkersForContacts(
 
   async function syncOne(uuid: string): Promise<void> {
     try {
-      const detail = await fetchLeadDetail(uuid, credentials);
-      const m = pickAggregate(detail.markers ?? []);
+      const markers = await fetchLeadMarkersByUuid(credentials, uuid);
+      const m = pickAggregate(markers);
       if (!m) {
         skipped++;
         return;

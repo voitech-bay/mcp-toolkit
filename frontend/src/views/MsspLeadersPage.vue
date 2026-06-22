@@ -127,9 +127,11 @@ onMounted(fetchList);
 const STATUS_FILTER_ORDER = [
   "Not Contacted",
   "No Reply",
+  "No reply after 3+ messages",
   "Contacted",
   "Awaiting Their Reply",
   "Waiting for Reply",
+  "Replied",
   "Engaging",
   "Positive Reply",
   "Meeting / Opportunity",
@@ -146,7 +148,7 @@ function uniq(vals: (string | null)[]): { label: string; value: string }[] {
 const statusOptions = computed(() => {
   const inData = new Set(data.value.map((d) => d.status));
   const options = STATUS_FILTER_ORDER
-    .filter((s) => inData.has(s) || s === "No Reply")
+    .filter((s) => inData.has(s) || s === "No Reply" || s === "No reply after 3+ messages" || s === "Replied")
     .map((v) => ({ label: v, value: v }));
   for (const s of [...inData].sort()) {
     if (!STATUS_FILTER_ORDER.includes(s)) options.push({ label: s, value: s });
@@ -182,6 +184,7 @@ const connType = (s: string) =>
 const statusType = (s: string) => {
   const l = s.toLowerCase();
   if (l.includes("positive") || l.includes("opportunity") || l.includes("meeting") || l.includes("customer")) return "success";
+  if (l.includes("replied") && !l.includes("no reply")) return "success";
   if (l.includes("not interested") || l.includes("bad timing")) return "error";
   if (l.includes("no reply")) return "warning";
   if (l.includes("waiting")) return "info";
