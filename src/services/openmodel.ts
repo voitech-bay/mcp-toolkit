@@ -10,6 +10,25 @@ export interface OpenModelGenerateResult {
   outputTokens: number | null;
 }
 
+export function buildOpenModelRequestBody(params: {
+  model: string;
+  systemPrompt: string;
+  userPrompt: string;
+  temperature?: number;
+  maxTokens?: number;
+}): Json {
+  return {
+    model: params.model.trim(),
+    max_tokens: params.maxTokens ?? 512,
+    temperature: params.temperature ?? 0.7,
+    // DeepSeek defaults to thinking mode. Short copy can exhaust max_tokens on
+    // hidden reasoning before producing a final text block, so disable it here.
+    thinking: { type: "disabled" },
+    system: params.systemPrompt,
+    messages: [{ role: "user", content: params.userPrompt }],
+  };
+}
+
 function asRecord(value: unknown): Json | null {
   return typeof value === "object" && value !== null && !Array.isArray(value) ? value as Json : null;
 }
@@ -70,13 +89,7 @@ export async function generateOpenModelMessage(
       "Content-Type": "application/json",
       Accept: "application/json",
     },
-    body: JSON.stringify({
-      model,
-      max_tokens: params.maxTokens ?? 512,
-      temperature: params.temperature ?? 0.7,
-      system: params.systemPrompt,
-      messages: [{ role: "user", content: params.userPrompt }],
-    }),
+    body: JSON.stringify(buildOpenModelRequestBody({ ...params, model })),
     signal: options?.signal,
   });
   const rawText = await response.text();
