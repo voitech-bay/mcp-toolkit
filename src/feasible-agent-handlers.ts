@@ -23,6 +23,7 @@ import {
 } from "./services/supabase.js";
 import { buildCompanyCard, buildContactCard, parseAccountSummaryEntry } from "./services/account-context.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
+import { generateOpenModelMessage } from "./services/openmodel.js";
 import { sendEmail, sendLinkedInMessage } from "./services/source-api.js";
 import {
   FEASIBLE_PROJECT_ID,
@@ -36,7 +37,7 @@ import {
   type FeasibleSender,
 } from "./services/feasible-context.js";
 
-const MODEL_CHEAP = () => process.env.FEASIBLE_MODEL_CHEAP?.trim() || "google/gemma-4-31b-it";
+const MODEL_CHEAP = () => process.env.FEASIBLE_OPENMODEL_MODEL?.trim() || "deepseek-v4-flash";
 const MODEL_PREMIUM = () => process.env.FEASIBLE_MODEL_PREMIUM?.trim() || "anthropic/claude-opus-4.6";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const VALID_CHANNELS = new Set(["linkedin", "inmail", "email"]);
@@ -277,14 +278,17 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
 
   const out: Array<Json> = [];
   for (let i = 0; i < variants; i++) {
-    const { data: gen, error: genErr } = await generateOpenRouterMessage({
+    const generationParams = {
       model,
       systemPrompt,
       userPrompt,
       temperature: i === 0 ? 0.5 : 0.8,
-    });
+    };
+    const { data: gen, error: genErr } = tier === "cheap"
+      ? await generateOpenModelMessage(generationParams)
+      : await generateOpenRouterMessage(generationParams);
     if (genErr || !gen) {
-      out.push({ error: genErr ?? "generation failed", model });
+      out.push({ error: genErr ?? "generation failed", model, provider: tier === "cheap" ? "openmodel" : "openrouter" });
       continue;
     }
     let subject = "";
@@ -297,7 +301,7 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
       }
     }
     text = text.replace(/^["']|["']$/g, "");
-    out.push({ subject, text, model: gen.model, tier, violations: feasibleViolations(text) });
+    out.push({ subject, text, model: gen.model, provider: tier === "cheap" ? "openmodel" : "openrouter", tier, violations: feasibleViolations(text) });
   }
 
   sendJson(res, 200, {
@@ -311,6 +315,7 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     sender_source: senderSource,
     senders: FEASIBLE_SENDERS,
     model,
+    provider: tier === "cheap" ? "openmodel" : "openrouter",
     tier,
     context_stats: {
       company_conversation_threads: conversationContext.threadCount,
