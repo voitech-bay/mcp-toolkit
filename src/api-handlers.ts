@@ -4011,7 +4011,7 @@ export async function handlePostN8nWorkflowResults(
       leadUuid: resolveLeadUuidFromPayload(item),
       companyUuidRaw: findFirstNestedStringForKey(item, "company_uuid"),
       workflow: Object.keys(item)
-        .filter((k) => k !== "row_data")
+        .filter((k) => k !== "row_data" && k !== "launch_id")
         .sort()
         .join(", "),
     });

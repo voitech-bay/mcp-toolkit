@@ -40,6 +40,7 @@ import {
   WorkflowIcon,
   PhoneIcon,
   MailIcon,
+  RocketIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 
@@ -64,6 +65,7 @@ const PIPELINE_PATHS = [
   "/lists-checker",
   "/enrichment",
   "/enrichment/jobs",
+  "/n8n/launch",
   "/n8n/workflow-results",
   "/inmail-review",
   "/calls/cold-n8n",
@@ -153,6 +155,11 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "Enrichment jobs",
     key: "/enrichment/jobs",
     icon: () => h(ClipboardListIcon, { size: 14 }),
+  },
+  {
+    label: "Launch workflow",
+    key: "/n8n/launch",
+    icon: () => h(RocketIcon, { size: 14 }),
   },
   {
     label: "n8n results",

@@ -130,6 +130,13 @@ import {
   handlePostRemoveFromList,
 } from "./card-handlers.js";
 import { handlePostFeasibleGenerate, handlePostFeasibleSend } from "./feasible-agent-handlers.js";
+import {
+  handleN8nWorkflows,
+  handleN8nLaunch,
+  handleN8nLaunchStatus,
+  handleN8nLaunchHistory,
+} from "./launcher-handlers.js";
+import { handleLeadReviewItems, handleLeadReviewDecide } from "./lead-review-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -313,6 +320,7 @@ const server = createServer(async (req, res) => {
     /^\/api\/dify\/workflows\/([^/]+)\/runs\/batch-detail$/
   );
   const difyWorkflowRunsMatch = pathname.match(/^\/api\/dify\/workflows\/([^/]+)\/runs$/);
+  const n8nLaunchStatusMatch = pathname.match(/^\/api\/n8n\/launch\/([^/]+)\/status$/);
 
   try {
     if (pathname.startsWith("/mcp")) {
@@ -490,6 +498,12 @@ const server = createServer(async (req, res) => {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Method not allowed" }));
       }
+      return;
+    }
+
+    if (n8nLaunchStatusMatch) {
+      const launchId = decodeURIComponent(n8nLaunchStatusMatch[1]);
+      await handleN8nLaunchStatus(req, res, launchId);
       return;
     }
 
@@ -743,6 +757,21 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/contacts/sync-markers":
         await handlePostSyncMarkers(req, res);
+        return;
+      case "/api/n8n/workflows":
+        await handleN8nWorkflows(req, res);
+        return;
+      case "/api/n8n/launch":
+        await handleN8nLaunch(req, res);
+        return;
+      case "/api/n8n/launch/history":
+        await handleN8nLaunchHistory(req, res);
+        return;
+      case "/api/lead-review/items":
+        await handleLeadReviewItems(req, res);
+        return;
+      case "/api/lead-review/decide":
+        await handleLeadReviewDecide(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {
