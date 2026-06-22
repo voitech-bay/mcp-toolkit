@@ -84,6 +84,16 @@ export interface ContactActivity {
   reply_status: ConversationThread["reply_status"];
 }
 
+export type ContactConnectionStatus = "accepted" | "sent" | "withdrawn" | "none";
+
+export interface CompanyReplyContact {
+  uuid: string;
+  name: string;
+  position: string | null;
+  inbound_count: number;
+  latest_reply_at: string | null;
+}
+
 function msgTime(m: MessageRow): string {
   return m.sent_at ?? m.created_at ?? "";
 }
@@ -204,6 +214,53 @@ export function summarizeContactActivity(threads: ConversationThread[]): Map<str
   return byLead;
 }
 
+/** Connection status for company roster filters, matching GetSales marker precedence. */
+export function contactConnectionStatus(contact: Json, threads: ConversationThread[]): ContactConnectionStatus {
+  const uuid = typeof contact.uuid === "string" ? contact.uuid : "";
+  const contactMessages = threads.filter((thread) => thread.lead_uuid === uuid).flatMap((thread) => thread.messages);
+  if (
+    (typeof contact.gs_connection_accepted_at === "string" && contact.gs_connection_accepted_at) ||
+    contactMessages.some((message) => (message.linkedin_type ?? "").toLowerCase() === "message")
+  ) return "accepted";
+  if (typeof contact.gs_connection_lost_at === "string" && contact.gs_connection_lost_at) return "withdrawn";
+  if (
+    (typeof contact.gs_connection_sent_at === "string" && contact.gs_connection_sent_at) ||
+    contactMessages.some((message) => (message.linkedin_type ?? "").toLowerCase() === "connection_note")
+  ) return "sent";
+  return "none";
+}
+
+/** Contacts with at least one inbound message, including historical replies followed by our response. */
+export function companyReplyContacts(roster: Json[], rows: MessageRow[]): CompanyReplyContact[] {
+  const contacts = new Map<string, CompanyReplyContact>();
+  for (const row of roster) {
+    const uuid = typeof row.uuid === "string" ? row.uuid : "";
+    if (!uuid) continue;
+    const name =
+      (typeof row.name === "string" && row.name.trim()) ||
+      [row.first_name, row.last_name].filter((value) => typeof value === "string" && value.trim()).join(" ") ||
+      uuid.slice(0, 8);
+    contacts.set(uuid, {
+      uuid,
+      name,
+      position: typeof row.position === "string" && row.position.trim() ? row.position.trim() : null,
+      inbound_count: 0,
+      latest_reply_at: null,
+    });
+  }
+  for (const row of rows) {
+    if (!isInbox(row) || !row.lead_uuid) continue;
+    const contact = contacts.get(row.lead_uuid);
+    if (!contact) continue;
+    contact.inbound_count += 1;
+    const time = msgTime(row) || null;
+    if (time && (!contact.latest_reply_at || time > contact.latest_reply_at)) contact.latest_reply_at = time;
+  }
+  return [...contacts.values()]
+    .filter((contact) => contact.inbound_count > 0)
+    .sort((a, b) => (b.latest_reply_at ?? "").localeCompare(a.latest_reply_at ?? ""));
+}
+
 export interface AccountSummaryEntry {
   kind: "account_summary";
   generated_at: string;
@@ -262,7 +319,8 @@ async function fetchLatestResults(
 
 export async function buildContactCard(
   client: SupabaseClient,
-  contactUuid: string
+  contactUuid: string,
+  opts?: { includeCompanyReplyContacts?: boolean }
 ): Promise<{ data: Json | null; error: string | null }> {
   const uuid = contactUuid.trim();
   if (!uuid) return { data: null, error: "contactUuid is required" };
@@ -311,6 +369,26 @@ export async function buildContactCard(
   const messageRows = (msgsRes.data ?? []) as MessageRow[];
   const senderNames = await loadSenderNames(client, messageRows);
   const threads = groupMessagesIntoThreads(messageRows, { senderNames });
+  let replyContacts: CompanyReplyContact[] = [];
+  if (opts?.includeCompanyReplyContacts && companyId) {
+    const { data: companyContacts } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, name, first_name, last_name, position")
+      .or(`company_id.eq.${companyId},company_uuid.eq.${companyId}`)
+      .limit(200);
+    const companyRoster = (companyContacts ?? []) as Json[];
+    const companyLeadUuids = companyRoster.map((row) => String(row.uuid ?? "")).filter(Boolean);
+    if (companyLeadUuids.length) {
+      const { data: companyInbox } = await client
+        .from(LINKEDIN_MESSAGES_TABLE)
+        .select(MESSAGE_FIELDS)
+        .in("lead_uuid", companyLeadUuids)
+        .eq("type", "inbox")
+        .order("sent_at", { ascending: false })
+        .limit(2000);
+      replyContacts = companyReplyContacts(companyRoster, (companyInbox ?? []) as MessageRow[]);
+    }
+  }
 
   return {
     data: {
@@ -323,6 +401,8 @@ export async function buildContactCard(
       context_entries: contextRes.data,
       inmail_review: (reviewRes.data ?? []) as Json[],
       generated_messages: (genRes.data ?? []) as Json[],
+      company_reply_contacts: replyContacts,
+      company_reply_contact_count: replyContacts.length,
     },
     error: null,
   };
@@ -346,7 +426,7 @@ export async function buildCompanyCard(
   // Contacts may link via company_id (backfilled, ~67%) or only company_uuid (GetSales key).
   const { data: contacts, error: contactsErr } = await client
     .from(CONTACTS_TABLE)
-    .select("uuid, name, first_name, last_name, position, headline, linkedin, avatar_url, status")
+    .select("uuid, name, first_name, last_name, position, headline, linkedin, avatar_url, status, work_email, email_status, lead_category, priority, gs_connection_sent_at, gs_connection_accepted_at, gs_connection_lost_at")
     .or(`company_id.eq.${id},company_uuid.eq.${id}`)
     .limit(200);
   if (contactsErr) return { data: null, error: contactsErr.message };
@@ -373,6 +453,7 @@ export async function buildCompanyCard(
   const rosterWithActivity = roster.map((r) => ({
     ...r,
     activity: activity.get(String(r.uuid ?? "")) ?? null,
+    connection_status: contactConnectionStatus(r, threads),
   }));
 
   // Latest cached account summary among context entries; remaining entries are plain notes.

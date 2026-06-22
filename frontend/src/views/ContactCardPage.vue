@@ -17,6 +17,7 @@ import {
   NDrawer,
   NDrawerContent,
   NSelect,
+  NPopover,
   useMessage,
 } from "naive-ui";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
@@ -41,6 +42,14 @@ interface Thread {
   last_message_text: string | null;
   reply_status: string;
   messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject: string | null; linkedin_type?: string | null; sender_profile_uuid?: string | null; sender_display_name?: string | null; channel_label?: string }>;
+}
+
+interface CompanyReplyContact {
+  uuid: string;
+  name: string;
+  position: string | null;
+  inbound_count: number;
+  latest_reply_at: string | null;
 }
 
 const CATEGORY_OPTIONS = [
@@ -72,6 +81,7 @@ const rawDrawerOpen = ref(false);
 const rawDrawerTitle = ref("");
 const rawDrawerJson = ref("");
 const savingMeta = ref(false);
+const companyRepliesOpen = ref(false);
 
 const contactUuid = computed(() => String(route.params.uuid ?? ""));
 const contact = computed<Json>(() => (card.value?.contact as Json) ?? {});
@@ -81,6 +91,9 @@ const executions = computed<Json[]>(() => (card.value?.executions as Json[]) ?? 
 const threads = computed<Thread[]>(() => (card.value?.conversations as Thread[]) ?? []);
 const contextEntries = computed<Json[]>(() => (card.value?.context_entries as Json[]) ?? []);
 const generatedMessages = computed<Json[]>(() => (card.value?.generated_messages as Json[]) ?? []);
+const companyReplyContacts = computed<CompanyReplyContact[]>(() =>
+  (card.value?.company_reply_contacts as CompanyReplyContact[]) ?? []
+);
 
 const leadCategory = ref<string | null>(null);
 const priority = ref<string | null>(null);
@@ -163,6 +176,13 @@ function connTagType(s: string): "error" | "success" | "warning" {
   if (s === "accepted") return "success";
   if (s === "sent") return "warning";
   return "error";
+}
+
+function viewAllCompanyReplies() {
+  const id = typeof company.value?.id === "string" ? company.value.id : "";
+  if (!id) return;
+  companyRepliesOpen.value = false;
+  void router.push({ path: `/company/${id}`, query: { contactReply: "replied" } });
 }
 
 function scalarFields(result: unknown): Array<[string, string]> {
@@ -314,6 +334,34 @@ watch(contactUuid, load);
         <NSpace size="small" wrap>
           <NTag size="small" bordered :type="connTagType(connectionStatus)">{{ connectionStatus === 'accepted' ? 'Connected' : connectionStatus === 'sent' ? 'Connection Sent' : 'Not Connected' }}</NTag>
           <NTag size="small" :type="replyStatusType(overallReplyStatus)">{{ overallReplyStatus.replace(/_/g, ' ') }}</NTag>
+          <NPopover
+            v-if="companyReplyContacts.length"
+            v-model:show="companyRepliesOpen"
+            trigger="click"
+            placement="bottom-start"
+            :width="360"
+          >
+            <template #trigger>
+              <NTag size="small" type="success" style="cursor: pointer">Company replied</NTag>
+            </template>
+            <NSpace vertical size="small" style="width: 100%">
+              <strong>{{ companyReplyContacts.length }} contact{{ companyReplyContacts.length === 1 ? '' : 's' }} replied</strong>
+              <router-link
+                v-for="replyContact in companyReplyContacts"
+                :key="replyContact.uuid"
+                :to="`/contact/${replyContact.uuid}`"
+                class="company-reply-link"
+                @click="companyRepliesOpen = false"
+              >
+                <span>
+                  <strong>{{ replyContact.name }}</strong>
+                  <small v-if="replyContact.position">{{ replyContact.position }}</small>
+                </span>
+                <small>{{ replyContact.inbound_count }} repl{{ replyContact.inbound_count === 1 ? 'y' : 'ies' }}</small>
+              </router-link>
+              <NButton size="small" type="primary" block @click="viewAllCompanyReplies">View all</NButton>
+            </NSpace>
+          </NPopover>
           <NTag v-if="contact.email_status" size="small">email: {{ contact.email_status }}</NTag>
           <NTag v-if="contact.work_email" size="small" type="info">{{ contact.work_email }}</NTag>
           <NText depth="3" style="font-size: 0.8rem">synced {{ fmtDate(contact.updated_at) }}</NText>
@@ -456,6 +504,26 @@ watch(contactUuid, load);
 }
 .card-link:hover {
   text-decoration: underline;
+}
+.company-reply-link {
+  color: inherit;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 6px 4px;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+}
+.company-reply-link:hover {
+  color: #2080f0;
+}
+.company-reply-link span {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.company-reply-link small {
+  color: #8a8a8a;
 }
 .kv-grid {
   display: grid;

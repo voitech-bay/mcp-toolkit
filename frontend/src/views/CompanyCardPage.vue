@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from "vue";
-import { useRoute } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   NCard,
   NSpace,
@@ -11,6 +11,7 @@ import {
   NCollapse,
   NCollapseItem,
   NInput,
+  NSelect,
   NText,
   NDivider,
   NDrawer,
@@ -33,6 +34,16 @@ interface Activity {
 }
 interface RosterRow extends Json {
   uuid: string;
+  name?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  position?: string | null;
+  headline?: string | null;
+  work_email?: string | null;
+  email_status?: string | null;
+  lead_category?: string | null;
+  priority?: string | null;
+  connection_status: "accepted" | "sent" | "withdrawn" | "none";
   activity: Activity | null;
 }
 interface Thread {
@@ -79,7 +90,29 @@ interface ListRecord extends Json {
 }
 
 const route = useRoute();
+const router = useRouter();
 const message = useMessage();
+
+const REPLY_FILTER_OPTIONS = [
+  { label: "All responses", value: "all" },
+  { label: "Replied", value: "replied" },
+  { label: "Never replied", value: "never_replied" },
+  { label: "No outreach", value: "no_outreach" },
+];
+const CONNECTION_FILTER_OPTIONS = [
+  { label: "All connections", value: "all" },
+  { label: "Connected", value: "accepted" },
+  { label: "Connection Sent", value: "sent" },
+  { label: "Withdrawn", value: "withdrawn" },
+  { label: "Not Connected", value: "none" },
+];
+const CATEGORY_FILTER_OPTIONS = ["Founder/CEO", "Business Leader", "Technical Leader", "Engineer", "Sales", "Other"].map((value) => ({ label: value, value }));
+const PRIORITY_FILTER_OPTIONS = ["Top", "High", "Medium", "Low"].map((value) => ({ label: value, value }));
+const EMAIL_AVAILABILITY_OPTIONS = [
+  { label: "All email availability", value: "all" },
+  { label: "Has email", value: "has" },
+  { label: "Missing email", value: "missing" },
+];
 
 const loading = ref(false);
 const loadError = ref("");
@@ -91,6 +124,19 @@ const rawDrawerOpen = ref(false);
 const rawDrawerTitle = ref("");
 const rawDrawerJson = ref("");
 
+function routeString(key: string, fallback = ""): string {
+  const value = route.query[key];
+  return typeof value === "string" ? value : fallback;
+}
+
+const contactSearch = ref(routeString("contactSearch"));
+const replyFilter = ref(routeString("contactReply", "all"));
+const connectionFilter = ref(routeString("contactConnection", "all"));
+const categoryFilter = ref(routeString("contactCategory"));
+const priorityFilter = ref(routeString("contactPriority"));
+const emailAvailabilityFilter = ref(routeString("contactEmail", "all"));
+const emailStatusFilter = ref(routeString("contactEmailStatus"));
+
 const companyId = computed(() => String(route.params.id ?? ""));
 const company = computed<Json>(() => (card.value?.company as Json) ?? {});
 const latestResults = computed<Json[]>(() => (card.value?.latest_results as Json[]) ?? []);
@@ -100,6 +146,104 @@ const contextEntries = computed<Json[]>(() => (card.value?.context_entries as Js
 const summary = computed<SummaryEntry | null>(() => (card.value?.account_summary as SummaryEntry) ?? null);
 const summaryStale = computed(() => Boolean(card.value?.account_summary_stale));
 const listRecords = computed<ListRecord[]>(() => (card.value?.list_records as ListRecord[]) ?? []);
+
+const emailStatusOptions = computed(() =>
+  [...new Set(roster.value.map((row) => row.email_status?.trim() ?? "").filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b))
+    .map((value) => ({ label: value, value }))
+);
+
+const filteredRoster = computed(() => {
+  const search = contactSearch.value.trim().toLowerCase();
+  return roster.value.filter((row) => {
+    if (search) {
+      const haystack = [nameByLead.value.get(row.uuid), row.position, row.headline]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      if (!haystack.includes(search)) return false;
+    }
+    const activity = row.activity;
+    if (replyFilter.value === "replied" && (activity?.inbox_count ?? 0) === 0) return false;
+    if (replyFilter.value === "never_replied" && (!activity || activity.outbox_count === 0 || activity.inbox_count > 0)) return false;
+    if (replyFilter.value === "no_outreach" && activity && (activity.inbox_count > 0 || activity.outbox_count > 0)) return false;
+    if (connectionFilter.value !== "all" && row.connection_status !== connectionFilter.value) return false;
+    if (categoryFilter.value && row.lead_category !== categoryFilter.value) return false;
+    if (priorityFilter.value && row.priority !== priorityFilter.value) return false;
+    const hasEmail = Boolean(row.work_email?.trim());
+    if (emailAvailabilityFilter.value === "has" && !hasEmail) return false;
+    if (emailAvailabilityFilter.value === "missing" && hasEmail) return false;
+    if (emailStatusFilter.value && row.email_status !== emailStatusFilter.value) return false;
+    return true;
+  });
+});
+
+const filtersActive = computed(() => Boolean(
+  contactSearch.value ||
+  replyFilter.value !== "all" ||
+  connectionFilter.value !== "all" ||
+  categoryFilter.value ||
+  priorityFilter.value ||
+  emailAvailabilityFilter.value !== "all" ||
+  emailStatusFilter.value
+));
+
+type ContactFilterPatch = Partial<{
+  contactSearch: string;
+  contactReply: string;
+  contactConnection: string;
+  contactCategory: string;
+  contactPriority: string;
+  contactEmail: string;
+  contactEmailStatus: string;
+}>;
+
+function updateContactFilters(patch: ContactFilterPatch) {
+  if (patch.contactSearch !== undefined) contactSearch.value = patch.contactSearch;
+  if (patch.contactReply !== undefined) replyFilter.value = patch.contactReply;
+  if (patch.contactConnection !== undefined) connectionFilter.value = patch.contactConnection;
+  if (patch.contactCategory !== undefined) categoryFilter.value = patch.contactCategory;
+  if (patch.contactPriority !== undefined) priorityFilter.value = patch.contactPriority;
+  if (patch.contactEmail !== undefined) emailAvailabilityFilter.value = patch.contactEmail;
+  if (patch.contactEmailStatus !== undefined) emailStatusFilter.value = patch.contactEmailStatus;
+  const query = { ...route.query } as Record<string, string | string[] | null | undefined>;
+  const values: Record<string, string> = {
+    contactSearch: contactSearch.value,
+    contactReply: replyFilter.value === "all" ? "" : replyFilter.value,
+    contactConnection: connectionFilter.value === "all" ? "" : connectionFilter.value,
+    contactCategory: categoryFilter.value,
+    contactPriority: priorityFilter.value,
+    contactEmail: emailAvailabilityFilter.value === "all" ? "" : emailAvailabilityFilter.value,
+    contactEmailStatus: emailStatusFilter.value,
+  };
+  for (const [key, value] of Object.entries(values)) {
+    if (value) query[key] = value;
+    else delete query[key];
+  }
+  void router.replace({ query });
+}
+
+function clearContactFilters() {
+  updateContactFilters({
+    contactSearch: "",
+    contactReply: "all",
+    contactConnection: "all",
+    contactCategory: "",
+    contactPriority: "",
+    contactEmail: "all",
+    contactEmailStatus: "",
+  });
+}
+
+function syncContactFiltersFromRoute() {
+  contactSearch.value = routeString("contactSearch");
+  replyFilter.value = routeString("contactReply", "all");
+  connectionFilter.value = routeString("contactConnection", "all");
+  categoryFilter.value = routeString("contactCategory");
+  priorityFilter.value = routeString("contactPriority");
+  emailAvailabilityFilter.value = routeString("contactEmail", "all");
+  emailStatusFilter.value = routeString("contactEmailStatus");
+}
 
 const nameByLead = computed(() => {
   const m = new Map<string, string>();
@@ -142,6 +286,20 @@ function statusType(s: string): "default" | "success" | "warning" {
   return "default";
 }
 
+function connectionType(s: RosterRow["connection_status"]): "error" | "success" | "warning" | "default" {
+  if (s === "accepted") return "success";
+  if (s === "sent") return "warning";
+  if (s === "none") return "error";
+  return "default";
+}
+
+function connectionLabel(s: RosterRow["connection_status"]): string {
+  if (s === "accepted") return "Connected";
+  if (s === "sent") return "Connection Sent";
+  if (s === "withdrawn") return "Withdrawn";
+  return "Not Connected";
+}
+
 function scalarFields(result: unknown): Array<[string, string]> {
   if (!result || typeof result !== "object") return [];
   const skip = new Set(["full_json", "clean_full_json", "lead", "row_data", "workflow_context"]);
@@ -174,6 +332,13 @@ const rosterColumns = computed<DataTableColumns<RosterRow>>(() => [
       ),
   },
   { title: "Position", key: "position", minWidth: 180, ellipsis: { tooltip: true } },
+  {
+    title: "Connection", key: "connection", width: 140,
+    render: (row) => h(NTag, { size: "small", bordered: true, type: connectionType(row.connection_status) }, { default: () => connectionLabel(row.connection_status) }),
+  },
+  { title: "Email", key: "work_email", minWidth: 190, ellipsis: { tooltip: true }, render: (row) => row.work_email || "—" },
+  { title: "Category", key: "lead_category", width: 140, render: (row) => row.lead_category || "—" },
+  { title: "Priority", key: "priority", width: 90, render: (row) => row.priority || "—" },
   {
     title: "Conversations",
     key: "threads",
@@ -282,6 +447,7 @@ async function addNote() {
 
 onMounted(load);
 watch(companyId, load);
+watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
 </script>
 
 <template>
@@ -372,8 +538,63 @@ watch(companyId, load);
       </NCard>
 
       <!-- Contacts roster -->
-      <NCard :title="`Contacts (${roster.length})`" size="small">
-        <NDataTable :columns="rosterColumns" :data="roster" size="small" :max-height="420" striped />
+      <NCard :title="`Contacts (${filteredRoster.length}/${roster.length})`" size="small">
+        <NSpace vertical size="small">
+          <div class="contact-filters">
+            <NInput
+              :value="contactSearch"
+              clearable
+              placeholder="Search name or title"
+              @update:value="(value) => updateContactFilters({ contactSearch: value })"
+            />
+            <NSelect
+              :value="replyFilter"
+              :options="REPLY_FILTER_OPTIONS"
+              @update:value="(value) => updateContactFilters({ contactReply: value })"
+            />
+            <NSelect
+              :value="connectionFilter"
+              :options="CONNECTION_FILTER_OPTIONS"
+              @update:value="(value) => updateContactFilters({ contactConnection: value })"
+            />
+            <NSelect
+              :value="categoryFilter || null"
+              :options="CATEGORY_FILTER_OPTIONS"
+              clearable
+              placeholder="Lead category"
+              @update:value="(value) => updateContactFilters({ contactCategory: value || '' })"
+            />
+            <NSelect
+              :value="priorityFilter || null"
+              :options="PRIORITY_FILTER_OPTIONS"
+              clearable
+              placeholder="Priority"
+              @update:value="(value) => updateContactFilters({ contactPriority: value || '' })"
+            />
+            <NSelect
+              :value="emailAvailabilityFilter"
+              :options="EMAIL_AVAILABILITY_OPTIONS"
+              @update:value="(value) => updateContactFilters({ contactEmail: value })"
+            />
+            <NSelect
+              :value="emailStatusFilter || null"
+              :options="emailStatusOptions"
+              clearable
+              placeholder="Email status"
+              @update:value="(value) => updateContactFilters({ contactEmailStatus: value || '' })"
+            />
+            <NButton :disabled="!filtersActive" @click="clearContactFilters">Clear all</NButton>
+          </div>
+          <NText v-if="filtersActive && !filteredRoster.length" depth="3">No contacts match these filters.</NText>
+          <NDataTable
+            :columns="rosterColumns"
+            :data="filteredRoster"
+            size="small"
+            :max-height="420"
+            :scroll-x="1450"
+            striped
+          />
+        </NSpace>
       </NCard>
 
       <!-- Company research -->
@@ -463,6 +684,17 @@ watch(companyId, load);
 }
 .card-link:hover {
   text-decoration: underline;
+}
+.contact-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.5fr) repeat(6, minmax(145px, 1fr)) auto;
+  gap: 8px;
+  align-items: center;
+}
+@media (max-width: 1200px) {
+  .contact-filters {
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  }
 }
 .kv-grid {
   display: grid;
