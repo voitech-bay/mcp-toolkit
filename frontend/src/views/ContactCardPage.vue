@@ -159,10 +159,10 @@ function replyStatusType(s: string): "default" | "success" | "warning" {
   return "default";
 }
 
-function connTagType(s: string): "default" | "success" | "warning" {
+function connTagType(s: string): "error" | "success" | "warning" {
   if (s === "accepted") return "success";
   if (s === "sent") return "warning";
-  return "default";
+  return "error";
 }
 
 function scalarFields(result: unknown): Array<[string, string]> {
@@ -312,7 +312,7 @@ watch(contactUuid, load);
         <NDivider style="margin: 12px 0" />
         <!-- Status badges row -->
         <NSpace size="small" wrap>
-          <NTag size="small" :type="connTagType(connectionStatus)">{{ connectionStatus === 'accepted' ? 'Connected' : connectionStatus === 'sent' ? 'Connection sent' : 'Not connected' }}</NTag>
+          <NTag size="small" bordered :type="connTagType(connectionStatus)">{{ connectionStatus === 'accepted' ? 'Connected' : connectionStatus === 'sent' ? 'Connection Sent' : 'Not Connected' }}</NTag>
           <NTag size="small" :type="replyStatusType(overallReplyStatus)">{{ overallReplyStatus.replace(/_/g, ' ') }}</NTag>
           <NTag v-if="contact.email_status" size="small">email: {{ contact.email_status }}</NTag>
           <NTag v-if="contact.work_email" size="small" type="info">{{ contact.work_email }}</NTag>
