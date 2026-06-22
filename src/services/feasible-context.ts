@@ -66,6 +66,9 @@ const PRACTITIONER_BLOCK = `CANONICAL PRACTITIONER BLOCK (use near-verbatim when
 AI-driven active validation is roadmap / near-term, never described as shipped.`;
 
 const HARD_BANS = `HARD STYLE RULES (every message):
+- Aim for 30-40 words in the message body. Never exceed 70 words; 50-70 words is the absolute outer range, not the target.
+- Sound like the sender typed it quickly. Plain and a little clunky is good. Short fragments and uneven sentence rhythm are fine. Do not polish the transitions or make the copy feel composed.
+- No corporate cadence, clever phrasing, symmetrical structure, or marketing-copy smoothness. Do not add deliberate spelling mistakes.
 - No em dashes or en dashes. Use periods or new sentences.
 - No "already". No throat-clearing openers ("I wanted to reach out", "I'm reaching out because", "just following up").
 - No trailing contrast: never ", not X" / "no separate X" / "instead of Y". State the positive and stop.
@@ -93,10 +96,10 @@ export interface FeasiblePromptOptions {
 export function buildFeasibleSystemPrompt(opts: FeasiblePromptOptions): string {
   const channelGuide =
     opts.channel === "email"
-      ? "FORMAT: cold or warm email. Provide a concise subject and a body around 100-160 words in short paragraphs."
+      ? "FORMAT: cold or warm email. Provide a plain 2-4 word subject and a 30-40 word body. Hard maximum: 70 body words."
       : opts.channel === "inmail"
-        ? "FORMAT: LinkedIn InMail. Provide a short subject (under 50 chars) and a body under ~120 words. Lowercase by default except proper nouns."
-        : "FORMAT: LinkedIn direct message, short (2-5 sentences), no subject. Lowercase by default except proper nouns. Conversational, like a real operator.";
+        ? "FORMAT: LinkedIn InMail. Provide a plain 2-4 word subject and a 30-40 word body. Hard maximum: 70 body words. Lowercase by default except proper nouns."
+        : "FORMAT: LinkedIn direct message, 30-40 words, no subject. Hard maximum: 70 words. Lowercase by default except proper nouns. Conversational and slightly rough, like a real operator typing.";
 
   const angleLine = opts.angle
     ? `ANGLE TO USE: ${opts.angle}. ${opts.angle === "productize" || opts.angle === "scale" ? "The $ revenue line is allowed." : "Do NOT include a $ figure."}`
@@ -124,6 +127,8 @@ export function buildFeasibleSystemPrompt(opts: FeasiblePromptOptions): string {
 export function feasibleViolations(text: string): string[] {
   const v: string[] = [];
   const lowered = text.toLowerCase();
+  const wordCount = text.trim().match(/\S+/g)?.length ?? 0;
+  if (wordCount > 70) v.push("over_70_words");
   if (/[—–]/.test(text)) v.push("contains_em_or_en_dash");
   if (/,\s+not\s+\w/.test(lowered) || /\bno separate\b/.test(lowered) || /\binstead of\b/.test(lowered)) v.push("trailing_contrast");
   if (/\balready\b/.test(lowered)) v.push("uses_already");

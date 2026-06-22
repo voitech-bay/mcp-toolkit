@@ -43,6 +43,9 @@ test("buildFeasibleSystemPrompt: channel format guidance differs", () => {
   assert.match(buildFeasibleSystemPrompt({ channel: "inmail", sender: s }), /InMail/);
   assert.match(buildFeasibleSystemPrompt({ channel: "email", sender: s }), /cold or warm email/);
   assert.match(buildFeasibleSystemPrompt({ channel: "linkedin", sender: s }), /LinkedIn direct message/);
+  assert.match(buildFeasibleSystemPrompt({ channel: "linkedin", sender: s }), /30-40 words/);
+  assert.match(buildFeasibleSystemPrompt({ channel: "email", sender: s }), /Hard maximum: 70 body words/);
+  assert.match(buildFeasibleSystemPrompt({ channel: "inmail", sender: s }), /slightly rough|little clunky/);
 });
 
 test("feasibleViolations: flags the hard bans", () => {
@@ -55,4 +58,5 @@ test("feasibleViolations: flags the hard bans", () => {
   assert.ok(v.includes("validated_paths"));
   assert.ok(v.includes("trailing_contrast"));
   assert.ok(v.includes("money_word_not_recurring_revenue"));
+  assert.ok(feasibleViolations(Array.from({ length: 71 }, () => "word").join(" ")).includes("over_70_words"));
 });

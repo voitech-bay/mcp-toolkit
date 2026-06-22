@@ -21,7 +21,7 @@ import {
   CONTACTS_TABLE,
   SENDERS_TABLE,
 } from "./services/supabase.js";
-import { buildContactCard, parseAccountSummaryEntry } from "./services/account-context.js";
+import { buildCompanyCard, buildContactCard, parseAccountSummaryEntry } from "./services/account-context.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
 import { sendEmail, sendLinkedInMessage } from "./services/source-api.js";
 import {
@@ -43,6 +43,21 @@ const VALID_CHANNELS = new Set(["linkedin", "inmail", "email"]);
 const VALID_ANGLES = new Set(["productize", "scale", "win_rate", "margin", "practitioner"]);
 
 type Json = Record<string, unknown>;
+
+type ContextMessage = {
+  lead_uuid?: string | null;
+  text?: string | null;
+  subject?: string | null;
+  type?: string | null;
+};
+
+type ContextThread = {
+  lead_uuid?: string | null;
+  conversation_uuid?: string;
+  messages?: ContextMessage[];
+};
+
+const COMPANY_CONVERSATION_CONTEXT_MAX_CHARS = 60_000;
 
 function sendJson(res: ServerResponse, status: number, obj: unknown): void {
   res.setHeader("Content-Type", "application/json");
@@ -69,6 +84,67 @@ function str(o: Json, ...keys: string[]): string {
     if (typeof v === "string" && v.trim()) return v;
   }
   return "";
+}
+
+/** Format raw threads across every known contact at the company, recipient first. */
+export function formatCompanyConversationContext(
+  threads: ContextThread[],
+  contacts: Json[],
+  recipientUuid: string,
+  recipientName: string,
+  maxChars = COMPANY_CONVERSATION_CONTEXT_MAX_CHARS
+): { text: string; threadCount: number; contactCount: number; truncated: boolean } {
+  const names = new Map<string, string>();
+  for (const contact of contacts) {
+    const uuid = str(contact, "uuid");
+    if (!uuid) continue;
+    names.set(uuid, str(contact, "name", "first_name") || uuid.slice(0, 8));
+  }
+  names.set(recipientUuid, recipientName);
+
+  const ordered = [...threads].sort((a, b) => {
+    const aRecipient = a.lead_uuid === recipientUuid ? 0 : 1;
+    const bRecipient = b.lead_uuid === recipientUuid ? 0 : 1;
+    return aRecipient - bRecipient;
+  });
+  const sections: string[] = [];
+  const includedContacts = new Set<string>();
+  let chars = 0;
+  let includedThreads = 0;
+  let truncated = false;
+
+  for (const thread of ordered) {
+    const leadUuid = thread.lead_uuid ?? thread.messages?.find((m) => m.lead_uuid)?.lead_uuid ?? "";
+    const contactName = names.get(leadUuid) || leadUuid.slice(0, 8) || "contact";
+    const lines = (thread.messages ?? [])
+      .map((message) => {
+        const content = [message.subject ? `subject: ${message.subject}` : "", message.text ?? ""]
+          .filter(Boolean)
+          .join(" | ")
+          .trim();
+        if (!content) return "";
+        const speaker = (message.type ?? "").toLowerCase() === "inbox" ? contactName : "us";
+        return `${speaker}: ${content.slice(0, 1_000)}`;
+      })
+      .filter(Boolean);
+    if (!lines.length) continue;
+    const section = `Conversation with ${contactName}${leadUuid === recipientUuid ? " (recipient)" : ""}:\n${lines.join("\n")}`;
+    if (chars + section.length > maxChars) {
+      truncated = true;
+      break;
+    }
+    sections.push(section);
+    chars += section.length;
+    includedThreads += 1;
+    if (leadUuid) includedContacts.add(leadUuid);
+  }
+
+  return {
+    text: sections.join("\n\n") || "(no prior messages at this company; this is a cold or first touch)",
+    threadCount: includedThreads,
+    contactCount: includedContacts.size,
+    truncated,
+  };
 }
 
 /** First integer in an employees_range string ("51-200" -> 51) or a research number. */
@@ -144,8 +220,13 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
   // Colleague key points from cached account summary.
   let accountKeyPoints = "";
   const company = (card.company as Json) ?? null;
+  let companyCard: Json | null = null;
   if (company && typeof company.id === "string") {
-    const { data: ctx } = await listCompanyContextsByCompanyId(client, company.id);
+    const [{ data: ctx }, companyCardResult] = await Promise.all([
+      listCompanyContextsByCompanyId(client, company.id),
+      buildCompanyCard(client, company.id),
+    ]);
+    companyCard = companyCardResult.data;
     for (const row of ctx) {
       const parsed = parseAccountSummaryEntry(row);
       if (parsed) {
@@ -169,20 +250,19 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     .filter(Boolean)
     .join("\n")
     .slice(0, 1200);
-  const threads = (card.conversations as Array<{ messages?: Array<{ text: string | null; type: string | null }> }>) ?? [];
-  const convo = threads[0]?.messages
-    ? threads[0].messages
-        .map((m) => `${(m.type ?? "").toLowerCase() === "inbox" ? name : "us"}: ${(m.text ?? "").slice(0, 600)}`)
-        .filter((l) => l.length > 5)
-        .join("\n")
-    : "(no prior messages — this is a cold or first touch)";
+  const conversationContext = formatCompanyConversationContext(
+    ((companyCard?.conversations ?? card.conversations ?? []) as ContextThread[]),
+    ((companyCard?.contacts ?? [contact]) as Json[]),
+    leadUuid,
+    name
+  );
 
   const systemPrompt = buildFeasibleSystemPrompt({ channel, sender, angle, revenueLine });
   const userPrompt = [
     `Recipient: ${name}${contact.position ? `, ${String(contact.position)}` : ""}${company ? ` at ${String(company.name ?? "")}` : ""}${employees ? ` (~${employees} employees)` : ""}`,
     research ? `\nInternal research (context only — do NOT paste back to them):\n${research}` : "",
     accountKeyPoints ? `\nColleagues at this account have said:\n${accountKeyPoints}` : "",
-    `\nConversation so far:\n${convo}`,
+    `\nAll known company conversations across contacts (private context only; never attribute a colleague's words to the recipient):\n${conversationContext.text}`,
     instructions ? `\nAdditional reviewer instructions (apply only when compatible with the system rules): ${instructions}` : "",
     channel === "inmail" || channel === "email"
       ? `\nWrite the message. First line "Subject: <3-4 word subject>", then a blank line, then the body.`
@@ -228,6 +308,13 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     senders: FEASIBLE_SENDERS,
     model,
     tier,
+    context_stats: {
+      company_conversation_threads: conversationContext.threadCount,
+      company_conversation_contacts: conversationContext.contactCount,
+      company_conversation_chars: conversationContext.text.length,
+      company_conversation_truncated: conversationContext.truncated,
+      approximate_input_tokens: Math.ceil((systemPrompt.length + userPrompt.length) / 4),
+    },
   });
 }
 
