@@ -88,7 +88,10 @@ const CONVERSATION_LOGIC = `CONVERSATION LOGIC:
 - This is a universal messaging agent, not a pitch generator. It may write a cold opener, warm follow up, reply, re engagement note, handoff, introduction, scheduling note, question, or relationship message.
 - First infer the actual conversation stage and requested outcome from the reviewer instructions and all company conversations. Continue that situation naturally.
 - Reviewer instructions define the job. Follow them unless they conflict with truth, safety, channel format, or the hard style rules.
-- Do not mention Feasible, its product, a trial, revenue, or an MSSP sales angle unless that helps the requested conversation. Never bolt on a product pitch by default.
+- Product relevance is conditional. If no product pitch has been sent in the current channel, use a relevant feature, use case, or partner benefit when it gives the recipient a real reason to care. Keep it narrow and tied to their situation.
+- If a product pitch was already sent anywhere at this company in the current channel family, do not pitch Feasible again in that channel. Do not repeat features, use cases, trials, revenue claims, or partner benefits. Build the relationship and discuss the underlying problem other teams face, without turning that problem into another product claim.
+- LinkedIn messages and InMail are one channel family for pitch repetition. Email is a separate channel family.
+- Never bolt on a product pitch by default. A relevant first pitch is allowed; a repeated same channel pitch is not.
 - Company conversations are shared account context. You may truthfully mention colleagues by name and summarize what was discussed. Never imply the recipient personally said or saw something that came from a colleague.
 - When asked to combine prior prospect or company conversations, prioritize relevant people at the recipient's company. Do not substitute our own senders' names for the prospect names the reviewer asked for.
 - Do not drop a list of names as empty social proof. Connect prior conversations to one useful executive topic: a decision, open question, partnership direction, delivery issue, or reason the recipient is the right person.
@@ -165,14 +168,15 @@ export function feasibleViolations(text: string): string[] {
 }
 
 /** Reviewer-specific constraints that can be checked mechanically after generation. */
-export function feasibleReviewerViolations(text: string, instructions: string): string[] {
+export function feasibleReviewerViolations(text: string, instructions: string, priorChannelPitch = false): string[] {
   const v: string[] = [];
   const forbidsPitch = /\b(?:do not|don't|no|without)\b[^.!?\n]{0,40}\b(?:product\s+pitch|pitch|sales\s+pitch)\b/i.test(instructions);
+  const overtProductPitch = /\bFeasible\b|\bour\s+(?:platform|product|solution|technology)\b|\bwhite[ -]?label\b|\b(?:product|platform)\s+trial\b|\brecurring revenue\b|\bwe\s+(?:can|could|help|offer|provide|cover|map|run)\b/i.test(text);
   if (
-    forbidsPitch &&
-    /\b(?:Feasible|platform|attack paths?|white[ -]?label|trials?|EASM|DAST|recurring revenue)\b/i.test(text)
+    forbidsPitch && overtProductPitch
   ) {
     v.push("product_pitch_against_instruction");
   }
+  if (priorChannelPitch && overtProductPitch) v.push("repeated_product_pitch_in_channel");
   return v;
 }

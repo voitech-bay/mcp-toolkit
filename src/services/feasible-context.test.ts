@@ -88,4 +88,13 @@ test("feasibleReviewerViolations enforces an explicit no-pitch request", () => {
       "product_pitch_against_instruction"
     )
   );
+  assert.deepEqual(
+    feasibleReviewerViolations("Other teams are trying to connect separate scan results to the decisions clients make.", instructions),
+    []
+  );
+  assert.ok(
+    feasibleReviewerViolations("Feasible could help with that.", "Build the relationship.", true).includes(
+      "repeated_product_pitch_in_channel"
+    )
+  );
 });

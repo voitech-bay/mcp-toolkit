@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { formatCompanyConversationContext } from "./feasible-agent-handlers.js";
+import { detectPriorCompanyChannelPitch, formatCompanyConversationContext } from "./feasible-agent-handlers.js";
 
 test("formatCompanyConversationContext includes every company contact and puts recipient first", () => {
   const result = formatCompanyConversationContext(
@@ -35,4 +35,38 @@ test("formatCompanyConversationContext reports the safety-cap truncation", () =>
 
   assert.equal(result.threadCount, 0);
   assert.equal(result.truncated, true);
+});
+
+test("detectPriorCompanyChannelPitch treats LinkedIn and InMail as one family", () => {
+  const threads = [
+    {
+      lead_uuid: "one",
+      messages: [
+        { type: "outbox", channel_label: "InMail", text: "Feasible maps attack paths to critical assets." },
+        { type: "outbox", channel_label: "Email", text: "Checking timing for our call." },
+      ],
+    },
+  ];
+  assert.deepEqual(detectPriorCompanyChannelPitch(threads, "linkedin"), {
+    detected: true,
+    matchingMessages: 1,
+    channelFamily: "linkedin",
+  });
+  assert.deepEqual(detectPriorCompanyChannelPitch(threads, "inmail"), {
+    detected: true,
+    matchingMessages: 1,
+    channelFamily: "linkedin",
+  });
+  assert.deepEqual(detectPriorCompanyChannelPitch(threads, "email"), {
+    detected: false,
+    matchingMessages: 0,
+    channelFamily: "email",
+  });
+});
+
+test("detectPriorCompanyChannelPitch ignores inbound product discussion", () => {
+  const threads = [
+    { lead_uuid: "one", messages: [{ type: "inbox", channel_label: "Email", text: "Can Feasible cover DAST?" }] },
+  ];
+  assert.equal(detectPriorCompanyChannelPitch(threads, "email").detected, false);
 });

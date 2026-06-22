@@ -62,6 +62,7 @@ type ContextThread = {
 };
 
 const COMPANY_CONVERSATION_CONTEXT_MAX_CHARS = 60_000;
+const PRODUCT_PITCH_RE = /\b(?:feasible|attack paths?|critical assets?|EASM|DAST|vulnerability management|external attack surface|white[ -]?label|scanner stack|21 engines?|recurring revenue|managed security|service consolidation)\b/i;
 
 function sendJson(res: ServerResponse, status: number, obj: unknown): void {
   res.setHeader("Content-Type", "application/json");
@@ -153,6 +154,26 @@ export function formatCompanyConversationContext(
   };
 }
 
+/** Detect a prior outbound product pitch across the company in the current channel family. */
+export function detectPriorCompanyChannelPitch(
+  threads: ContextThread[],
+  channel: FeasibleChannel
+): { detected: boolean; matchingMessages: number; channelFamily: "linkedin" | "email" } {
+  const channelFamily = channel === "email" ? "email" : "linkedin";
+  let matchingMessages = 0;
+  for (const thread of threads) {
+    for (const message of thread.messages ?? []) {
+      if ((message.type ?? "").toLowerCase() === "inbox") continue;
+      const label = (message.channel_label ?? "").toLowerCase();
+      const messageFamily = label === "email" ? "email" : label === "linkedin" || label === "inmail" ? "linkedin" : null;
+      if (messageFamily !== channelFamily) continue;
+      const content = `${message.subject ?? ""}\n${message.text ?? ""}`;
+      if (PRODUCT_PITCH_RE.test(content)) matchingMessages += 1;
+    }
+  }
+  return { detected: matchingMessages > 0, matchingMessages, channelFamily };
+}
+
 /** First integer in an employees_range string ("51-200" -> 51) or a research number. */
 function parseEmployeeCount(card: Json): number | null {
   const company = (card.company as Json) ?? {};
@@ -221,7 +242,7 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
 
   const { sender, source: senderSource } = await resolveSender(client, leadUuid, str(body, "senderProfileUuid", "sender_profile_uuid"));
   const employees = parseEmployeeCount(card);
-  const revenueLine = angle === "productize" || angle === "scale" ? feasibleRevenueLine(employees) : null;
+  const proposedRevenueLine = angle === "productize" || angle === "scale" ? feasibleRevenueLine(employees) : null;
 
   // Colleague key points from cached account summary.
   let accountKeyPoints = "";
@@ -256,18 +277,25 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     .filter(Boolean)
     .join("\n")
     .slice(0, 1200);
+  const companyThreads = ((companyCard?.conversations ?? card.conversations ?? []) as ContextThread[]);
   const conversationContext = formatCompanyConversationContext(
-    ((companyCard?.conversations ?? card.conversations ?? []) as ContextThread[]),
+    companyThreads,
     ((companyCard?.contacts ?? [contact]) as Json[]),
     leadUuid,
     name
   );
+  const priorChannelPitch = detectPriorCompanyChannelPitch(companyThreads, channel);
+  const effectiveAngle = priorChannelPitch.detected ? null : angle;
+  const revenueLine = priorChannelPitch.detected ? null : proposedRevenueLine;
 
-  const systemPrompt = buildFeasibleSystemPrompt({ channel, sender, angle, revenueLine });
+  const systemPrompt = buildFeasibleSystemPrompt({ channel, sender, angle: effectiveAngle, revenueLine });
   const userPrompt = [
     instructions
       ? `REVIEWER REQUEST (this defines the conversation scenario and desired outcome; apply it on top of the underlying factual and messaging rules):\n${instructions}`
       : `REVIEWER REQUEST:\nWrite the most natural next message for the actual conversation stage. Do not default to a product pitch.`,
+    priorChannelPitch.detected
+      ? `CHANNEL HISTORY STATE:\nA product pitch was already sent at this company in the ${priorChannelPitch.channelFamily} channel family (${priorChannelPitch.matchingMessages} matching outbound message${priorChannelPitch.matchingMessages === 1 ? "" : "s"}). Do not pitch Feasible again. Use relationship building and the underlying problem context.`
+      : `CHANNEL HISTORY STATE:\nNo prior product pitch was detected at this company in the ${priorChannelPitch.channelFamily} channel family. A narrow relevant feature, use case, or partner benefit is allowed when it helps this specific message.`,
     `Recipient: ${name}${contact.position ? `, ${String(contact.position)}` : ""}${company ? ` at ${String(company.name ?? "")}` : ""}${employees ? ` (~${employees} employees)` : ""}`,
     research ? `\nInternal research (context only — do NOT paste back to them):\n${research}` : "",
     accountKeyPoints ? `\nColleagues at this account have said:\n${accountKeyPoints}` : "",
@@ -310,7 +338,12 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
         }
       }
       text = text.replace(/^["']|["']$/g, "");
-      const violations = [...new Set([...feasibleViolations(text), ...feasibleReviewerViolations(text, instructions)])];
+      const violations = [
+        ...new Set([
+          ...feasibleViolations(text),
+          ...feasibleReviewerViolations(text, instructions, priorChannelPitch.detected),
+        ]),
+      ];
       if (violations.length && attempt < 2) {
         attemptPrompt = `${userPrompt}\n\nREWRITE REQUIRED:\nThe previous draft broke these rules: ${violations.join(", ")}. Rewrite from scratch and remove every violation. Previous draft for diagnosis only:\n${subject ? `Subject: ${subject}\n\n` : ""}${text}`;
         continue;
@@ -326,6 +359,10 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
     variants: out,
     channel,
     angle,
+    effective_angle: effectiveAngle,
+    prior_channel_product_pitch: priorChannelPitch.detected,
+    prior_channel_product_pitch_messages: priorChannelPitch.matchingMessages,
+    channel_family: priorChannelPitch.channelFamily,
     employees,
     revenue_line: revenueLine,
     sender_profile_uuid: sender.sender_profile_uuid,
