@@ -38,6 +38,17 @@ test("buildFeasibleSystemPrompt: includes persona signature, $ only when angle a
   assert.match(winRate, /Do NOT include a \$ figure/);
 });
 
+test("buildFeasibleSystemPrompt: defaults to universal conversation logic rather than a pitch", () => {
+  const prompt = buildFeasibleSystemPrompt({ channel: "inmail", sender: FEASIBLE_SENDERS[2] });
+  assert.match(prompt, /universal messaging agent, not a pitch generator/i);
+  assert.match(prompt, /cold opener, warm follow up, reply, re engagement note/i);
+  assert.match(prompt, /do not force an MSSP angle, product pitch, trial, revenue claim, or sales CTA/i);
+  assert.match(prompt, /CEO needs the business reason for spending time/i);
+  assert.match(prompt, /mention colleagues by name/i);
+  assert.match(prompt, /Do not drop a list of names as empty social proof/i);
+  assert.match(prompt, /Avoid empty lines such as "align on next steps"/i);
+});
+
 test("buildFeasibleSystemPrompt: channel format guidance differs", () => {
   const s = FEASIBLE_SENDERS[0];
   assert.match(buildFeasibleSystemPrompt({ channel: "inmail", sender: s }), /InMail/);
@@ -59,4 +70,8 @@ test("feasibleViolations: flags the hard bans", () => {
   assert.ok(v.includes("trailing_contrast"));
   assert.ok(v.includes("money_word_not_recurring_revenue"));
   assert.ok(feasibleViolations(Array.from({ length: 71 }, () => "word").join(" ")).includes("over_70_words"));
+  assert.ok(feasibleViolations("a 15-min call").includes("contains_joining_hyphen"));
+  assert.ok(feasibleViolations("No tools, no setup, just results.").includes("no_no_just_pattern"));
+  assert.ok(feasibleViolations("Not a tool. Not a pitch. A system.").includes("not_not_pattern"));
+  assert.ok(feasibleViolations("It is important to note this.").includes("inflated_ai_phrase"));
 });

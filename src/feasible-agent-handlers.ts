@@ -264,11 +264,13 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
 
   const systemPrompt = buildFeasibleSystemPrompt({ channel, sender, angle, revenueLine });
   const userPrompt = [
+    instructions
+      ? `REVIEWER REQUEST (this defines the conversation scenario and desired outcome; apply it on top of the underlying factual and messaging rules):\n${instructions}`
+      : `REVIEWER REQUEST:\nWrite the most natural next message for the actual conversation stage. Do not default to a product pitch.`,
     `Recipient: ${name}${contact.position ? `, ${String(contact.position)}` : ""}${company ? ` at ${String(company.name ?? "")}` : ""}${employees ? ` (~${employees} employees)` : ""}`,
     research ? `\nInternal research (context only — do NOT paste back to them):\n${research}` : "",
     accountKeyPoints ? `\nColleagues at this account have said:\n${accountKeyPoints}` : "",
     `\nAll known company conversations across contacts (private context only; never attribute a colleague's words to the recipient):\n${conversationContext.text}`,
-    instructions ? `\nAdditional reviewer instructions (apply only when compatible with the system rules): ${instructions}` : "",
     channel === "inmail" || channel === "email"
       ? `\nWrite the message. First line "Subject: <3-4 word subject>", then a blank line, then the body.`
       : `\nWrite the next message.`,

@@ -54,7 +54,7 @@ Feasible is an attack-path security platform. One license covers EASM, VM, DAST 
 
 WHO YOU WRITE TO: leaders and practitioners at MSSPs / security service providers (founders, BD, security engineers, VM/exposure analysts). For technical practitioners, use the canonical practitioner block below.`;
 
-const FOUR_ANGLES = `THE FOUR MSSP ANGLES (pick the one that fits the contact; only ONE per message):
+const FOUR_ANGLES = `OPTIONAL MSSP SALES ANGLES (use only when the reviewer asks for a sales message or explicitly selects an angle; only ONE per message):
 1. Productize - Feasible becomes a new recurring product line the partner sells. $ revenue line ALLOWED.
 4. Scale - serve more clients with the same headcount. $ revenue line ALLOWED.
 2. Win rate - win more bids / higher ticket. NO $ line (only a real % proof if you truly have one).
@@ -73,6 +73,10 @@ const HARD_BANS = `HARD STYLE RULES (every message):
 - No "already". No throat-clearing openers ("I wanted to reach out", "I'm reaching out because", "just following up").
 - No trailing contrast: never ", not X" / "no separate X" / "instead of Y". State the positive and stop.
 - No tricolons / 3-item lists in new prose.
+- No "No X, no Y, just Z", "Not X. Not Y. Z.", dramatic reversals, motivational conclusions, or fragment questions such as "The result?".
+- No hedge generalizations such as "X usually means Y". No inflated phrases such as "it is important to note" or "this serves to highlight".
+- Do not narrate the recipient's resume or company description back to them. Use a fact only when it creates a concrete reason for this message.
+- Do not join words with hyphens. Write "15min", "attack path", and "white label". Literal names, domains and URLs keep their official spelling.
 - Advisory tone only. BANNED presumptive verbs about Feasible: changes/changes that/solves/fixes/eliminates/transforms/removes/collapses/will change. Use "Feasible could help with that part", "partners often...".
 - No regional-presence claims (Feasible is not yet in the target region): reference other MSSPs without geography, or one concrete partner.
 - Second-person opener: address the reader as you/your in the first sentence. Never describe their company back to them in third person, and never paste a research one-liner.
@@ -80,8 +84,21 @@ const HARD_BANS = `HARD STYLE RULES (every message):
 - Spoken patterns for non-native readers; standard acronyms (EASM, VM, DAST, SOC, OT) as scannable anchors; no idioms.
 - No vm_gap / competing-product framing as a selling point.`;
 
+const CONVERSATION_LOGIC = `CONVERSATION LOGIC:
+- This is a universal messaging agent, not a pitch generator. It may write a cold opener, warm follow up, reply, re engagement note, handoff, introduction, scheduling note, question, or relationship message.
+- First infer the actual conversation stage and requested outcome from the reviewer instructions and all company conversations. Continue that situation naturally.
+- Reviewer instructions define the job. Follow them unless they conflict with truth, safety, channel format, or the hard style rules.
+- Do not mention Feasible, its product, a trial, revenue, or an MSSP sales angle unless that helps the requested conversation. Never bolt on a product pitch by default.
+- Company conversations are shared account context. You may truthfully mention colleagues by name and summarize what was discussed. Never imply the recipient personally said or saw something that came from a colleague.
+- Do not drop a list of names as empty social proof. Connect prior conversations to one useful executive topic: a decision, open question, partnership direction, delivery issue, or reason the recipient is the right person.
+- Match seniority. A CEO needs the business reason for spending time. Before asking for a meeting, state what they would get from it, grounded in known context. For example: resolve an open partnership question, compare the operating model, or decide whether a next step is worth pursuing.
+- Avoid empty lines such as "align on next steps", "compare notes", "good conversations", or "quick intro" unless the message says what the next step, notes, conversation, or introduction is about.
+- If evidence is thin, stay narrow and ask a simple contextual question. Never invent detail to make the message sound specific.`;
+
 const CTA_SIG = `CTA + SIGNATURE:
-- CTA (cold / value touches): end with the trial outcome then "Interested in an intro meeting?". For a warm reply, match the thread and keep one clear ask.
+- Use one CTA that fits the requested scenario and conversation stage. A meeting ask is optional.
+- If asking for a call, include the concrete reason and recipient value before the ask. Use the requested duration exactly, such as "15min".
+- For a warm reply, answer or continue the thread before making an ask.
 - Sign with the sender persona's first name ONLY (provided below). Never use a different name.
 - A LinkedIn P.S. is only truthful if THIS sender persona actually did that LinkedIn touch with this lead; omit otherwise.`;
 
@@ -103,13 +120,14 @@ export function buildFeasibleSystemPrompt(opts: FeasiblePromptOptions): string {
 
   const angleLine = opts.angle
     ? `ANGLE TO USE: ${opts.angle}. ${opts.angle === "productize" || opts.angle === "scale" ? "The $ revenue line is allowed." : "Do NOT include a $ figure."}`
-    : "Pick the single most fitting MSSP angle from the four; if employee count is unknown, omit any $ figure.";
+    : "NO SALES ANGLE SELECTED: do not force an MSSP angle, product pitch, trial, revenue claim, or sales CTA. Follow the conversation and reviewer request.";
 
   const revenue = opts.revenueLine ? `REVENUE LINE (use verbatim if the angle allows $): "${opts.revenueLine}"` : "";
 
   return [
-    "You write Feasible partner outreach to MSSPs. Return ONLY the message (and a subject line first if asked), no preamble, no quotes around it.",
+    "You write messages for Feasible across any real conversation scenario. Return ONLY the message (and a subject line first if asked), no preamble, no quotes around it.",
     POSITIONING,
+    CONVERSATION_LOGIC,
     FOUR_ANGLES,
     PRACTITIONER_BLOCK,
     HARD_BANS,
@@ -136,5 +154,9 @@ export function feasibleViolations(text: string): string[] {
   if (/\bfeasible\s+(changes|solves|fixes|eliminates|transforms|removes|collapses|will change)\b/.test(lowered)) v.push("presumptive_claim");
   if (/\bvalidated paths\b/.test(lowered)) v.push("validated_paths");
   if (/\b(margin|profit|savings)\b/.test(lowered)) v.push("money_word_not_recurring_revenue");
+  if (/\b[\p{L}\p{N}]+-[\p{L}\p{N}]+\b/u.test(text)) v.push("contains_joining_hyphen");
+  if (/\bno\b[^.!?]{0,40},\s*\bno\b[^.!?]{0,40},\s*\bjust\b/i.test(text)) v.push("no_no_just_pattern");
+  if (/\bnot\b[^.!?]{0,30}\.\s*\bnot\b[^.!?]{0,30}\./i.test(text)) v.push("not_not_pattern");
+  if (/\b(it is important to note|this serves to highlight)\b/i.test(text)) v.push("inflated_ai_phrase");
   return v;
 }
