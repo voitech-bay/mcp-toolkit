@@ -90,9 +90,11 @@ const CONVERSATION_LOGIC = `CONVERSATION LOGIC:
 - Reviewer instructions define the job. Follow them unless they conflict with truth, safety, channel format, or the hard style rules.
 - Do not mention Feasible, its product, a trial, revenue, or an MSSP sales angle unless that helps the requested conversation. Never bolt on a product pitch by default.
 - Company conversations are shared account context. You may truthfully mention colleagues by name and summarize what was discussed. Never imply the recipient personally said or saw something that came from a colleague.
+- When asked to combine prior prospect or company conversations, prioritize relevant people at the recipient's company. Do not substitute our own senders' names for the prospect names the reviewer asked for.
 - Do not drop a list of names as empty social proof. Connect prior conversations to one useful executive topic: a decision, open question, partnership direction, delivery issue, or reason the recipient is the right person.
 - Match seniority. A CEO needs the business reason for spending time. Before asking for a meeting, state what they would get from it, grounded in known context. For example: resolve an open partnership question, compare the operating model, or decide whether a next step is worth pursuing.
 - Avoid empty lines such as "align on next steps", "compare notes", "good conversations", or "quick intro" unless the message says what the next step, notes, conversation, or introduction is about.
+- If the reviewer says no product pitch, treat that literally: omit Feasible, platform capabilities, attack paths, white label framing, trials, revenue, and disguised product benefits. Build the reason for writing from the prior conversations and the recipient's decision context.
 - If evidence is thin, stay narrow and ask a simple contextual question. Never invent detail to make the message sound specific.`;
 
 const CTA_SIG = `CTA + SIGNATURE:
@@ -155,8 +157,22 @@ export function feasibleViolations(text: string): string[] {
   if (/\bvalidated paths\b/.test(lowered)) v.push("validated_paths");
   if (/\b(margin|profit|savings)\b/.test(lowered)) v.push("money_word_not_recurring_revenue");
   if (/\b[\p{L}\p{N}]+-[\p{L}\p{N}]+\b/u.test(text)) v.push("contains_joining_hyphen");
+  if (/-{2,}/.test(text)) v.push("contains_double_hyphen");
   if (/\bno\b[^.!?]{0,40},\s*\bno\b[^.!?]{0,40},\s*\bjust\b/i.test(text)) v.push("no_no_just_pattern");
   if (/\bnot\b[^.!?]{0,30}\.\s*\bnot\b[^.!?]{0,30}\./i.test(text)) v.push("not_not_pattern");
   if (/\b(it is important to note|this serves to highlight)\b/i.test(text)) v.push("inflated_ai_phrase");
+  return v;
+}
+
+/** Reviewer-specific constraints that can be checked mechanically after generation. */
+export function feasibleReviewerViolations(text: string, instructions: string): string[] {
+  const v: string[] = [];
+  const forbidsPitch = /\b(?:do not|don't|no|without)\b[^.!?\n]{0,40}\b(?:product\s+pitch|pitch|sales\s+pitch)\b/i.test(instructions);
+  if (
+    forbidsPitch &&
+    /\b(?:Feasible|platform|attack paths?|white[ -]?label|trials?|EASM|DAST|recurring revenue)\b/i.test(text)
+  ) {
+    v.push("product_pitch_against_instruction");
+  }
   return v;
 }

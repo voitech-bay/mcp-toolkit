@@ -4,6 +4,7 @@ import {
   feasibleRevenueLine,
   buildFeasibleSystemPrompt,
   feasibleViolations,
+  feasibleReviewerViolations,
   senderForUuid,
   FEASIBLE_SENDERS,
 } from "./feasible-context.js";
@@ -45,8 +46,10 @@ test("buildFeasibleSystemPrompt: defaults to universal conversation logic rather
   assert.match(prompt, /do not force an MSSP angle, product pitch, trial, revenue claim, or sales CTA/i);
   assert.match(prompt, /CEO needs the business reason for spending time/i);
   assert.match(prompt, /mention colleagues by name/i);
+  assert.match(prompt, /prioritize relevant people at the recipient's company/i);
   assert.match(prompt, /Do not drop a list of names as empty social proof/i);
   assert.match(prompt, /Avoid empty lines such as "align on next steps"/i);
+  assert.match(prompt, /If the reviewer says no product pitch, treat that literally/i);
 });
 
 test("buildFeasibleSystemPrompt: channel format guidance differs", () => {
@@ -71,7 +74,18 @@ test("feasibleViolations: flags the hard bans", () => {
   assert.ok(v.includes("money_word_not_recurring_revenue"));
   assert.ok(feasibleViolations(Array.from({ length: 71 }, () => "word").join(" ")).includes("over_70_words"));
   assert.ok(feasibleViolations("a 15-min call").includes("contains_joining_hyphen"));
+  assert.ok(feasibleViolations("a call -- perhaps tomorrow").includes("contains_double_hyphen"));
   assert.ok(feasibleViolations("No tools, no setup, just results.").includes("no_no_just_pattern"));
   assert.ok(feasibleViolations("Not a tool. Not a pitch. A system.").includes("not_not_pattern"));
   assert.ok(feasibleViolations("It is important to note this.").includes("inflated_ai_phrase"));
+});
+
+test("feasibleReviewerViolations enforces an explicit no-pitch request", () => {
+  const instructions = "Use the conversations and do not pitch the product.";
+  assert.deepEqual(feasibleReviewerViolations("Miguel raised the delivery model. Worth discussing that with our founder?", instructions), []);
+  assert.ok(
+    feasibleReviewerViolations("A white label attack path platform could help.", instructions).includes(
+      "product_pitch_against_instruction"
+    )
+  );
 });

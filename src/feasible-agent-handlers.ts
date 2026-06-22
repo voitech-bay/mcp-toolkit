@@ -32,6 +32,7 @@ import {
   feasibleRevenueLine,
   buildFeasibleSystemPrompt,
   feasibleViolations,
+  feasibleReviewerViolations,
   type FeasibleChannel,
   type FeasibleAngle,
   type FeasibleSender,
@@ -280,30 +281,45 @@ export async function handlePostFeasibleGenerate(req: IncomingMessage, res: Serv
 
   const out: Array<Json> = [];
   for (let i = 0; i < variants; i++) {
-    const generationParams = {
-      model,
-      systemPrompt,
-      userPrompt,
-      temperature: i === 0 ? 0.5 : 0.8,
-    };
-    const { data: gen, error: genErr } = tier === "cheap"
-      ? await generateOpenModelMessage(generationParams)
-      : await generateOpenRouterMessage(generationParams);
-    if (genErr || !gen) {
-      out.push({ error: genErr ?? "generation failed", model, provider: tier === "cheap" ? "openmodel" : "openrouter" });
-      continue;
-    }
-    let subject = "";
-    let text = gen.text.trim();
-    if (channel === "inmail" || channel === "email") {
-      const m = text.match(/^subject:\s*(.+)$/im);
-      if (m) {
-        subject = m[1].trim();
-        text = text.replace(/^subject:\s*.+$/im, "").trim();
+    let attemptPrompt = userPrompt;
+    let completed = false;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const generationParams = {
+        model,
+        systemPrompt,
+        userPrompt: attemptPrompt,
+        temperature: attempt === 0 ? (i === 0 ? 0.5 : 0.8) : 0.3,
+      };
+      const { data: gen, error: genErr } = tier === "cheap"
+        ? await generateOpenModelMessage(generationParams)
+        : await generateOpenRouterMessage(generationParams);
+      if (genErr || !gen) {
+        if (attempt === 2) {
+          out.push({ error: genErr ?? "generation failed", model, provider: tier === "cheap" ? "openmodel" : "openrouter" });
+          completed = true;
+        }
+        continue;
       }
+      let subject = "";
+      let text = gen.text.trim();
+      if (channel === "inmail" || channel === "email") {
+        const m = text.match(/^subject:\s*(.+)$/im);
+        if (m) {
+          subject = m[1].trim();
+          text = text.replace(/^subject:\s*.+$/im, "").trim();
+        }
+      }
+      text = text.replace(/^["']|["']$/g, "");
+      const violations = [...new Set([...feasibleViolations(text), ...feasibleReviewerViolations(text, instructions)])];
+      if (violations.length && attempt < 2) {
+        attemptPrompt = `${userPrompt}\n\nREWRITE REQUIRED:\nThe previous draft broke these rules: ${violations.join(", ")}. Rewrite from scratch and remove every violation. Previous draft for diagnosis only:\n${subject ? `Subject: ${subject}\n\n` : ""}${text}`;
+        continue;
+      }
+      out.push({ subject, text, model: gen.model, provider: tier === "cheap" ? "openmodel" : "openrouter", tier, violations, generation_attempts: attempt + 1 });
+      completed = true;
+      break;
     }
-    text = text.replace(/^["']|["']$/g, "");
-    out.push({ subject, text, model: gen.model, provider: tier === "cheap" ? "openmodel" : "openrouter", tier, violations: feasibleViolations(text) });
+    if (!completed) out.push({ error: "generation failed", model, provider: tier === "cheap" ? "openmodel" : "openrouter" });
   }
 
   sendJson(res, 200, {
