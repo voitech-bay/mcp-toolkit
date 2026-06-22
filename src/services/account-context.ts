@@ -70,6 +70,7 @@ export interface ConversationThread {
     linkedin_type: string | null;
     sender_profile_uuid: string | null;
     sender_display_name: string | null;
+    channel_label: "InMail" | "Email" | "LinkedIn" | "Connection request";
   }>;
 }
 
@@ -89,6 +90,18 @@ function msgTime(m: MessageRow): string {
 
 function isInbox(m: MessageRow): boolean {
   return (m.type ?? "").toLowerCase() === "inbox";
+}
+
+export function messageChannelLabel(
+  message: Pick<MessageRow, "linkedin_type" | "type" | "subject">
+): ConversationThread["messages"][number]["channel_label"] {
+  const linkedinType = (message.linkedin_type ?? "").toLowerCase();
+  const type = (message.type ?? "").toLowerCase();
+  if (linkedinType.includes("inmail") || type.includes("inmail")) return "InMail";
+  if (linkedinType.includes("connection")) return "Connection request";
+  if (linkedinType === "message" || linkedinType.includes("linkedin")) return "LinkedIn";
+  if (type.includes("email") || Boolean(message.subject?.trim())) return "Email";
+  return "LinkedIn";
 }
 
 /** Group LinkedinMessages rows into per-conversation threads, newest-activity first. */
@@ -132,6 +145,7 @@ export function groupMessagesIntoThreads(
         linkedin_type: m.linkedin_type ?? null,
         sender_profile_uuid: m.sender_profile_uuid,
         sender_display_name: m.sender_profile_uuid ? opts?.senderNames?.get(m.sender_profile_uuid) ?? null : null,
+        channel_label: messageChannelLabel(m),
       })),
     });
   }

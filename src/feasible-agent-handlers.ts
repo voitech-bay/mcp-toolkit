@@ -50,6 +50,7 @@ type ContextMessage = {
   subject?: string | null;
   type?: string | null;
   sender_display_name?: string | null;
+  channel_label?: string;
 };
 
 type ContextThread = {
@@ -127,7 +128,7 @@ export function formatCompanyConversationContext(
         const speaker = (message.type ?? "").toLowerCase() === "inbox"
           ? contactName
           : message.sender_display_name?.trim() || "Unknown sender";
-        return `${speaker}: ${content.slice(0, 1_000)}`;
+        return `${speaker}${message.channel_label ? ` [${message.channel_label}]` : ""}: ${content.slice(0, 1_000)}`;
       })
       .filter(Boolean);
     if (!lines.length) continue;

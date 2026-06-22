@@ -43,7 +43,7 @@ interface Thread {
   last_message_at: string | null;
   last_message_text: string | null;
   reply_status: string;
-  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; sender_profile_uuid?: string | null; sender_display_name?: string | null }>;
+  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject?: string | null; sender_profile_uuid?: string | null; sender_display_name?: string | null; channel_label?: string }>;
 }
 interface SummaryEntry {
   generated_at: string;
@@ -418,8 +418,9 @@ watch(companyId, load);
               :class="{ inbox: (m.type || '').toLowerCase() === 'inbox' }"
             >
               <NText depth="3" style="font-size: 0.72rem">
-                {{ (m.type || "").toLowerCase() === "inbox" ? nameByLead.get(t.lead_uuid ?? "") ?? "prospect" : (m.sender_display_name || "Unknown sender") }} · {{ fmtDate(m.sent_at) }}
+                {{ (m.type || "").toLowerCase() === "inbox" ? nameByLead.get(t.lead_uuid ?? "") ?? "prospect" : (m.sender_display_name || "Unknown sender") }} · {{ m.channel_label || "LinkedIn" }} · {{ fmtDate(m.sent_at) }}
               </NText>
+              <div v-if="m.subject"><strong>Subject:</strong> {{ m.subject }}</div>
               <div>{{ m.text }}</div>
             </div>
           </NCollapseItem>

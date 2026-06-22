@@ -4,6 +4,7 @@ import {
   groupMessagesIntoThreads,
   summarizeContactActivity,
   parseAccountSummaryEntry,
+  messageChannelLabel,
   type MessageRow,
 } from "./account-context.js";
 
@@ -53,6 +54,13 @@ test("groupMessagesIntoThreads: preserves and resolves the outbound sender", () 
   });
   assert.equal(thread.messages[0].sender_profile_uuid, "sender-1");
   assert.equal(thread.messages[0].sender_display_name, "Diana Mesropyan");
+});
+
+test("messageChannelLabel distinguishes InMail, email, and LinkedIn", () => {
+  assert.equal(messageChannelLabel({ linkedin_type: "inmail", type: "outbox", subject: "hello" }), "InMail");
+  assert.equal(messageChannelLabel({ linkedin_type: null, type: "outbox", subject: "quick note" }), "Email");
+  assert.equal(messageChannelLabel({ linkedin_type: "message", type: "outbox", subject: null }), "LinkedIn");
+  assert.equal(messageChannelLabel({ linkedin_type: "connection_note", type: "outbox", subject: null }), "Connection request");
 });
 
 test("groupMessagesIntoThreads: reply status no_response / waiting / got_response", () => {
