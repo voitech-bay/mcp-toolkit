@@ -48,6 +48,12 @@ const router = createRouter({
       meta: { title: "Launch workflow | MCP Toolkit" },
     },
     {
+      path: "/n8n/lead-views",
+      name: "N8nLeadViews",
+      component: () => import("../views/LeadViewsPage.vue"),
+      meta: { title: "Lead views | MCP Toolkit" },
+    },
+    {
       path: "/n8n/workflow-results",
       name: "N8nWorkflowResults",
       component: () => import("../views/N8nWorkflowResultsPage.vue"),
@@ -57,7 +63,7 @@ const router = createRouter({
       path: "/inmail-review",
       name: "InMailReview",
       component: () => import("../views/InMailReviewPage.vue"),
-      meta: { title: "InMail review | MCP Toolkit" },
+      meta: { title: "Message log | MCP Toolkit" },
     },
     {
       path: "/calls/cold-n8n",

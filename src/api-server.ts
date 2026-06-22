@@ -136,7 +136,8 @@ import {
   handleN8nLaunchStatus,
   handleN8nLaunchHistory,
 } from "./launcher-handlers.js";
-import { handleLeadReviewItems, handleLeadReviewDecide } from "./lead-review-handlers.js";
+import { handleLeadViewsItems, handleLeadViewsDecide } from "./lead-views-handlers.js";
+import { handleMessageLog } from "./message-log-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -767,11 +768,14 @@ const server = createServer(async (req, res) => {
       case "/api/n8n/launch/history":
         await handleN8nLaunchHistory(req, res);
         return;
-      case "/api/lead-review/items":
-        await handleLeadReviewItems(req, res);
+      case "/api/lead-views/items":
+        await handleLeadViewsItems(req, res);
         return;
-      case "/api/lead-review/decide":
-        await handleLeadReviewDecide(req, res);
+      case "/api/lead-views/decide":
+        await handleLeadViewsDecide(req, res);
+        return;
+      case "/api/message-log":
+        await handleMessageLog(req, res);
         return;
       case "/api/company-context":
         if (req.method === "GET") {

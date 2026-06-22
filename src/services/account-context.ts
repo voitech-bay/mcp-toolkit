@@ -31,7 +31,7 @@ const INMAIL_REVIEW_STATE_TABLE = "inmail_review_state";
 const CONTACT_CARD_FIELDS =
   "uuid, project_id, name, first_name, last_name, position, headline, about, avatar_url, linkedin, linkedin_url, work_email, status, email_status, tags, company_uuid, company_id, company_name, experience, lead_category, priority, gs_connection_accepted_at, created_at, updated_at";
 const COMPANY_CARD_FIELDS =
-  "id, name, domain, website, linkedin, industry, about, employees_range, employees_on_linkedin, hq_location, hq_raw_address, status, tags, created_at, updated_at";
+  "id, name, domain, website, linkedin, industry, about, employees_range, employees_on_linkedin, hq_location, hq_raw_address, status, tags, qualification_status, qualification_decided_at, created_at, updated_at";
 const MESSAGE_FIELDS =
   "uuid, lead_uuid, linkedin_conversation_uuid, sender_profile_uuid, text, subject, type, status, sent_at, created_at, linkedin_type";
 

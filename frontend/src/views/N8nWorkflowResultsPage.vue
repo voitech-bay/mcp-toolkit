@@ -15,11 +15,8 @@ import {
   NSelect,
   NDatePicker,
   NAvatar,
-  NRadioGroup,
-  NRadioButton,
 } from "naive-ui";
 import type { DataTableColumns, SelectOption } from "naive-ui";
-import LeadViewsPanel from "../components/LeadViewsPanel.vue";
 
 export type N8nWorkflowResultRow = {
   id: string;
@@ -110,18 +107,6 @@ function queryToRecord(): Record<string, string> {
     else if (Array.isArray(v) && typeof v[0] === "string") out[k] = v[0];
   }
   return out;
-}
-
-// View mode: classic filterable table vs. bucketed lead-views (Best Fit / Review / Disqualified).
-const mode = ref<"table" | "leadviews">(route.query.mode === "leadviews" ? "leadviews" : "table");
-const leadViewsLaunchId = computed(() => String(route.query.launchId ?? "").trim() || undefined);
-const leadViewsExecutionId = computed(() => String(route.query.executionId ?? "").trim() || undefined);
-function setMode(m: "table" | "leadviews"): void {
-  mode.value = m;
-  const q = queryToRecord();
-  if (m === "leadviews") q.mode = "leadviews";
-  else delete q.mode;
-  router.replace({ path: "/n8n/workflow-results", query: q });
 }
 
 const PAGE_SIZE = 25;
@@ -465,22 +450,10 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
 <template>
   <NCard>
     <template #header>
-      <NSpace align="center" justify="space-between" style="width: 100%">
-        <span>n8n workflow results</span>
-        <NRadioGroup :value="mode" size="small" @update:value="setMode">
-          <NRadioButton value="table">Table</NRadioButton>
-          <NRadioButton value="leadviews">Lead views</NRadioButton>
-        </NRadioGroup>
-      </NSpace>
+      <span>n8n workflow results</span>
     </template>
 
-    <LeadViewsPanel
-      v-if="mode === 'leadviews'"
-      :initial-launch-id="leadViewsLaunchId"
-      :initial-execution-id="leadViewsExecutionId"
-    />
-
-    <NSpace v-show="mode === 'table'" vertical size="medium" style="width: 100%">
+    <NSpace vertical size="medium" style="width: 100%">
       <NSpace vertical size="small" style="width: 100%">
         <NSpace align="center" wrap>
           <NButton size="small" @click="addFilterRow">Add filter</NButton>
