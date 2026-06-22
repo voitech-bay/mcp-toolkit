@@ -49,6 +49,7 @@ type ContextMessage = {
   text?: string | null;
   subject?: string | null;
   type?: string | null;
+  sender_display_name?: string | null;
 };
 
 type ContextThread = {
@@ -123,7 +124,9 @@ export function formatCompanyConversationContext(
           .join(" | ")
           .trim();
         if (!content) return "";
-        const speaker = (message.type ?? "").toLowerCase() === "inbox" ? contactName : "us";
+        const speaker = (message.type ?? "").toLowerCase() === "inbox"
+          ? contactName
+          : message.sender_display_name?.trim() || "Unknown sender";
         return `${speaker}: ${content.slice(0, 1_000)}`;
       })
       .filter(Boolean);

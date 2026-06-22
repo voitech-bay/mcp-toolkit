@@ -46,6 +46,15 @@ test("groupMessagesIntoThreads: preserves LinkedIn subtype for connection status
   assert.deepEqual(thread.messages.map((m) => m.linkedin_type), ["connection_note", "message"]);
 });
 
+test("groupMessagesIntoThreads: preserves and resolves the outbound sender", () => {
+  const senderNames = new Map([["sender-1", "Diana Mesropyan"]]);
+  const [thread] = groupMessagesIntoThreads([msg({ type: "outbox", sender_profile_uuid: "sender-1" })], {
+    senderNames,
+  });
+  assert.equal(thread.messages[0].sender_profile_uuid, "sender-1");
+  assert.equal(thread.messages[0].sender_display_name, "Diana Mesropyan");
+});
+
 test("groupMessagesIntoThreads: reply status no_response / waiting / got_response", () => {
   const noReply = groupMessagesIntoThreads([msg({ type: "outbox" }), msg({ type: "outbox" })]);
   assert.equal(noReply[0].reply_status, "no_response");

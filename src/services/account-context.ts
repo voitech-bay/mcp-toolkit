@@ -16,6 +16,7 @@ import {
   CONTACTS_TABLE,
   COMPANIES_TABLE,
   LINKEDIN_MESSAGES_TABLE,
+  SENDERS_TABLE,
   N8N_WORKFLOW_RESULTS_TABLE,
   GENERATED_MESSAGES_TABLE,
   listContactContextsByContactId,
@@ -67,6 +68,8 @@ export interface ConversationThread {
     sent_at: string | null;
     subject: string | null;
     linkedin_type: string | null;
+    sender_profile_uuid: string | null;
+    sender_display_name: string | null;
   }>;
 }
 
@@ -89,7 +92,10 @@ function isInbox(m: MessageRow): boolean {
 }
 
 /** Group LinkedinMessages rows into per-conversation threads, newest-activity first. */
-export function groupMessagesIntoThreads(rows: MessageRow[], opts?: { messagesPerThread?: number }): ConversationThread[] {
+export function groupMessagesIntoThreads(
+  rows: MessageRow[],
+  opts?: { messagesPerThread?: number; senderNames?: Map<string, string> }
+): ConversationThread[] {
   const cap = opts?.messagesPerThread ?? 50;
   const byConv = new Map<string, MessageRow[]>();
   for (const m of rows) {
@@ -124,11 +130,36 @@ export function groupMessagesIntoThreads(rows: MessageRow[], opts?: { messagesPe
         sent_at: msgTime(m) || null,
         subject: m.subject,
         linkedin_type: m.linkedin_type ?? null,
+        sender_profile_uuid: m.sender_profile_uuid,
+        sender_display_name: m.sender_profile_uuid ? opts?.senderNames?.get(m.sender_profile_uuid) ?? null : null,
       })),
     });
   }
   threads.sort((a, b) => (b.last_message_at ?? "").localeCompare(a.last_message_at ?? ""));
   return threads;
+}
+
+function senderDisplayName(row: Json): string {
+  const first = typeof row.first_name === "string" ? row.first_name.trim() : "";
+  const last = typeof row.last_name === "string" ? row.last_name.trim() : "";
+  if (first || last) return [first, last].filter(Boolean).join(" ");
+  return typeof row.label === "string" ? row.label.trim() : "";
+}
+
+async function loadSenderNames(client: SupabaseClient, rows: MessageRow[]): Promise<Map<string, string>> {
+  const uuids = [...new Set(rows.map((row) => row.sender_profile_uuid?.trim() ?? "").filter(Boolean))];
+  const names = new Map<string, string>();
+  if (!uuids.length) return names;
+  const { data } = await client
+    .from(SENDERS_TABLE)
+    .select("uuid, first_name, last_name, label")
+    .in("uuid", uuids);
+  for (const row of (data ?? []) as Json[]) {
+    const uuid = typeof row.uuid === "string" ? row.uuid.trim() : "";
+    const display = senderDisplayName(row);
+    if (uuid && display) names.set(uuid, display);
+  }
+  return names;
 }
 
 /** Per-contact activity badges for a company roster, derived from already-grouped threads. */
@@ -263,7 +294,9 @@ export async function buildContactCard(
       : Promise.resolve({ data: null, error: null }),
   ]);
 
-  const threads = groupMessagesIntoThreads(((msgsRes.data ?? []) as MessageRow[]));
+  const messageRows = (msgsRes.data ?? []) as MessageRow[];
+  const senderNames = await loadSenderNames(client, messageRows);
+  const threads = groupMessagesIntoThreads(messageRows, { senderNames });
 
   return {
     data: {
@@ -319,7 +352,9 @@ export async function buildCompanyCard(
     listCompanyContextsByCompanyId(client, id),
   ]);
 
-  const threads = groupMessagesIntoThreads(((msgsRes.data ?? []) as MessageRow[]));
+  const messageRows = (msgsRes.data ?? []) as MessageRow[];
+  const senderNames = await loadSenderNames(client, messageRows);
+  const threads = groupMessagesIntoThreads(messageRows, { senderNames });
   const activity = summarizeContactActivity(threads);
   const rosterWithActivity = roster.map((r) => ({
     ...r,

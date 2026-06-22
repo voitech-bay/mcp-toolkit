@@ -40,7 +40,7 @@ interface Thread {
   last_message_at: string | null;
   last_message_text: string | null;
   reply_status: string;
-  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject: string | null; linkedin_type?: string | null }>;
+  messages: Array<{ text: string | null; type: string | null; sent_at: string | null; subject: string | null; linkedin_type?: string | null; sender_profile_uuid?: string | null; sender_display_name?: string | null }>;
 }
 
 const CATEGORY_OPTIONS = [
@@ -404,7 +404,7 @@ watch(contactUuid, load);
               </NSpace>
             </template>
             <div v-for="(m, i) in t.messages" :key="i" class="msg" :class="{ inbox: (m.type || '').toLowerCase() === 'inbox' }">
-              <NText depth="3" style="font-size: 0.72rem">{{ (m.type || '').toLowerCase() === 'inbox' ? displayName : 'us' }} · {{ fmtDate(m.sent_at) }}</NText>
+              <NText depth="3" style="font-size: 0.72rem">{{ (m.type || '').toLowerCase() === 'inbox' ? displayName : (m.sender_display_name || 'Unknown sender') }} · {{ fmtDate(m.sent_at) }}</NText>
               <div>{{ m.text }}</div>
             </div>
           </NCollapseItem>
