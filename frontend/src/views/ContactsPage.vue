@@ -12,19 +12,22 @@ import {
   NModal,
   NForm,
   NFormItem,
+  NSelect,
   NTag,
   NAvatar,
   NSpin,
+  NTooltip,
   useMessage,
 } from "naive-ui";
-import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { UsersIcon, FileTextIcon, BuildingIcon } from "lucide-vue-next";
+import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
+import { UsersIcon, FileTextIcon, BuildingIcon, RotateCcwIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
 
 const projectStore = useProjectStore();
 const message = useMessage();
+const COLUMN_STORAGE_KEY = "voitech/contacts/visible-columns";
 
 interface ContactRow {
   id?: string;
@@ -42,6 +45,12 @@ interface ContactRow {
   created_at?: string | null;
 }
 
+type ConfigurableColumn = DataTableColumns<ContactRow>[number] & {
+  key: string;
+  title?: unknown;
+  width?: number;
+};
+
 // --- Table state ---
 const data = ref<ContactRow[]>([]);
 const total = ref(0);
@@ -53,6 +62,45 @@ const PAGE_SIZES = [10, 25, 50, 100];
 const searchInput = ref("");
 const appliedSearch = ref("");
 const checkedKeys = ref<DataTableRowKey[]>([]);
+
+const DEFAULT_VISIBLE_COLUMN_KEYS = [
+  "avatar",
+  "name",
+  "position",
+  "company_id",
+  "company_name",
+  "email",
+  "personal_email",
+  "context",
+] as const;
+
+const visibleColumnKeys = ref<string[]>(loadVisibleColumnKeys());
+
+function loadVisibleColumnKeys(): string[] {
+  if (typeof localStorage === "undefined") return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  try {
+    const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
+      ? parsed
+      : [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  } catch {
+    return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  }
+}
+
+watch(visibleColumnKeys, (keys) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(keys));
+});
+
+function showAllColumns() {
+  visibleColumnKeys.value = columnOptions.value.map((option) => String(option.value));
+}
+
+function resetColumns() {
+  visibleColumnKeys.value = [...DEFAULT_VISIBLE_COLUMN_KEYS];
+}
 
 const debouncedSearch = useDebounceFn(() => {
   appliedSearch.value = searchInput.value.trim();
@@ -281,8 +329,7 @@ const pagination = computed(() => ({
   onUpdatePageSize,
 }));
 
-const columns = computed<DataTableColumns<ContactRow>>(() => [
-  { type: "selection" },
+const dataColumns = computed<ConfigurableColumn[]>(() => [
   {
     key: "avatar",
     title: "",
@@ -397,24 +444,67 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
     },
   },
 ]);
+
+const columnOptions = computed<SelectOption[]>(() =>
+  dataColumns.value.map((column) => ({
+    label: typeof column.title === "string" && column.title ? column.title : "Avatar",
+    value: String(column.key),
+  }))
+);
+
+const visibleDataColumns = computed(() => {
+  const visibleKeys = new Set(visibleColumnKeys.value);
+  return dataColumns.value.filter((column) => visibleKeys.has(String(column.key)));
+});
+
+const columns = computed<DataTableColumns<ContactRow>>(() => [
+  { type: "selection" },
+  ...visibleDataColumns.value,
+]);
+
+const scrollX = computed(() =>
+  columns.value.reduce((total, column) => total + (Number((column as { width?: number }).width) || 160), 0)
+);
 </script>
 
 <template>
   <NCard>
     <template #header>
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:8px">
           <UsersIcon :size="16" />
           <span>Contacts</span>
           <span v-if="loading" style="opacity:0.6;font-size:0.82rem">Loading…</span>
         </div>
-        <NInput
-          v-model:value="searchInput"
-          placeholder="Search name or role…"
-          clearable
-          size="small"
-          style="width: 280px"
-        />
+        <NSpace size="small" align="center" wrap>
+          <NInput
+            v-model:value="searchInput"
+            placeholder="Search name or role…"
+            clearable
+            size="small"
+            style="width: 280px"
+          />
+          <NSelect
+            v-model:value="visibleColumnKeys"
+            :options="columnOptions"
+            multiple
+            filterable
+            clearable
+            max-tag-count="responsive"
+            placeholder="Columns"
+            size="small"
+            style="width: 220px"
+          />
+          <NTooltip>
+            <template #trigger>
+              <NButton size="small" quaternary circle @click="resetColumns">
+                <template #icon><RotateCcwIcon :size="14" /></template>
+              </NButton>
+            </template>
+            Reset columns
+          </NTooltip>
+          <NButton size="small" quaternary @click="showAllColumns">Show all</NButton>
+        </NSpace>
       </div>
     </template>
 
@@ -428,7 +518,7 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
       <NDataTable
         :columns="columns"
         :data="data"
-        :scroll-x="1200"
+        :scroll-x="scrollX"
         :row-key="(r: ContactRow) => (r.id ?? `${r.company_uuid ?? ''}/${r.first_name ?? ''}/${r.last_name ?? ''}/${r.position ?? ''}`)"
         v-model:checked-row-keys="checkedKeys"
         remote
@@ -487,4 +577,3 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
     @attached="onCompanyAttached"
   />
 </template>
-

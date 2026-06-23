@@ -18,15 +18,17 @@ import {
   NCheckbox,
   NPopover,
   NSpin,
+  NTooltip,
   useMessage,
 } from "naive-ui";
-import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon } from "lucide-vue-next";
+import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
+import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon, RotateCcwIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 
 const projectStore = useProjectStore();
 const message = useMessage();
+const COLUMN_STORAGE_KEY = "voitech/companies/visible-columns";
 
 // --- Types ---
 interface CompanyContact {
@@ -61,6 +63,12 @@ interface CompanyRow {
   contacts_preview: CompanyContact[];
 }
 
+type ConfigurableColumn = DataTableColumns<CompanyRow>[number] & {
+  key: string;
+  title?: unknown;
+  width?: number;
+};
+
 type ContextRow = { id: string; created_at: string; rootContext: string | null; company_id: string | null };
 
 interface HypothesisOption {
@@ -80,6 +88,45 @@ const searchInput = ref("");
 const appliedSearch = ref("");
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const showAll = ref(false);
+
+const DEFAULT_VISIBLE_COLUMN_KEYS = [
+  "name",
+  "domain",
+  "tags",
+  "linkedin",
+  "hypotheses",
+  "contacts",
+  "context",
+  "created_at",
+] as const;
+
+const visibleColumnKeys = ref<string[]>(loadVisibleColumnKeys());
+
+function loadVisibleColumnKeys(): string[] {
+  if (typeof localStorage === "undefined") return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  try {
+    const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
+      ? parsed
+      : [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  } catch {
+    return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  }
+}
+
+watch(visibleColumnKeys, (keys) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(keys));
+});
+
+function showAllColumns() {
+  visibleColumnKeys.value = columnOptions.value.map((option) => String(option.value));
+}
+
+function resetColumns() {
+  visibleColumnKeys.value = [...DEFAULT_VISIBLE_COLUMN_KEYS];
+}
 
 // --- Context modal ---
 const ctxModalOpen = ref(false);
@@ -278,8 +325,7 @@ watch(showAll, () => {
 });
 
 // --- Columns ---
-const columns = computed<DataTableColumns<CompanyRow>>(() => [
-  { type: "selection", fixed: "left" },
+const dataColumns = computed<ConfigurableColumn[]>(() => [
   {
     key: "name",
     title: "Name",
@@ -430,6 +476,27 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   },
 ]);
 
+const columnOptions = computed<SelectOption[]>(() =>
+  dataColumns.value.map((column) => ({
+    label: typeof column.title === "string" && column.title ? column.title : String(column.key),
+    value: String(column.key),
+  }))
+);
+
+const visibleDataColumns = computed(() => {
+  const visibleKeys = new Set(visibleColumnKeys.value);
+  return dataColumns.value.filter((column) => visibleKeys.has(String(column.key)));
+});
+
+const columns = computed<DataTableColumns<CompanyRow>>(() => [
+  { type: "selection", fixed: "left" },
+  ...visibleDataColumns.value,
+]);
+
+const scrollX = computed(() =>
+  columns.value.reduce((total, column) => total + (Number((column as { width?: number }).width) || 160), 0)
+);
+
 // --- Selection helpers ---
 const selectedRows = computed(() =>
   data.value.filter((r) => checkedKeys.value.includes(r.id))
@@ -544,6 +611,26 @@ async function submitAddToHypothesis() {
             size="small"
             style="width: 220px"
           />
+          <NSelect
+            v-model:value="visibleColumnKeys"
+            :options="columnOptions"
+            multiple
+            filterable
+            clearable
+            max-tag-count="responsive"
+            placeholder="Columns"
+            size="small"
+            style="width: 220px"
+          />
+          <NTooltip>
+            <template #trigger>
+              <NButton size="small" quaternary circle @click="resetColumns">
+                <template #icon><RotateCcwIcon :size="14" /></template>
+              </NButton>
+            </template>
+            Reset columns
+          </NTooltip>
+          <NButton size="small" quaternary @click="showAllColumns">Show all</NButton>
         </div>
       </div>
 
@@ -582,7 +669,7 @@ async function submitAddToHypothesis() {
         :bordered="false"
         size="small"
         :max-height="600"
-        :scroll-x="760"
+        :scroll-x="scrollX"
         remote
         :row-key="(row: CompanyRow) => row.id"
         :pagination="{
@@ -697,6 +784,8 @@ async function submitAddToHypothesis() {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
   margin-bottom: 0.75rem;
 }
 
@@ -716,6 +805,8 @@ async function submitAddToHypothesis() {
 .toolbar-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.5rem;
 }
 
