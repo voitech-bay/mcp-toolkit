@@ -52,7 +52,10 @@ const router = useRouter();
 const message = useMessage();
 const projectStore = useProjectStore();
 
-const projectId = computed(() => projectStore.selectedProjectId);
+const FEASIBLE_PROJECT_ID = "94dc3b92-1cae-4360-a958-917a58063309";
+const projectId = computed(() =>
+  projectStore.selectedProjectId === FEASIBLE_PROJECT_ID ? FEASIBLE_PROJECT_ID : null
+);
 
 const workflows = ref<WorkflowOption[]>([]);
 const selectedWorkflow = ref<string | null>(null);
@@ -61,7 +64,6 @@ const lists = ref<{ uuid: string; name: string }[]>([]);
 const selectedList = ref<string | null>(null);
 
 const contacts = ref<ContactRow[]>([]);
-const checkedKeys = ref<string[]>([]);
 const contactsLoading = ref(false);
 const contactsError = ref("");
 
@@ -129,7 +131,6 @@ async function loadLists(): Promise<void> {
 
 async function loadContacts(): Promise<void> {
   contacts.value = [];
-  checkedKeys.value = [];
   contactsError.value = "";
   if (!projectId.value || !selectedList.value) return;
   contactsLoading.value = true;
@@ -154,7 +155,6 @@ async function loadContacts(): Promise<void> {
       } satisfies ContactRow;
     });
     contacts.value = rows.filter((c) => c.uuid);
-    checkedKeys.value = contacts.value.map((c) => c.uuid); // select all by default
   } catch (e) {
     contactsError.value = e instanceof Error ? e.message : "Failed to load contacts";
   } finally {
@@ -162,12 +162,6 @@ async function loadContacts(): Promise<void> {
   }
 }
 
-function selectAll(): void {
-  checkedKeys.value = contacts.value.map((c) => c.uuid);
-}
-function clearSelection(): void {
-  checkedKeys.value = [];
-}
 
 async function launch(): Promise<void> {
   if (!projectId.value) {
@@ -178,8 +172,13 @@ async function launch(): Promise<void> {
     message.warning("Select a workflow");
     return;
   }
-  if (checkedKeys.value.length === 0) {
-    message.warning("Select at least one contact");
+  if (!selectedList.value) {
+    message.warning("Select a GetSales list");
+    return;
+  }
+  const leadUuids = contacts.value.map((c) => c.uuid).filter(Boolean);
+  if (leadUuids.length === 0) {
+    message.warning("The selected list has no contacts to launch");
     return;
   }
   launching.value = true;
@@ -191,12 +190,12 @@ async function launch(): Promise<void> {
         projectId: projectId.value,
         workflowKey: selectedWorkflow.value,
         sourceListUuid: selectedList.value,
-        leadUuids: checkedKeys.value,
+        leadUuids,
       }),
     });
     const data = (await r.json()) as { launchId?: string; error?: string };
     if (!r.ok || !data.launchId) throw new Error(data.error ?? "Launch failed");
-    message.success(`Launched ${checkedKeys.value.length} contact(s)`);
+    message.success(`Launched Feasible workflow for ${leadUuids.length} contact(s)`);
     startPolling(data.launchId);
     void loadHistory();
   } catch (e) {
@@ -257,7 +256,6 @@ function viewResults(launchId: string): void {
 }
 
 const contactColumns = computed<DataTableColumns<ContactRow>>(() => [
-  { type: "selection" },
   { title: "Name", key: "name", minWidth: 160, ellipsis: { tooltip: true } },
   { title: "Position", key: "position", minWidth: 180, ellipsis: { tooltip: true } },
   { title: "Company", key: "company_name", minWidth: 160, ellipsis: { tooltip: true } },
@@ -323,6 +321,9 @@ const historyColumns = computed<DataTableColumns<LaunchRun>>(() => [
 
 onMounted(async () => {
   if (projectStore.projects.length === 0) await projectStore.loadProjects();
+  if (projectStore.selectedProjectId !== FEASIBLE_PROJECT_ID) {
+    projectStore.selectProject(FEASIBLE_PROJECT_ID);
+  }
   await Promise.all([loadWorkflows(), loadLists(), loadHistory()]);
 });
 onUnmounted(stopPolling);
@@ -334,12 +335,12 @@ onUnmounted(stopPolling);
       <template #header>
         <NSpace align="center" size="small">
           <RocketIcon :size="18" />
-          <span>Launch workflow</span>
+          <span>Feasible workflow launch</span>
         </NSpace>
       </template>
 
       <NAlert v-if="!projectId" type="warning">
-        Select a project in the top bar to choose a GetSales list and launch.
+        Select the Feasible project in the top bar to choose a GetSales list and launch.
       </NAlert>
 
       <NSpace v-else vertical size="medium" style="width: 100%">
@@ -361,10 +362,10 @@ onUnmounted(stopPolling);
           <NButton
             type="primary"
             :loading="launching"
-            :disabled="checkedKeys.length === 0 || !selectedWorkflow"
+            :disabled="contacts.length === 0 || !selectedWorkflow || contactsLoading"
             @click="launch"
           >
-            Launch {{ checkedKeys.length }} contact(s)
+            Launch Feasible list
           </NButton>
         </NSpace>
 
@@ -372,22 +373,19 @@ onUnmounted(stopPolling);
 
         <template v-if="selectedList">
           <NSpace align="center" size="small">
-            <NText depth="3">{{ contacts.length }} contacts • {{ checkedKeys.length }} selected</NText>
-            <NButton size="tiny" @click="selectAll">Select all</NButton>
-            <NButton size="tiny" quaternary @click="clearSelection">Clear</NButton>
+            <NText depth="3">{{ contacts.length }} contacts in this list</NText>
           </NSpace>
           <NDataTable
             :columns="contactColumns"
             :data="contacts"
             :loading="contactsLoading"
             :row-key="(row: ContactRow) => row.uuid"
-            v-model:checked-row-keys="checkedKeys"
             :max-height="420"
             size="small"
             striped
           />
         </template>
-        <NEmpty v-else description="Select a GetSales list to preview contacts" />
+        <NEmpty v-else description="Select a Feasible GetSales list to preview contacts" />
       </NSpace>
     </NCard>
 
