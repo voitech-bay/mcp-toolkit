@@ -1,11 +1,20 @@
 <script setup lang="ts">
-import { ref, computed, h, onMounted } from "vue";
+import { ref, computed, h, onMounted, watch } from "vue";
 import {
   NCard, NDataTable, NInput, NButton, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
   NDrawer, NDrawerContent,
 } from "naive-ui";
-import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon, MailIcon } from "lucide-vue-next";
+import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
+import {
+  UsersIcon,
+  LinkedinIcon,
+  MessageCircleIcon,
+  IdCardIcon,
+  TrashIcon,
+  RefreshCwIcon,
+  MailIcon,
+  RotateCcwIcon,
+} from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
 import { useProjectStore } from "../stores/project";
@@ -21,6 +30,7 @@ function openComposer(row: LeaderRecord) {
 }
 
 const TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
+const COLUMN_STORAGE_KEY = "voitech/mssp-leaders/visible-columns";
 
 interface LeaderRecord {
   uuid: string;
@@ -48,6 +58,12 @@ interface LeaderRecord {
   status: string;
 }
 
+type ConfigurableColumn = DataTableColumns<LeaderRecord>[number] & {
+  key: string;
+  title?: unknown;
+  width?: number;
+};
+
 const data = ref<LeaderRecord[]>([]);
 const loading = ref(false);
 const syncing = ref(false);
@@ -59,6 +75,52 @@ const connFilter = ref<string | null>(null);
 const typeFilter = ref<string | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const projectStore = useProjectStore();
+
+const DEFAULT_VISIBLE_COLUMN_KEYS = [
+  "linkedin",
+  "name",
+  "position",
+  "company_name",
+  "location",
+  "company_hq",
+  "employee_count",
+  "company_type",
+  "connection_status",
+  "connection_accepted_at",
+  "automations",
+  "outgoing_count",
+  "reply_count",
+  "email_count",
+  "status",
+] as const;
+
+const visibleColumnKeys = ref<string[]>(loadVisibleColumnKeys());
+
+function loadVisibleColumnKeys(): string[] {
+  if (typeof localStorage === "undefined") return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  try {
+    const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
+      ? parsed
+      : [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  } catch {
+    return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  }
+}
+
+watch(visibleColumnKeys, (keys) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(keys));
+});
+
+function showAllColumns() {
+  visibleColumnKeys.value = columnOptions.value.map((option) => String(option.value));
+}
+
+function resetColumns() {
+  visibleColumnKeys.value = [...DEFAULT_VISIBLE_COLUMN_KEYS];
+}
 
 async function fetchList() {
   loading.value = true;
@@ -196,8 +258,7 @@ function fmtDate(s: string | null): string {
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
 }
 
-const columns = computed<DataTableColumns<LeaderRecord>>(() => [
-  { type: "selection", width: 36, fixed: "left" },
+const dataColumns = computed<ConfigurableColumn[]>(() => [
   {
     title: "", key: "linkedin", width: 36,
     render: (row) =>
@@ -279,6 +340,27 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       }),
   },
 ]);
+
+const columnOptions = computed<SelectOption[]>(() =>
+  dataColumns.value.map((column) => ({
+    label: typeof column.title === "string" && column.title ? column.title : "LinkedIn",
+    value: String(column.key),
+  }))
+);
+
+const visibleDataColumns = computed(() => {
+  const visibleKeys = new Set(visibleColumnKeys.value);
+  return dataColumns.value.filter((column) => visibleKeys.has(String(column.key)));
+});
+
+const columns = computed<DataTableColumns<LeaderRecord>>(() => [
+  { type: "selection", width: 36, fixed: "left" },
+  ...visibleDataColumns.value,
+]);
+
+const scrollX = computed(() =>
+  columns.value.reduce((total, column) => total + (Number((column as { width?: number }).width) || 160), 0)
+);
 </script>
 
 <template>
@@ -296,6 +378,26 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
           <NSelect v-model:value="statusFilter" :options="statusOptions" placeholder="Status" clearable size="small" style="width: 150px" />
           <NSelect v-model:value="connFilter" :options="connOptions" placeholder="Connection" clearable size="small" style="width: 120px" />
           <NSelect v-model:value="typeFilter" :options="typeOptions" placeholder="Company type" clearable size="small" style="width: 140px" />
+          <NSelect
+            v-model:value="visibleColumnKeys"
+            :options="columnOptions"
+            multiple
+            filterable
+            clearable
+            max-tag-count="responsive"
+            placeholder="Columns"
+            size="small"
+            style="width: 220px"
+          />
+          <NTooltip>
+            <template #trigger>
+              <NButton size="small" quaternary circle @click="resetColumns">
+                <template #icon><RotateCcwIcon :size="14" /></template>
+              </NButton>
+            </template>
+            Reset columns
+          </NTooltip>
+          <NButton size="small" quaternary @click="showAllColumns">Show all</NButton>
           <NTooltip v-if="selectedUuids.length > 0">
             <template #trigger>
               <NPopconfirm @positive-click="removeFromList(selectedUuids)">
@@ -330,7 +432,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       v-else
       :columns="columns"
       :data="filtered"
-      :scroll-x="2000"
+      :scroll-x="scrollX"
       :row-key="(r: LeaderRecord) => r.uuid"
       v-model:checked-row-keys="checkedKeys"
       :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"
