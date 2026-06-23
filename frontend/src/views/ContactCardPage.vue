@@ -325,7 +325,7 @@ watch(contactUuid, load);
             </div>
           </NSpace>
           <NSpace>
-            <NButton size="small" :loading="runningResearch" @click="runResearch">Run research + InMail</NButton>
+            <NButton size="small" :loading="runningResearch" @click="runResearch">Run research</NButton>
             <NButton size="small" @click="router.push('/inmail-review')">InMail review</NButton>
           </NSpace>
         </NSpace>
@@ -414,7 +414,7 @@ watch(contactUuid, load);
         <template #header-extra>
           <NText depth="3" style="font-size: 0.8rem">{{ executions.length }} executions total</NText>
         </template>
-        <NText v-if="!latestResults.length" depth="3">no research yet — use Run research + InMail above</NText>
+        <NText v-if="!latestResults.length" depth="3">no research yet — use Run research above</NText>
         <NCollapse v-else>
           <NCollapseItem
             v-for="r in latestResults"

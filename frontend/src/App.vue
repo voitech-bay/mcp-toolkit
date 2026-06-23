@@ -59,13 +59,19 @@ const isAnalyticsGroupActive = computed(
 );
 
 /** Grouped routes — highlight parent when any child is active. */
-const DATA_PATHS = ["/tables", "/companies", "/contacts", "/mssp-leaders", "/conversations", "/getsales-tags"] as const;
-const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses", "/hypothesis-tag-contacts"] as const;
-const PIPELINE_PATHS = [
-  "/sync",
+const DATA_PATHS = ["/tables", "/companies", "/contacts", "/mssp-leaders", "/conversations"] as const;
+const BACKLOG_PATHS = [
+  "/context",
+  "/context-snapshots",
+  "/hypotheses",
+  "/hypothesis-tag-contacts",
   "/lists-checker",
   "/enrichment",
   "/enrichment/jobs",
+  "/getsales-tags",
+] as const;
+const PIPELINE_PATHS = [
+  "/sync",
   "/n8n/launch",
   "/n8n/lead-views",
   "/n8n/workflow-results",
@@ -78,7 +84,7 @@ function pathInGroup(path: string, group: readonly string[]): boolean {
 }
 
 const isDataGroupActive = computed(() => pathInGroup(route.path, DATA_PATHS));
-const isContextGroupActive = computed(() => pathInGroup(route.path, CONTEXT_PATHS));
+const isBacklogGroupActive = computed(() => pathInGroup(route.path, BACKLOG_PATHS));
 const isPipelineGroupActive = computed(() => pathInGroup(route.path, PIPELINE_PATHS));
 
 const dataMenuOptions: DropdownOption[] = [
@@ -107,14 +113,9 @@ const dataMenuOptions: DropdownOption[] = [
     key: "/conversations",
     icon: () => h(MessageCircleIcon, { size: 14 }),
   },
-  {
-    label: "GetSales tags",
-    key: "/getsales-tags",
-    icon: () => h(TagsIcon, { size: 14 }),
-  },
 ];
 
-const contextMenuOptions: DropdownOption[] = [
+const backlogMenuOptions: DropdownOption[] = [
   {
     label: "Context builder",
     key: "/context",
@@ -135,14 +136,6 @@ const contextMenuOptions: DropdownOption[] = [
     key: "/hypothesis-tag-contacts",
     icon: () => h(Link2Icon, { size: 14 }),
   },
-];
-
-const pipelineMenuOptions: DropdownOption[] = [
-  {
-    label: "Sync",
-    key: "/sync",
-    icon: () => h(RefreshCwIcon, { size: 14 }),
-  },
   {
     label: "Lists checker",
     key: "/lists-checker",
@@ -157,6 +150,19 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "Enrichment jobs",
     key: "/enrichment/jobs",
     icon: () => h(ClipboardListIcon, { size: 14 }),
+  },
+  {
+    label: "GetSales tags",
+    key: "/getsales-tags",
+    icon: () => h(TagsIcon, { size: 14 }),
+  },
+];
+
+const pipelineMenuOptions: DropdownOption[] = [
+  {
+    label: "Sync",
+    key: "/sync",
+    icon: () => h(RefreshCwIcon, { size: 14 }),
   },
   {
     label: "Launch workflow",
@@ -582,20 +588,20 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   </NButton>
                 </NDropdown>
 
-                <NDropdown trigger="hover" placement="bottom-start" :options="contextMenuOptions" :show-arrow="true"
-                  @select="onNavSelect">
-                  <NButton quaternary size="small" :type="isContextGroupActive ? 'primary' : undefined"
-                    class="nav-dropdown-trigger">
-                    Context
-                    <ChevronDownIcon :size="14" class="nav-chevron" />
-                  </NButton>
-                </NDropdown>
-
                 <NDropdown trigger="hover" placement="bottom-start" :options="pipelineMenuOptions" :show-arrow="true"
                   @select="onNavSelect">
                   <NButton quaternary size="small" :type="isPipelineGroupActive ? 'primary' : undefined"
                     class="nav-dropdown-trigger">
                     Pipeline
+                    <ChevronDownIcon :size="14" class="nav-chevron" />
+                  </NButton>
+                </NDropdown>
+
+                <NDropdown trigger="hover" placement="bottom-start" :options="backlogMenuOptions" :show-arrow="true"
+                  @select="onNavSelect">
+                  <NButton quaternary size="small" :type="isBacklogGroupActive ? 'primary' : undefined"
+                    class="nav-dropdown-trigger">
+                    Backlog
                     <ChevronDownIcon :size="14" class="nav-chevron" />
                   </NButton>
                 </NDropdown>
