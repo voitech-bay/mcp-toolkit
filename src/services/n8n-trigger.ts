@@ -3,17 +3,17 @@
  *
  * Generalizes the single-contact pattern in inmail-review-handlers.ts
  * (handleInmailRunNew → fetch(N8N_INMAIL_SINGLE_WEBHOOK_URL, ...)) to a small
- * registry of pipelines, each launched by POSTing an array of lead UUIDs to its
- * webhook. The n8n workflow fetches the contacts by UUID internally and echoes
- * `launch_id` onto every result row it pushes back to /api/n8n/workflow-results
- * so the backend can compute per-run aggregates.
+ * registry of pipelines launched from the app. The Feasible parent workflow is
+ * list-driven: it receives a GetSales list UUID and fetches contacts in n8n.
+ * The backend still stores the selected lead UUIDs so run history can compute
+ * aggregates from rows pushed back to /api/n8n/workflow-results.
  */
 
 const N8N_BASE = (process.env.N8N_BASE_URL?.trim() || "https://primary-production-36cb4.up.railway.app").replace(
   /\/+$/,
   ""
 );
-const SPRITES_PROJECT_ID = "33095db5-9793-4034-959d-7adadfd761fb";
+export const FEASIBLE_PROJECT_ID = "94dc3b92-1cae-4360-a958-917a58063309";
 
 export interface WorkflowRegistryEntry {
   /** Stable key used in API bodies and the launch record. */
@@ -28,31 +28,16 @@ export interface WorkflowRegistryEntry {
 }
 
 /**
- * Launchable pipelines. Each multi-UUID webhook accepts { lead_uuids, projectId, launch_id }
- * and fetches contacts by UUID inside n8n. Webhook URLs come from env (set once the
- * corresponding n8n workflow exists), mirroring N8N_INMAIL_SINGLE_WEBHOOK_URL.
+ * Launchable pipelines. The launch page is Feasible-only; webhook URL can be
+ * overridden by env, otherwise it uses the production Feasible list trigger.
  */
 export const WORKFLOW_REGISTRY: WorkflowRegistryEntry[] = [
   {
-    key: "research",
-    label: "Sprites — Research pipeline (Phase A/B)",
-    webhookUrlEnv: "N8N_RESEARCH_MULTI_WEBHOOK_URL",
-    workflowId: "O9cupRQBeLdZZkqd",
-    project: SPRITES_PROJECT_ID,
-  },
-  {
-    key: "inmail",
-    label: "Sprites — InMail pipeline",
-    webhookUrlEnv: "N8N_INMAIL_MULTI_WEBHOOK_URL",
-    workflowId: "n870pBNtzB2GV05u",
-    project: SPRITES_PROJECT_ID,
-  },
-  {
-    key: "followup",
-    label: "Sprites — Follow-up pipeline",
-    webhookUrlEnv: "N8N_FOLLOWUP_MULTI_WEBHOOK_URL",
-    workflowId: "huX4XEzUZKVkxMYx",
-    project: SPRITES_PROJECT_ID,
+    key: "feasible_direct_pov",
+    label: "Feasible — Direct POV pipeline",
+    webhookUrlEnv: "N8N_FEASIBLE_DIRECT_POV_WEBHOOK_URL",
+    workflowId: "PqAsnwNHiezGsMTw",
+    project: FEASIBLE_PROJECT_ID,
   },
 ];
 
@@ -64,7 +49,7 @@ export function findWorkflow(key: string): WorkflowRegistryEntry | null {
 export function listLaunchableWorkflows(): Array<WorkflowRegistryEntry & { configured: boolean }> {
   return WORKFLOW_REGISTRY.map((w) => ({
     ...w,
-    configured: Boolean(process.env[w.webhookUrlEnv]?.trim()),
+    configured: Boolean(resolveWebhookUrl(w)),
   }));
 }
 
@@ -80,24 +65,27 @@ export interface TriggerResult {
  */
 export async function triggerWorkflowByUuids(
   key: string,
-  args: { leadUuids: string[]; projectId: string; launchId: string }
+  args: { leadUuids: string[]; projectId: string; launchId: string; sourceListUuid?: string | null }
 ): Promise<TriggerResult> {
   const wf = findWorkflow(key);
   if (!wf) return { ok: false, status: 400, error: `Unknown workflow: ${key}` };
-  const webhook = process.env[wf.webhookUrlEnv]?.trim();
+  const webhook = resolveWebhookUrl(wf);
   if (!webhook) {
     return { ok: false, status: 500, error: `${wf.webhookUrlEnv} not configured` };
   }
   const leadUuids = [...new Set(args.leadUuids.map((u) => String(u).trim()).filter(Boolean))];
   if (leadUuids.length === 0) return { ok: false, status: 400, error: "No lead UUIDs provided" };
+  const listUuid = String(args.sourceListUuid ?? "").trim();
+  if (!listUuid) return { ok: false, status: 400, error: "sourceListUuid is required for Feasible launch" };
 
   try {
     const r = await fetch(webhook, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        list_uuid: listUuid,
+        project_id: args.projectId || wf.project,
         lead_uuids: leadUuids,
-        projectId: args.projectId || wf.project,
         launch_id: args.launchId,
       }),
     });
@@ -109,6 +97,13 @@ export async function triggerWorkflowByUuids(
   } catch (e) {
     return { ok: false, status: 502, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+function resolveWebhookUrl(wf: WorkflowRegistryEntry): string {
+  const configured = process.env[wf.webhookUrlEnv]?.trim();
+  if (configured) return configured;
+  if (wf.key === "feasible_direct_pov") return `${N8N_BASE}/webhook/feasible-pipeline-trigger`;
+  return "";
 }
 
 export interface N8nExecutionSummary {

@@ -15,6 +15,7 @@ import {
   N8N_WORKFLOW_RESULTS_TABLE,
 } from "./services/supabase.js";
 import {
+  FEASIBLE_PROJECT_ID,
   listLaunchableWorkflows,
   findWorkflow,
   triggerWorkflowByUuids,
@@ -76,8 +77,13 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
   const wf = findWorkflow(workflowKey);
   if (!wf) return sendJson(res, 400, { error: `Unknown workflowKey: ${workflowKey || "(missing)"}` });
 
-  const projectId = str(body, "projectId") || wf.project;
+  const requestedProjectId = str(body, "projectId") || wf.project;
+  if (requestedProjectId !== FEASIBLE_PROJECT_ID || wf.project !== FEASIBLE_PROJECT_ID) {
+    return sendJson(res, 403, { error: "The workflow launcher is restricted to Feasible" });
+  }
+  const projectId = FEASIBLE_PROJECT_ID;
   const sourceListUuid = str(body, "sourceListUuid") || null;
+  if (!sourceListUuid) return sendJson(res, 400, { error: "sourceListUuid is required" });
   const leadUuids = Array.isArray(body.leadUuids)
     ? [...new Set(body.leadUuids.map((u) => String(u).trim()).filter(Boolean))]
     : [];
@@ -109,7 +115,7 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
   }
   const launchId = String((inserted as Json).id);
 
-  const trig = await triggerWorkflowByUuids(workflowKey, { leadUuids, projectId, launchId });
+  const trig = await triggerWorkflowByUuids(workflowKey, { leadUuids, projectId, launchId, sourceListUuid });
   if (!trig.ok) {
     await client
       .from(LAUNCH_RUNS_TABLE)
