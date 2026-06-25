@@ -116,9 +116,9 @@ async function removeFromList(uuids: string[]) {
     if (typeof j.removed === "number" && j.removed === 0) {
       throw new Error("Nothing was removed — the server could not write to the database (check Supabase service-role key).");
     }
+    // The DB write is confirmed (removed > 0), so drop the rows locally and instantly.
+    data.value = data.value.filter((d) => !uuids.includes(d.uuid));
     checkedKeys.value = checkedKeys.value.filter((k) => !uuids.includes(String(k)));
-    // Reconcile with the server instead of optimistically trusting the call.
-    await fetchList();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Remove failed";
   } finally {
