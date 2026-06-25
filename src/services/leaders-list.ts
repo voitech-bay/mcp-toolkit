@@ -77,6 +77,8 @@ interface StatusInputs {
   replyStatus: string;
   replyCount: number;
   outgoingCount: number;
+  // Outbound LinkedIn *messages* only (excludes connection-request notes and emails).
+  linkedinMessageCount: number;
   emailCount: number | null;
   wasContacted: boolean;
 }
@@ -86,8 +88,8 @@ function isPlainRepliedStage(name: string): boolean {
 }
 
 function noReplyAfterManyMessages(input: StatusInputs): string | null {
-  const touchpoints = input.outgoingCount + (input.emailCount ?? 0);
-  if (touchpoints >= 3 && input.replyCount === 0 && input.replyStatus === "no_response") {
+  // LinkedIn messages only: emails and connection-request notes do not count.
+  if (input.linkedinMessageCount >= 3 && input.replyCount === 0 && input.replyStatus === "no_response") {
     return "No reply after 3+ messages";
   }
   return null;
@@ -336,8 +338,12 @@ export async function buildLeadersList(
     else if (gsConnectionLostAt) connection_status = "withdrawn";
     else if (sentConn || gsConnectionSentAt) connection_status = "sent";
 
-    const messageDates = leadMsgs
-      .filter((m) => (m.linkedin_type ?? "") === "message")
+    const linkedinMessages = leadMsgs.filter((m) => (m.linkedin_type ?? "") === "message");
+    // Outbound LinkedIn messages only (excludes inbound replies and connection notes).
+    const linkedinMessageCount = linkedinMessages.filter(
+      (m) => (m.type ?? "").toLowerCase() === "outbox"
+    ).length;
+    const messageDates = linkedinMessages
       .map((m) => m.sent_at ?? m.created_at ?? "")
       .filter(Boolean)
       .sort();
@@ -386,6 +392,7 @@ export async function buildLeadersList(
         replyStatus,
         replyCount: replies,
         outgoingCount: outgoing,
+        linkedinMessageCount,
         emailCount: email_count,
         wasContacted,
       }),
