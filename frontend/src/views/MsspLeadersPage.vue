@@ -2,10 +2,10 @@
 import { ref, computed, h, onMounted } from "vue";
 import {
   NCard, NDataTable, NInput, NButton, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
-  NDrawer, NDrawerContent,
+  NDrawer, NDrawerContent, NTabs, NTabPane,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon, MailIcon } from "lucide-vue-next";
+import { UsersIcon, Building2Icon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon, MailIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
 import { useProjectStore } from "../stores/project";
@@ -58,6 +58,7 @@ const statusFilter = ref<string | null>(null);
 const connFilter = ref<string | null>(null);
 const typeFilter = ref<string | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
+const view = ref<"contacts" | "companies">("contacts");
 const projectStore = useProjectStore();
 
 async function fetchList() {
@@ -196,6 +197,140 @@ function fmtDate(s: string | null): string {
   return isNaN(d.getTime()) ? "—" : d.toLocaleDateString();
 }
 
+// --- Company aggregation (groups the same list rows by company) ---------------
+interface CompanyRow {
+  company_id: string | null;
+  company_name: string;
+  company_hq: string | null;
+  employee_count: number | null;
+  company_type: string | null;
+  services: string[];
+  vendors: string[];
+  contact_count: number;
+  connected_count: number;
+  replied_count: number;
+  contacted_count: number;
+  outgoing_count: number;
+  reply_count: number;
+  email_count: number;
+}
+
+const companies = computed<CompanyRow[]>(() => {
+  const byCompany = new Map<string, CompanyRow>();
+  for (const d of data.value) {
+    const key = d.company_id ?? `name:${d.company_name ?? d.uuid}`;
+    let c = byCompany.get(key);
+    if (!c) {
+      c = {
+        company_id: d.company_id,
+        company_name: d.company_name ?? "—",
+        company_hq: d.company_hq,
+        employee_count: d.employee_count,
+        company_type: d.company_type,
+        services: [],
+        vendors: [],
+        contact_count: 0,
+        connected_count: 0,
+        replied_count: 0,
+        contacted_count: 0,
+        outgoing_count: 0,
+        reply_count: 0,
+        email_count: 0,
+      };
+      byCompany.set(key, c);
+    }
+    c.contact_count += 1;
+    if (d.connection_status === "accepted") c.connected_count += 1;
+    if (d.reply_count > 0) c.replied_count += 1;
+    if (d.outgoing_count > 0 || (d.email_count ?? 0) > 0) c.contacted_count += 1;
+    c.outgoing_count += d.outgoing_count;
+    c.reply_count += d.reply_count;
+    c.email_count += d.email_count ?? 0;
+    c.services = [...new Set([...c.services, ...(d.services ?? [])])];
+    c.vendors = [...new Set([...c.vendors, ...(d.vendors ?? [])])];
+    // Prefer non-null company facts as we accumulate.
+    if (c.company_hq == null && d.company_hq != null) c.company_hq = d.company_hq;
+    if (c.employee_count == null && d.employee_count != null) c.employee_count = d.employee_count;
+    if (c.company_type == null && d.company_type != null) c.company_type = d.company_type;
+  }
+  return [...byCompany.values()].sort((a, b) => a.company_name.localeCompare(b.company_name));
+});
+
+const filteredCompanies = computed(() => {
+  const q = search.value.trim().toLowerCase();
+  return companies.value.filter((c) => {
+    if (typeFilter.value && c.company_type !== typeFilter.value) return false;
+    if (q) {
+      const hay = `${c.company_name} ${c.company_hq ?? ""} ${c.services.join(" ")} ${c.vendors.join(" ")}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+});
+
+const companyColumns = computed<DataTableColumns<CompanyRow>>(() => [
+  {
+    title: "Company", key: "company_name", width: 200, fixed: "left", ellipsis: { tooltip: true },
+    sorter: (a, b) => a.company_name.localeCompare(b.company_name),
+    render: (row) =>
+      row.company_id
+        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: TAG_UUID } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name })
+        : row.company_name,
+  },
+  {
+    title: "Type", key: "company_type", width: 130, ellipsis: { tooltip: true },
+    render: (r) => (r.company_type ? h(NTag, { size: "small", bordered: false, type: "info" }, { default: () => r.company_type }) : "—"),
+  },
+  { title: "HQ", key: "company_hq", width: 140, ellipsis: { tooltip: true }, render: (r) => r.company_hq ?? "—" },
+  {
+    title: "Employees", key: "employee_count", width: 100,
+    sorter: (a, b) => (a.employee_count ?? 0) - (b.employee_count ?? 0),
+    render: (r) => r.employee_count != null ? r.employee_count.toLocaleString() : "—",
+  },
+  {
+    title: "Contacts", key: "contact_count", width: 90,
+    sorter: (a, b) => a.contact_count - b.contact_count,
+    render: (r) => r.contact_count,
+  },
+  {
+    title: "Connected", key: "connected_count", width: 100,
+    sorter: (a, b) => a.connected_count - b.connected_count,
+    render: (r) => `${r.connected_count} / ${r.contact_count}`,
+  },
+  {
+    title: "Contacted", key: "contacted_count", width: 100,
+    sorter: (a, b) => a.contacted_count - b.contacted_count,
+    render: (r) => `${r.contacted_count} / ${r.contact_count}`,
+  },
+  {
+    title: "Replied", key: "replied_count", width: 90,
+    sorter: (a, b) => a.replied_count - b.replied_count,
+    render: (r) => (r.replied_count > 0 ? h(NTag, { size: "small", bordered: false, type: "success" }, { default: () => `${r.replied_count}` }) : "0"),
+  },
+  {
+    title: "Services", key: "services", width: 200, ellipsis: { tooltip: true },
+    render: (r) => (r.services.length ? r.services.join(", ") : "—"),
+  },
+  {
+    title: "Vendors", key: "vendors", width: 200, ellipsis: { tooltip: true },
+    render: (r) => (r.vendors.length ? r.vendors.join(", ") : "—"),
+  },
+  { title: "Out", key: "outgoing_count", width: 56, sorter: (a, b) => a.outgoing_count - b.outgoing_count, render: (r) => r.outgoing_count },
+  { title: "Replies", key: "reply_count", width: 70, sorter: (a, b) => a.reply_count - b.reply_count, render: (r) => r.reply_count },
+  { title: "Emails", key: "email_count", width: 70, sorter: (a, b) => a.email_count - b.email_count, render: (r) => r.email_count },
+  {
+    title: "", key: "actions", width: 60, fixed: "right",
+    render: (row) =>
+      row.company_id
+        ? h(NTooltip, null, {
+            trigger: () => h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: TAG_UUID } } },
+              { default: () => h(NButton, { size: "tiny", type: "primary", secondary: true }, { icon: () => h(IdCardIcon, { size: 14 }) }) }),
+            default: () => "Open company card",
+          })
+        : "",
+  },
+]);
+
 const columns = computed<DataTableColumns<LeaderRecord>>(() => [
   { type: "selection", width: 36, fixed: "left" },
   {
@@ -286,17 +421,19 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     <template #header>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:8px">
-          <UsersIcon :size="16" />
+          <component :is="view === 'companies' ? Building2Icon : UsersIcon" :size="16" />
           <span>MSSP Leaders in MENA</span>
-          <NTag size="small" :bordered="false" type="info">{{ filtered.length }} / {{ data.length }}</NTag>
+          <NTag size="small" :bordered="false" type="info">
+            {{ view === 'companies' ? `${filteredCompanies.length} / ${companies.length}` : `${filtered.length} / ${data.length}` }}
+          </NTag>
           <span v-if="loading" style="opacity:.6;font-size:.82rem">Loading…</span>
         </div>
         <NSpace size="small" align="center" wrap>
-          <NInput v-model:value="search" placeholder="Search name, company, title…" clearable size="small" style="width: 220px" />
-          <NSelect v-model:value="statusFilter" :options="statusOptions" placeholder="Status" clearable size="small" style="width: 150px" />
-          <NSelect v-model:value="connFilter" :options="connOptions" placeholder="Connection" clearable size="small" style="width: 120px" />
+          <NInput v-model:value="search" :placeholder="view === 'companies' ? 'Search company, HQ, vendor…' : 'Search name, company, title…'" clearable size="small" style="width: 220px" />
+          <NSelect v-if="view === 'contacts'" v-model:value="statusFilter" :options="statusOptions" placeholder="Status" clearable size="small" style="width: 150px" />
+          <NSelect v-if="view === 'contacts'" v-model:value="connFilter" :options="connOptions" placeholder="Connection" clearable size="small" style="width: 120px" />
           <NSelect v-model:value="typeFilter" :options="typeOptions" placeholder="Company type" clearable size="small" style="width: 140px" />
-          <NTooltip v-if="selectedUuids.length > 0">
+          <NTooltip v-if="view === 'contacts' && selectedUuids.length > 0">
             <template #trigger>
               <NPopconfirm @positive-click="removeFromList(selectedUuids)">
                 <template #trigger>
@@ -324,15 +461,29 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       </div>
     </template>
 
+    <NTabs v-model:value="view" type="segment" size="small" style="margin-bottom:10px;max-width:320px">
+      <NTabPane name="contacts" tab="Contacts" />
+      <NTabPane name="companies" tab="Companies" />
+    </NTabs>
+
     <NAlert v-if="error" type="error" :show-icon="false" style="margin-bottom:8px">{{ error }}</NAlert>
     <NEmpty v-else-if="!loading && data.length === 0" description="No contacts tagged for this list." />
     <NDataTable
-      v-else
+      v-else-if="view === 'contacts'"
       :columns="columns"
       :data="filtered"
       :scroll-x="2000"
       :row-key="(r: LeaderRecord) => r.uuid"
       v-model:checked-row-keys="checkedKeys"
+      :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"
+      :loading="loading"
+    />
+    <NDataTable
+      v-else
+      :columns="companyColumns"
+      :data="filteredCompanies"
+      :scroll-x="1800"
+      :row-key="(r: CompanyRow) => r.company_id ?? r.company_name"
       :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"
       :loading="loading"
     />
