@@ -131,13 +131,20 @@ const targetExperience = computed<ExperienceEntry | null>(() => {
   return match ?? null;
 });
 
-/** Connection status derived from messages: any linkedin_type='message' = accepted. */
-const connectionStatus = computed<"accepted" | "sent" | "none">(() => {
+/** Connection status: DB gs_ fields take precedence, messages as fallback. */
+const connectionStatus = computed<"accepted" | "sent" | "withdrawn" | "none">(() => {
+  const c = contact.value;
   const allMsgs = threads.value.flatMap((t) => t.messages);
-  const hasMsg = allMsgs.some((m) => (m.linkedin_type ?? "") === "message");
-  if (hasMsg) return "accepted";
-  const hasSentConn = allMsgs.some((m) => (m.linkedin_type ?? "") === "connection_note");
-  return hasSentConn ? "sent" : "none";
+  if (
+    (typeof c.gs_connection_accepted_at === "string" && c.gs_connection_accepted_at) ||
+    allMsgs.some((m) => (m.linkedin_type ?? "").toLowerCase() === "message")
+  ) return "accepted";
+  if (typeof c.gs_connection_lost_at === "string" && c.gs_connection_lost_at) return "withdrawn";
+  if (
+    (typeof c.gs_connection_sent_at === "string" && c.gs_connection_sent_at) ||
+    allMsgs.some((m) => (m.linkedin_type ?? "").toLowerCase() === "connection_note")
+  ) return "sent";
+  return "none";
 });
 
 /** Aggregate reply status across all threads. */
@@ -172,9 +179,10 @@ function replyStatusType(s: string): "default" | "success" | "warning" {
   return "default";
 }
 
-function connTagType(s: string): "error" | "success" | "warning" {
+function connTagType(s: string): "error" | "success" | "warning" | "default" {
   if (s === "accepted") return "success";
   if (s === "sent") return "warning";
+  if (s === "withdrawn") return "default";
   return "error";
 }
 
@@ -332,7 +340,7 @@ watch(contactUuid, load);
         <NDivider style="margin: 12px 0" />
         <!-- Status badges row -->
         <NSpace size="small" wrap>
-          <NTag size="small" bordered :type="connTagType(connectionStatus)">{{ connectionStatus === 'accepted' ? 'Connected' : connectionStatus === 'sent' ? 'Connection Sent' : 'Not Connected' }}</NTag>
+          <NTag size="small" bordered :type="connTagType(connectionStatus)">{{ connectionStatus === 'accepted' ? 'Connected' : connectionStatus === 'sent' ? 'Connection Sent' : connectionStatus === 'withdrawn' ? 'Withdrawn' : 'Not Connected' }}</NTag>
           <NTag size="small" :type="replyStatusType(overallReplyStatus)">{{ overallReplyStatus.replace(/_/g, ' ') }}</NTag>
           <NPopover
             v-if="companyReplyContacts.length"

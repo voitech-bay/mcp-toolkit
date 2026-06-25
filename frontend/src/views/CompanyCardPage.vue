@@ -508,6 +508,11 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
         </NSpace>
       </NCard>
 
+      <!-- Research Summary -->
+      <NCard v-if="company.research_company_one_liner" title="Research Summary" size="small">
+        <NText style="font-size: 0.9rem">{{ String(company.research_company_one_liner) }}</NText>
+      </NCard>
+
       <!-- Account summary -->
       <NCard title="Account summary" size="small">
         <template #header-extra>
