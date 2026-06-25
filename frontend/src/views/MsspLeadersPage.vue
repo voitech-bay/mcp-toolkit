@@ -113,9 +113,12 @@ async function removeFromList(uuids: string[]) {
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Remove failed");
-    // Optimistically remove from local data, then refresh
-    data.value = data.value.filter((d) => !uuids.includes(d.uuid));
+    if (typeof j.removed === "number" && j.removed === 0) {
+      throw new Error("Nothing was removed — the server could not write to the database (check Supabase service-role key).");
+    }
     checkedKeys.value = checkedKeys.value.filter((k) => !uuids.includes(String(k)));
+    // Reconcile with the server instead of optimistically trusting the call.
+    await fetchList();
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Remove failed";
   } finally {
