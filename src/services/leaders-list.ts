@@ -13,6 +13,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   CONTACTS_TABLE,
   COMPANIES_TABLE,
+  N8N_WORKFLOW_RESULTS_TABLE,
   LINKEDIN_MESSAGES_TABLE,
   FLOWS_TABLE,
   FLOW_LEADS_TABLE,
@@ -159,6 +160,21 @@ function arrField(result: Json | undefined, ...keys: string[]): string[] {
   return [];
 }
 
+function hasPovMarkdown(result: Json | undefined): boolean {
+  return Boolean(str(result?.pov_markdown));
+}
+
+function putPreferredPov(map: Map<string, Json>, companyId: unknown, result: unknown): void {
+  const cid = str(companyId);
+  if (!cid || !result || typeof result !== "object" || Array.isArray(result)) return;
+
+  const current = map.get(cid);
+  const next = result as Json;
+  if (!current || (!hasPovMarkdown(current) && hasPovMarkdown(next))) {
+    map.set(cid, next);
+  }
+}
+
 /** Parse location stored as JSON string {"city":"X","country":"Y",...} or plain text. */
 function parseCityCountry(loc: unknown): string | null {
   if (!loc) return null;
@@ -235,7 +251,7 @@ export async function buildLeadersList(
     ...new Set(rows.map((r) => str(r.pipeline_stage_uuid)).filter((x): x is string => Boolean(x))),
   ];
 
-  const [stagesRes, companiesRes, povRes, flowLeadsRes, msgsRes] = await Promise.all([
+  const [stagesRes, companiesRes, povRes, directPovRes, flowLeadsRes, msgsRes] = await Promise.all([
     stageUuids.length
       ? client.from(PIPELINE_STAGES_TABLE).select("uuid, name, category").in("uuid", stageUuids)
       : Promise.resolve({ data: [], error: null }),
@@ -248,6 +264,14 @@ export async function buildLeadersList(
           .select("company_id, result")
           .eq("workflow_name", PHASE_B_WORKFLOW)
           .in("company_id", companyIds)
+      : Promise.resolve({ data: [], error: null }),
+    companyIds.length
+      ? client
+          .from(N8N_WORKFLOW_RESULTS_TABLE)
+          .select("company_id, result, created_at")
+          .in("company_id", companyIds)
+          .order("created_at", { ascending: false })
+          .limit(1000)
       : Promise.resolve({ data: [], error: null }),
     leadUuids.length
       ? client.from(FLOW_LEADS_TABLE).select("lead_uuid, flow_uuid").in("lead_uuid", leadUuids)
@@ -285,9 +309,11 @@ export async function buildLeadersList(
   }
 
   const povByCompany = new Map<string, Json>();
+  for (const p of ((directPovRes as { data: Json[] }).data ?? []) as Json[]) {
+    putPreferredPov(povByCompany, p.company_id, p.result);
+  }
   for (const p of ((povRes as { data: Json[] }).data ?? []) as Json[]) {
-    const cid = String(p.company_id);
-    if (!povByCompany.has(cid)) povByCompany.set(cid, (p.result as Json) ?? {});
+    putPreferredPov(povByCompany, p.company_id, p.result);
   }
 
   // Flows → names
