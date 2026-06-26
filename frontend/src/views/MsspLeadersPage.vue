@@ -52,6 +52,7 @@ interface LeaderRecord {
   outgoing_count: number;
   reply_count: number;
   email_count: number | null;
+  last_outbound_at: string | null;
   status: string;
 }
 
@@ -64,6 +65,7 @@ const search = ref("");
 const statusFilter = ref<string | null>(null);
 const connFilter = ref<string | null>(null);
 const typeFilter = ref<string | null>(null);
+const lastOutboundDaysFilter = ref<number | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const view = ref<"contacts" | "companies">("contacts");
 const projectStore = useProjectStore();
@@ -141,6 +143,7 @@ function selectRegion(r: Region) {
   statusFilter.value = null;
   connFilter.value = null;
   typeFilter.value = null;
+  lastOutboundDaysFilter.value = null;
   checkedKeys.value = [];
   fetchList();
 }
@@ -185,6 +188,17 @@ const connOptions = [
   { label: "Withdrawn", value: "withdrawn" },
   { label: "None", value: "none" },
 ];
+const lastOutboundDaysOptions = [1, 2, 7, 10].map((days) => ({
+  label: `Last sent > ${days}d`,
+  value: days,
+}));
+
+function daysSince(dateString: string | null): number | null {
+  if (!dateString) return null;
+  const time = new Date(dateString).getTime();
+  if (!Number.isFinite(time)) return null;
+  return (Date.now() - time) / 86_400_000;
+}
 
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase();
@@ -192,6 +206,10 @@ const filtered = computed(() => {
     if (statusFilter.value && d.status !== statusFilter.value) return false;
     if (connFilter.value && d.connection_status !== connFilter.value) return false;
     if (typeFilter.value && d.company_type !== typeFilter.value) return false;
+    if (lastOutboundDaysFilter.value != null) {
+      const ageDays = daysSince(d.last_outbound_at);
+      if (ageDays == null || ageDays <= lastOutboundDaysFilter.value) return false;
+    }
     if (q) {
       const hay = `${d.name} ${d.company_name ?? ""} ${d.position ?? ""} ${d.location ?? ""}`.toLowerCase();
       if (!hay.includes(q)) return false;
@@ -399,6 +417,13 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     render: (r) => (r.automations.length ? r.automations.join(", ") : "—"),
   },
   { title: "Out", key: "outgoing_count", width: 56, sorter: (a, b) => a.outgoing_count - b.outgoing_count, render: (r) => r.outgoing_count },
+  {
+    title: "Last sent",
+    key: "last_outbound_at",
+    width: 96,
+    sorter: (a, b) => (new Date(a.last_outbound_at ?? 0).getTime()) - (new Date(b.last_outbound_at ?? 0).getTime()),
+    render: (r) => fmtDate(r.last_outbound_at),
+  },
   { title: "Replies", key: "reply_count", width: 68, sorter: (a, b) => a.reply_count - b.reply_count, render: (r) => r.reply_count },
   { title: "Emails", key: "email_count", width: 64, sorter: (a, b) => (a.email_count ?? -1) - (b.email_count ?? -1), render: (r) => r.email_count ?? "—" },
   {
@@ -474,6 +499,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
           <NInput v-model:value="search" :placeholder="view === 'companies' ? 'Search company, HQ, vendor…' : 'Search name, company, title…'" clearable size="small" style="width: 220px" />
           <NSelect v-if="view === 'contacts'" v-model:value="statusFilter" :options="statusOptions" placeholder="Status" clearable size="small" style="width: 150px" />
           <NSelect v-if="view === 'contacts'" v-model:value="connFilter" :options="connOptions" placeholder="Connection" clearable size="small" style="width: 120px" />
+          <NSelect v-if="view === 'contacts'" v-model:value="lastOutboundDaysFilter" :options="lastOutboundDaysOptions" placeholder="Last sent" clearable size="small" style="width: 132px" />
           <NSelect v-model:value="typeFilter" :options="typeOptions" placeholder="Company type" clearable size="small" style="width: 140px" />
           <NTooltip v-if="view === 'contacts' && selectedUuids.length > 0">
             <template #trigger>

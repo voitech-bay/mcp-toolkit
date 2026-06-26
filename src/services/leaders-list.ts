@@ -60,6 +60,7 @@ export interface LeaderListRecord {
   outgoing_count: number;
   reply_count: number;
   email_count: number | null;
+  last_outbound_at: string | null;
   status: string;
 }
 
@@ -93,6 +94,18 @@ function noReplyAfterManyMessages(input: StatusInputs): string | null {
     return "No reply after 3+ messages";
   }
   return null;
+}
+
+function newestIsoTimestamp(values: Array<string | null | undefined>): string | null {
+  const timestamps = values
+    .map((v) => {
+      if (!v) return null;
+      const t = new Date(v).getTime();
+      return Number.isFinite(t) ? { raw: v, t } : null;
+    })
+    .filter((v): v is { raw: string; t: number } => Boolean(v))
+    .sort((a, b) => b.t - a.t);
+  return timestamps[0]?.raw ?? null;
 }
 
 /** Map pipeline stage + outreach activity to the rep-facing status label. */
@@ -339,6 +352,15 @@ export async function buildLeadersList(
     else if (sentConn || gsConnectionSentAt) connection_status = "sent";
 
     const linkedinMessages = leadMsgs.filter((m) => (m.linkedin_type ?? "") === "message");
+    const last_outbound_at = newestIsoTimestamp(
+      leadMsgs
+        .filter((m) => {
+          if ((m.type ?? "").toLowerCase() !== "outbox") return false;
+          const linkedinType = (m.linkedin_type ?? "").toLowerCase();
+          return linkedinType === "" || linkedinType === "message";
+        })
+        .map((m) => m.sent_at ?? m.created_at)
+    );
     // Outbound LinkedIn messages only (excludes inbound replies and connection notes).
     const linkedinMessageCount = linkedinMessages.filter(
       (m) => (m.type ?? "").toLowerCase() === "outbox"
@@ -386,6 +408,7 @@ export async function buildLeadersList(
       outgoing_count: outgoing,
       reply_count: replies,
       email_count,
+      last_outbound_at,
       status: deriveStatus({
         stageName: stage?.name ?? null,
         stageCategory: stage?.category ?? null,
