@@ -31,7 +31,7 @@ const INMAIL_REVIEW_STATE_TABLE = "inmail_review_state";
 const CONTACT_CARD_FIELDS =
   "uuid, project_id, name, first_name, last_name, position, headline, about, avatar_url, linkedin, linkedin_url, work_email, status, email_status, tags, company_uuid, company_id, company_name, experience, lead_category, priority, gs_connection_sent_at, gs_connection_accepted_at, gs_connection_lost_at, created_at, updated_at";
 const COMPANY_CARD_FIELDS =
-  "id, name, domain, website, linkedin, industry, about, employees_range, employees_on_linkedin, hq_location, hq_raw_address, status, tags, qualification_status, qualification_decided_at, research_company_one_liner, created_at, updated_at";
+  "id, name, domain, website, linkedin, industry, about, employees_range, employees_on_linkedin, hq_location, hq_raw_address, status, tags, qualification_status, qualification_decided_at, created_at, updated_at";
 const MESSAGE_FIELDS =
   "uuid, lead_uuid, linkedin_conversation_uuid, sender_profile_uuid, text, subject, type, status, sent_at, created_at, linkedin_type";
 
@@ -317,6 +317,26 @@ async function fetchLatestResults(
   return { data: (data ?? []) as Json[], error: null };
 }
 
+function stringField(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function companyOneLinerFromLatestResults(rows: Json[]): string | null {
+  for (const row of rows) {
+    const result = row.result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) continue;
+    const r = result as Json;
+    const direct = stringField(r.research_company_one_liner);
+    if (direct) return direct;
+    const summary = r.research_summary;
+    if (summary && typeof summary === "object" && !Array.isArray(summary)) {
+      const nested = stringField((summary as Json).company_one_liner);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
 export async function buildContactCard(
   client: SupabaseClient,
   contactUuid: string,
@@ -465,10 +485,14 @@ export async function buildCompanyCard(
     else if (!parsed) plainContextEntries.push(row);
   }
   const totalMessages = ((msgsRes.data ?? []) as MessageRow[]).length;
+  const companyWithResearch = {
+    ...(company as Json),
+    research_company_one_liner: companyOneLinerFromLatestResults(latestRes.data),
+  };
 
   return {
     data: {
-      company: company as Json,
+      company: companyWithResearch,
       latest_results: latestRes.data,
       contacts: rosterWithActivity,
       conversations: threads,
