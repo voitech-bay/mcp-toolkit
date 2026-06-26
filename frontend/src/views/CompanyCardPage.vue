@@ -319,6 +319,26 @@ function openRaw(title: string, obj: unknown) {
   rawDrawerOpen.value = true;
 }
 
+function openContact(uuid: string) {
+  if (!uuid) return;
+  void router.push(`/contact/${uuid}`);
+}
+
+function shouldIgnoreRowClick(event: MouseEvent): boolean {
+  const target = event.target;
+  return target instanceof Element && Boolean(target.closest("a, button, input, textarea, select, [role='button']"));
+}
+
+function contactRowProps(row: { uuid: string }) {
+  return {
+    class: "clickable-contact-row",
+    onClick: (event: MouseEvent) => {
+      if (shouldIgnoreRowClick(event)) return;
+      openContact(row.uuid);
+    },
+  };
+}
+
 const rosterColumns = computed<DataTableColumns<RosterRow>>(() => [
   {
     title: "Contact",
@@ -369,7 +389,7 @@ const listColumns = computed<DataTableColumns<ListRecord>>(() => [
   },
   {
     title: "LinkedIn", key: "linkedin_url", width: 90,
-    render: (row) => row.linkedin_url ? h("a", { href: row.linkedin_url, target: "_blank", rel: "noopener noreferrer", class: "card-link" }, "Open ↗") : "—",
+    render: (row) => row.linkedin_url ? h("a", { href: row.linkedin_url, target: "_blank", rel: "noopener noreferrer", class: "card-link", onClick: (event: MouseEvent) => event.stopPropagation() }, "Open ↗") : "—",
   },
   { title: "Title", key: "position", minWidth: 180, ellipsis: { tooltip: true }, render: (r) => r.position ?? "—" },
   { title: "Location", key: "location", minWidth: 130, render: (r) => r.location ?? "—" },
@@ -501,6 +521,7 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
           <NDataTable
             :columns="listColumns"
             :data="listRecords"
+            :row-props="contactRowProps"
             size="small"
             striped
             :scroll-x="1900"
@@ -594,6 +615,7 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
           <NDataTable
             :columns="rosterColumns"
             :data="filteredRoster"
+            :row-props="contactRowProps"
             size="small"
             :max-height="420"
             :scroll-x="1450"
@@ -689,6 +711,12 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
 }
 .card-link:hover {
   text-decoration: underline;
+}
+:deep(.clickable-contact-row) {
+  cursor: pointer;
+}
+:deep(.clickable-contact-row:hover td) {
+  background: rgba(32, 128, 240, 0.06);
 }
 .contact-filters {
   display: grid;
