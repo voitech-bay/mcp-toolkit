@@ -22,6 +22,11 @@ import {
 
 const CONTACTS_TABLE = "Contacts";
 export const MSSP_LEADERS_TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
+export const MSSP_LEADERS_LATAM_TAG_UUID = "2cd32c55-47a2-4e3e-b69c-1d01a8b70e1b";
+export const MSSP_LEADERS_TAG_UUIDS = [
+  MSSP_LEADERS_TAG_UUID,
+  MSSP_LEADERS_LATAM_TAG_UUID,
+] as const;
 
 function pickAggregate(markers: LeadMarkerRow[]): LeadMarkerRow | null {
   return markers.find((m) => m.sender_profile_uuid === null) ?? markers[0] ?? null;

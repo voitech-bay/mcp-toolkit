@@ -72,7 +72,7 @@ import {
   type DateRangeFilter,
 } from "./source-api.js";
 import { syncEventBus } from "./sync-event-bus.js";
-import { MSSP_LEADERS_TAG_UUID, syncMarkersForContacts } from "./getsales-markers.js";
+import { MSSP_LEADERS_TAG_UUIDS, syncMarkersForContacts } from "./getsales-markers.js";
 import {
   SyncCancelledError,
   clearSyncCancellation,
@@ -1242,19 +1242,22 @@ export async function syncSupabaseFromSource(
 
   // Lead search rows do not contain the aggregate marker object. Refresh markers
   // for contacts touched by this run and every current member of the Supabase-
-  // managed MSSP list, using the same decrypted project secret.
+  // managed MSSP regional lists, using the same decrypted project secret.
   if (!contactsRes.error && credentials) {
-    const { data: taggedContacts, error: taggedContactsError } = await client
-      .from(CONTACTS_TABLE)
-      .select("uuid")
-      .contains("tags", JSON.stringify([MSSP_LEADERS_TAG_UUID]));
-    if (taggedContactsError) {
-      await logger.logError("contacts: failed to resolve MSSP marker refresh membership", {
-        error: taggedContactsError.message,
-      });
-    } else {
-      for (const row of (taggedContacts ?? []) as Array<{ uuid: string | null }>) {
-        if (row.uuid) contactUuidsForMarkers.add(row.uuid);
+    for (const tagUuid of MSSP_LEADERS_TAG_UUIDS) {
+      const { data: taggedContacts, error: taggedContactsError } = await client
+        .from(CONTACTS_TABLE)
+        .select("uuid")
+        .contains("tags", JSON.stringify([tagUuid]));
+      if (taggedContactsError) {
+        await logger.logError("contacts: failed to resolve MSSP marker refresh membership", {
+          tagUuid,
+          error: taggedContactsError.message,
+        });
+      } else {
+        for (const row of (taggedContacts ?? []) as Array<{ uuid: string | null }>) {
+          if (row.uuid) contactUuidsForMarkers.add(row.uuid);
+        }
       }
     }
     if (contactUuidsForMarkers.size > 0) {

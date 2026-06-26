@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, h, onMounted } from "vue";
 import {
-  NCard, NDataTable, NInput, NButton, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
+  NCard, NDataTable, NInput, NButton, NButtonGroup, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
   NDrawer, NDrawerContent, NTabs, NTabPane,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
@@ -20,7 +20,14 @@ function openComposer(row: LeaderRecord) {
   };
 }
 
-const TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
+// Region-switchable, tag-backed lists. Each region maps to its GetSalesTags uuid.
+const TAG_BY_REGION = {
+  MENA: "b108ac8f-5049-466d-bc48-982c5a7e2201",
+  LATAM: "2cd32c55-47a2-4e3e-b69c-1d01a8b70e1b",
+} as const;
+type Region = keyof typeof TAG_BY_REGION;
+const region = ref<Region>("MENA");
+const tagUuid = computed(() => TAG_BY_REGION[region.value]);
 
 interface LeaderRecord {
   uuid: string;
@@ -65,7 +72,7 @@ async function fetchList() {
   loading.value = true;
   error.value = "";
   try {
-    const r = await fetch(`/api/lists/tagged?tag=${TAG_UUID}`);
+    const r = await fetch(`/api/lists/tagged?tag=${tagUuid.value}`);
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Failed to load list");
     data.value = (j.data ?? []) as LeaderRecord[];
@@ -89,7 +96,7 @@ async function syncEmails() {
     const r = await fetch("/api/contacts/sync-markers", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag: TAG_UUID, projectId: projectStore.selectedProjectId }),
+      body: JSON.stringify({ tag: tagUuid.value, projectId: projectStore.selectedProjectId }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Sync failed");
@@ -109,7 +116,7 @@ async function removeFromList(uuids: string[]) {
     const r = await fetch("/api/lists/tagged/remove", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tag: TAG_UUID, uuids }),
+      body: JSON.stringify({ tag: tagUuid.value, uuids }),
     });
     const j = await r.json();
     if (!r.ok) throw new Error(j.error ?? "Remove failed");
@@ -124,6 +131,18 @@ async function removeFromList(uuids: string[]) {
   } finally {
     removing.value = false;
   }
+}
+
+function selectRegion(r: Region) {
+  if (region.value === r) return;
+  region.value = r;
+  // Region change is a different dataset — clear filters/selection, then reload.
+  search.value = "";
+  statusFilter.value = null;
+  connFilter.value = null;
+  typeFilter.value = null;
+  checkedKeys.value = [];
+  fetchList();
 }
 
 onMounted(fetchList);
@@ -277,7 +296,7 @@ const companyColumns = computed<DataTableColumns<CompanyRow>>(() => [
     sorter: (a, b) => a.company_name.localeCompare(b.company_name),
     render: (row) =>
       row.company_id
-        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: TAG_UUID } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name })
+        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: tagUuid.value } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name })
         : row.company_name,
   },
   {
@@ -326,7 +345,7 @@ const companyColumns = computed<DataTableColumns<CompanyRow>>(() => [
     render: (row) =>
       row.company_id
         ? h(NTooltip, null, {
-            trigger: () => h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: TAG_UUID } } },
+            trigger: () => h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: tagUuid.value } } },
               { default: () => h(NButton, { size: "tiny", type: "primary", secondary: true }, { icon: () => h(IdCardIcon, { size: 14 }) }) }),
             default: () => "Open company card",
           })
@@ -355,7 +374,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     sorter: (a, b) => (a.company_name ?? "").localeCompare(b.company_name ?? ""),
     render: (row) =>
       row.company_id
-        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: TAG_UUID } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name ?? "—" })
+        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: tagUuid.value } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name ?? "—" })
         : (row.company_name ?? "—"),
   },
   { title: "Location", key: "location", width: 130, ellipsis: { tooltip: true }, render: (r) => r.location ?? "—" },
@@ -422,10 +441,30 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
 <template>
   <NCard>
     <template #header>
+      <div style="display:flex;justify-content:center;margin-bottom:14px">
+        <NButtonGroup>
+          <NButton
+            size="large"
+            :type="region === 'MENA' ? 'primary' : 'default'"
+            :secondary="region !== 'MENA'"
+            :disabled="loading"
+            style="min-width:120px;font-weight:600;letter-spacing:0"
+            @click="selectRegion('MENA')"
+          >MENA</NButton>
+          <NButton
+            size="large"
+            :type="region === 'LATAM' ? 'primary' : 'default'"
+            :secondary="region !== 'LATAM'"
+            :disabled="loading"
+            style="min-width:120px;font-weight:600;letter-spacing:0"
+            @click="selectRegion('LATAM')"
+          >LATAM</NButton>
+        </NButtonGroup>
+      </div>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
         <div style="display:flex;align-items:center;gap:8px">
           <component :is="view === 'companies' ? Building2Icon : UsersIcon" :size="16" />
-          <span>MSSP Leaders in MENA</span>
+          <span>MSSP Leaders in {{ region }}</span>
           <NTag size="small" :bordered="false" type="info">
             {{ view === 'companies' ? `${filteredCompanies.length} / ${companies.length}` : `${filtered.length} / ${data.length}` }}
           </NTag>
@@ -448,7 +487,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
                 Remove {{ selectedUuids.length }} contacts from this list?
               </NPopconfirm>
             </template>
-            Remove selected contacts from "MSSP Leaders in MENA" tag
+            Remove selected contacts from "MSSP Leaders in {{ region }}" tag
           </NTooltip>
           <NTooltip>
             <template #trigger>
