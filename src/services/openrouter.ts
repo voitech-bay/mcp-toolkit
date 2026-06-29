@@ -138,6 +138,7 @@ export async function generateOpenRouterMessage(
     systemPrompt: string;
     userPrompt: string;
     temperature?: number;
+    maxTokens?: number;
     user?: string;
     sessionId?: string;
     trace?: Record<string, unknown>;
@@ -158,6 +159,10 @@ export async function generateOpenRouterMessage(
     },
     body: JSON.stringify({
       model,
+      // Cap the output budget. Without max_tokens, OpenRouter reserves credit for
+      // the model's full completion window (e.g. 65536 tokens on Opus), which
+      // trips a 402 pre-flight "insufficient credits" check on a modest balance.
+      max_tokens: params.maxTokens ?? 4_096,
       temperature: params.temperature ?? 0.7,
       ...(cacheControl ? { cache_control: cacheControl } : {}),
       ...(params.user ? { user: params.user } : {}),
@@ -232,6 +237,7 @@ export async function pipeOpenRouterChatStreamToSse(
     systemPrompt: string;
     userPrompt: string;
     temperature?: number;
+    maxTokens?: number;
     user?: string;
     sessionId?: string;
     trace?: Record<string, unknown>;
@@ -256,6 +262,9 @@ export async function pipeOpenRouterChatStreamToSse(
     },
     body: JSON.stringify({
       model,
+      // See max_tokens note in generateOpenRouterMessage: caps OpenRouter's
+      // credit pre-reservation so a modest balance doesn't 402 on Opus.
+      max_tokens: params.maxTokens ?? 4_096,
       temperature: params.temperature ?? 0.7,
       stream: true,
       ...(cacheControl ? { cache_control: cacheControl } : {}),
