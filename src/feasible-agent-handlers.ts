@@ -5,7 +5,7 @@
  * - POST /api/feasible/generate: builds Feasible-grounded context (product + angle +
  *   revenue + contact research + conversation + colleague key points) and returns N
  *   variants. Sender persona auto-matched per lead so the signature is truthful.
- *   Tier 'cheap' = gemma, 'premium' = Opus 4.6. Read-only.
+ *   Tier 'cheap' = deepseek-v4-flash (openmodel.ai), 'premium' = Opus 4.6. Read-only.
  * - POST /api/feasible/send: sends a chosen/edited variant to the prospect in GetSales
  *   (Feasible project) via the linkedin-messages API. Gated: explicit text + lead +
  *   Feasible sender; never auto-invoked. Surfaces GetSales errors verbatim.
