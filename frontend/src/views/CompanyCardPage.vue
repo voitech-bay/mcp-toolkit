@@ -120,6 +120,7 @@ const card = ref<Json | null>(null);
 const noteDraft = ref("");
 const savingNote = ref(false);
 const summarizing = ref(false);
+const runningResearch = ref(false);
 const rawDrawerOpen = ref(false);
 const rawDrawerTitle = ref("");
 const rawDrawerJson = ref("");
@@ -465,6 +466,24 @@ async function addNote() {
   }
 }
 
+async function runN8nResearch() {
+  runningResearch.value = true;
+  try {
+    const r = await fetch("/api/feasible/run-phase-b-company", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ companyId: companyId.value, companyTypeTag: "services_mssp" }),
+    });
+    const data = (await r.json()) as { error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Run failed");
+    message.success("Phase B research started. Refresh in a few minutes to see POV on this card and MSSP Leaders.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Run failed");
+  } finally {
+    runningResearch.value = false;
+  }
+}
+
 onMounted(load);
 watch(companyId, load);
 watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
@@ -626,7 +645,12 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
 
       <!-- Company research -->
       <NCard title="Company research (n8n)" size="small">
-        <NText v-if="!latestResults.length" depth="3">no company research yet</NText>
+        <template #header-extra>
+          <NButton size="small" type="primary" :loading="runningResearch" @click="runN8nResearch">
+            Run n8n research
+          </NButton>
+        </template>
+        <NText v-if="!latestResults.length" depth="3">no company research yet — use Run n8n research above</NText>
         <NCollapse v-else>
           <NCollapseItem
             v-for="r in latestResults"

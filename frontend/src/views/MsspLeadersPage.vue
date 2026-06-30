@@ -9,6 +9,7 @@ import { UsersIcon, Building2Icon, LinkedinIcon, MessageCircleIcon, IdCardIcon, 
 import { RouterLink } from "vue-router";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
 import { useProjectStore } from "../stores/project";
+import OutreachAgentDrawer from "../components/OutreachAgentDrawer.vue";
 
 const composerLead = ref<{ uuid: string; name: string; connected: boolean; email?: string } | null>(null);
 function openComposer(row: LeaderRecord) {
@@ -69,6 +70,9 @@ const lastOutboundDaysFilter = ref<number | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const view = ref<"contacts" | "companies">("contacts");
 const projectStore = useProjectStore();
+const outreachOpen = ref(false);
+const outreachContact = ref<LeaderRecord | null>(null);
+function createOutreach(row: LeaderRecord) { outreachContact.value = row; outreachOpen.value = true; }
 
 async function fetchList() {
   loading.value = true;
@@ -432,10 +436,11 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     render: (r) => h(NTag, { size: "small", bordered: false, type: statusType(r.status) }, { default: () => r.status }),
   },
   {
-    title: "Actions", key: "actions", width: 130, fixed: "right",
+    title: "Actions", key: "actions", width: 220, fixed: "right",
     render: (row) =>
       h(NSpace, { size: 4, wrap: false }, {
         default: () => [
+          h(NButton, { size: "tiny", type: "primary", onClick: () => createOutreach(row) }, { default: () => "Create outreach" }),
           h(NTooltip, null, {
             trigger: () => h(RouterLink, { to: `/contact/${row.uuid}` },
               { default: () => h(NButton, { size: "tiny", type: "primary", secondary: true }, { icon: () => h(IdCardIcon, { size: 14 }), default: () => "POV" }) }),
@@ -568,4 +573,5 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       </NDrawerContent>
     </NDrawer>
   </NCard>
+  <OutreachAgentDrawer v-if="outreachContact" v-model:show="outreachOpen" :contact-id="outreachContact.uuid" :contact-name="outreachContact.name" />
 </template>

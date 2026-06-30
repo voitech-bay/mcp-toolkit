@@ -65,6 +65,7 @@ const BACKLOG_PATHS = [
   "/context-snapshots",
   "/hypotheses",
   "/hypothesis-tag-contacts",
+  "/outreach-knowledge",
   "/lists-checker",
   "/enrichment",
   "/enrichment/jobs",
@@ -116,6 +117,11 @@ const dataMenuOptions: DropdownOption[] = [
 ];
 
 const backlogMenuOptions: DropdownOption[] = [
+  {
+    label: "Outreach knowledge",
+    key: "/outreach-knowledge",
+    icon: () => h(BookmarkIcon, { size: 14 }),
+  },
   {
     label: "Context builder",
     key: "/context",

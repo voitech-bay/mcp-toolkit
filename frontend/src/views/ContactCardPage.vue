@@ -21,6 +21,7 @@ import {
   useMessage,
 } from "naive-ui";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
+import OutreachAgentDrawer from "../components/OutreachAgentDrawer.vue";
 
 type Json = Record<string, unknown>;
 
@@ -82,6 +83,7 @@ const rawDrawerTitle = ref("");
 const rawDrawerJson = ref("");
 const savingMeta = ref(false);
 const companyRepliesOpen = ref(false);
+const outreachOpen = ref(false);
 
 const contactUuid = computed(() => String(route.params.uuid ?? ""));
 const contact = computed<Json>(() => (card.value?.contact as Json) ?? {});
@@ -333,6 +335,7 @@ watch(contactUuid, load);
             </div>
           </NSpace>
           <NSpace>
+            <NButton size="small" type="primary" @click="outreachOpen = true">Create outreach</NButton>
             <NButton size="small" :loading="runningResearch" @click="runResearch">Run research</NButton>
             <NButton size="small" @click="router.push('/inmail-review')">InMail review</NButton>
           </NSpace>
@@ -503,6 +506,7 @@ watch(contactUuid, load);
       </NDrawerContent>
     </NDrawer>
   </NSpin>
+  <OutreachAgentDrawer v-model:show="outreachOpen" :contact-id="contactUuid" :contact-name="displayName" />
 </template>
 
 <style scoped>

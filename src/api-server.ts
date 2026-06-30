@@ -128,6 +128,7 @@ import {
   handlePutContactMeta,
   handlePostSyncMarkers,
   handlePostRemoveFromList,
+  handlePostFeasibleRunPhaseBCompany,
 } from "./card-handlers.js";
 import { handlePostFeasibleGenerate, handlePostFeasibleSend } from "./feasible-agent-handlers.js";
 import {
@@ -146,6 +147,15 @@ import {
 import { attachEnrichmentTableSocket } from "./services/enrichment-realtime.js";
 import { createMcpHandler } from "./server.js";
 import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
+import {
+  handleCreateOutreachRun,
+  handleListOutreachRuns,
+  handleGetOutreachRun,
+  handlePatchOutreachPov,
+  handleRegenerateVariants,
+  handleKnowledge,
+  handleActivateKnowledge,
+} from "./outreach-agent-handlers.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
 const mcpHandler = createMcpHandler();
@@ -254,7 +264,7 @@ const server = createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   // MCP Streamable HTTP handles its own CORS/preflight on /mcp
   if (req.method === "OPTIONS" && !pathname.startsWith("/mcp")) {
-    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     res.writeHead(204);
     res.end();
@@ -322,8 +332,24 @@ const server = createServer(async (req, res) => {
   );
   const difyWorkflowRunsMatch = pathname.match(/^\/api\/dify\/workflows\/([^/]+)\/runs$/);
   const n8nLaunchStatusMatch = pathname.match(/^\/api\/n8n\/launch\/([^/]+)\/status$/);
+  const outreachRunPovMatch = pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)\/pov$/);
+  const outreachRunVariantsMatch = pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)\/variants$/);
+  const outreachRunMatch = !outreachRunPovMatch && !outreachRunVariantsMatch && pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)$/);
+  const knowledgeActivateMatch = pathname.match(/^\/api\/projects\/([^/]+)\/outreach-knowledge\/([^/]+)\/activate$/);
+  const knowledgeMatch = !knowledgeActivateMatch && pathname.match(/^\/api\/projects\/([^/]+)\/outreach-knowledge$/);
 
   try {
+    if (pathname === "/api/outreach-agent/runs") {
+      if (req.method === "POST") await handleCreateOutreachRun(req, res);
+      else if (req.method === "GET") await handleListOutreachRuns(req, res);
+      else { res.writeHead(405); res.end(); }
+      return;
+    }
+    if (outreachRunPovMatch) { if (req.method === "PATCH") await handlePatchOutreachPov(req, res, outreachRunPovMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (outreachRunVariantsMatch) { if (req.method === "POST") await handleRegenerateVariants(req, res, outreachRunVariantsMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (outreachRunMatch) { if (req.method === "GET") await handleGetOutreachRun(req, res, outreachRunMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (knowledgeActivateMatch) { if (req.method === "POST") await handleActivateKnowledge(req, res, knowledgeActivateMatch[1], knowledgeActivateMatch[2]); else { res.writeHead(405); res.end(); } return; }
+    if (knowledgeMatch) { await handleKnowledge(req, res, knowledgeMatch[1]); return; }
     if (pathname.startsWith("/mcp")) {
       await mcpHandler(req, res);
       return;
@@ -752,6 +778,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/lists/tagged/remove":
         await handlePostRemoveFromList(req, res);
+        return;
+      case "/api/feasible/run-phase-b-company":
+        await handlePostFeasibleRunPhaseBCompany(req, res);
         return;
       case "/api/contacts/meta":
         await handlePutContactMeta(req, res);
