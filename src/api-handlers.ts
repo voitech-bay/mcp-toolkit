@@ -3688,6 +3688,47 @@ function resolveLeadUuidFromPayload(item: Record<string, unknown>): string | nul
   return typeof u === "string" && u.trim() ? u.trim() : null;
 }
 
+/** Canonical workflow_name for n8n_workflow_results (matches Supabase migration 2026-06-06). */
+function deriveWorkflowNameFromResult(item: Record<string, unknown>): string {
+  if (typeof item.inmail_body === "string" && item.inmail_body.trim()) return "inmail";
+  if (
+    typeof item.pov_markdown === "string" ||
+    item.fit_status !== undefined ||
+    item.feasible_fit_status !== undefined ||
+    Array.isArray(item.relevant_contacts_bundle)
+  ) {
+    return "phase_b_company";
+  }
+  if (item.ICP_signals !== undefined && item.lead_uuid !== undefined) return "phase_a_contact";
+  if (item.companies_output !== undefined || item.contacts_output !== undefined) return "list_ingest";
+  if (Object.keys(item).filter((k) => k !== "row_data").length === 0) return "empty";
+  return "other";
+}
+
+/** Phase B company rows carry nested bundle lead_uuids — must not set contact_id on those rows. */
+function isCompanyGrainN8nResult(item: Record<string, unknown>): boolean {
+  const topLead = item.lead_uuid;
+  if (typeof topLead === "string" && topLead.trim()) return false;
+  const rd = item.row_data;
+  if (isPlainObject(rd) && typeof rd.uuid === "string" && rd.uuid.trim()) return false;
+  const companyUuid =
+    typeof item.company_uuid === "string" && item.company_uuid.trim()
+      ? item.company_uuid.trim()
+      : null;
+  if (!companyUuid) return false;
+  return (
+    typeof item.pov_markdown === "string" ||
+    item.fit_status !== undefined ||
+    item.feasible_fit_status !== undefined ||
+    Array.isArray(item.relevant_contacts_bundle)
+  );
+}
+
+function resolveLeadUuidForN8nRow(item: Record<string, unknown>): string | null {
+  if (isCompanyGrainN8nResult(item)) return null;
+  return resolveLeadUuidFromPayload(item);
+}
+
 const N8N_CONTACT_UUID_IN_CHUNK = 200;
 const N8N_COMPANY_ID_IN_CHUNK = 200;
 const N8N_CONTACT_UPSERT_CHUNK = 100;
@@ -4008,7 +4049,7 @@ export async function handlePostN8nWorkflowResults(
     parsed.push({
       index,
       item,
-      leadUuid: resolveLeadUuidFromPayload(item),
+      leadUuid: resolveLeadUuidForN8nRow(item),
       companyUuidRaw: findFirstNestedStringForKey(item, "company_uuid"),
       workflow: Object.keys(item)
         .filter((k) => k !== "row_data")
@@ -4197,14 +4238,17 @@ export async function handlePostN8nWorkflowResults(
     }
     const item = p.item;
     const lead = p.leadUuid;
+    const workflowName = deriveWorkflowNameFromResult(item);
+    const companyGrain = isCompanyGrainN8nResult(item);
     const contactIdForRow =
-      lead && contactProjByUuid.has(lead) ? lead : null;
+      companyGrain ? null : lead && contactProjByUuid.has(lead) ? lead : null;
     const companyIdForRow =
       p.companyUuidRaw && companyExists.has(p.companyUuidRaw) ? p.companyUuidRaw : null;
     insertRows.push({
       _n8n_index: p.index,
       contact_id: contactIdForRow,
       company_id: companyIdForRow,
+      workflow_name: workflowName,
       execution_id: executionId,
       workflow: p.workflow,
       result: item,

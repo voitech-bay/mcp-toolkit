@@ -6,6 +6,7 @@ import {
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { UsersIcon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
+import OutreachAgentDrawer from "../components/OutreachAgentDrawer.vue";
 
 const TAG_UUID = "b108ac8f-5049-466d-bc48-982c5a7e2201";
 
@@ -45,6 +46,9 @@ const statusFilter = ref<string | null>(null);
 const connFilter = ref<string | null>(null);
 const typeFilter = ref<string | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
+const outreachOpen = ref(false);
+const outreachContact = ref<LeaderRecord | null>(null);
+function createOutreach(row: LeaderRecord) { outreachContact.value = row; outreachOpen.value = true; }
 
 async function fetchList() {
   loading.value = true;
@@ -203,10 +207,11 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     render: (r) => h(NTag, { size: "small", bordered: false, type: statusType(r.status) }, { default: () => r.status }),
   },
   {
-    title: "Actions", key: "actions", width: 130, fixed: "right",
+    title: "Actions", key: "actions", width: 220, fixed: "right",
     render: (row) =>
       h(NSpace, { size: 4, wrap: false }, {
         default: () => [
+          h(NButton, { size: "tiny", type: "primary", onClick: () => createOutreach(row) }, { default: () => "Create outreach" }),
           h(NTooltip, null, {
             trigger: () => h(RouterLink, { to: `/contact/${row.uuid}` },
               { default: () => h(NButton, { size: "tiny", type: "primary", secondary: true }, { icon: () => h(IdCardIcon, { size: 14 }), default: () => "POV" }) }),
@@ -285,4 +290,5 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       :loading="loading"
     />
   </NCard>
+  <OutreachAgentDrawer v-if="outreachContact" v-model:show="outreachOpen" :contact-id="outreachContact.uuid" :contact-name="outreachContact.name" />
 </template>

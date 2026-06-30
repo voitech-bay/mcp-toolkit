@@ -27,6 +27,8 @@ export interface OpenRouterGenerateResult {
   text: string;
   model: string;
   id: string | null;
+  annotations: unknown[];
+  usage: Record<string, unknown> | null;
 }
 
 function getOpenRouterApiKey(): string {
@@ -141,6 +143,9 @@ export async function generateOpenRouterMessage(
     user?: string;
     sessionId?: string;
     trace?: Record<string, unknown>;
+    tools?: unknown[];
+    responseFormat?: Record<string, unknown>;
+    timeoutMs?: number;
   },
   options?: { signal?: AbortSignal }
 ): Promise<{ data: OpenRouterGenerateResult | null; error: string | null }> {
@@ -149,6 +154,8 @@ export async function generateOpenRouterMessage(
   const cacheControl = getPromptCacheControlForModel(model);
   const apiKey = getOpenRouterApiKey();
   const url = `${getOpenRouterBaseUrl()}/chat/completions`;
+  const timeout = AbortSignal.timeout(params.timeoutMs ?? 120_000);
+  const signal = options?.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -163,12 +170,14 @@ export async function generateOpenRouterMessage(
       ...(params.user ? { user: params.user } : {}),
       ...(params.sessionId ? { session_id: params.sessionId } : {}),
       ...(params.trace ? { trace: params.trace } : {}),
+      ...(params.tools?.length ? { tools: params.tools } : {}),
+      ...(params.responseFormat ? { response_format: params.responseFormat } : {}),
       messages: [
         { role: "system", content: params.systemPrompt },
         { role: "user", content: params.userPrompt },
       ],
     }),
-    signal: options?.signal,
+    signal,
   });
   const rawText = await res.text();
   if (!res.ok) {
@@ -193,6 +202,8 @@ export async function generateOpenRouterMessage(
       text: content,
       model: typeof root?.model === "string" ? root.model : model,
       id: typeof root?.id === "string" ? root.id : null,
+      annotations: Array.isArray(message?.annotations) ? message.annotations : [],
+      usage: asRecord(root?.usage),
     },
     error: null,
   };

@@ -21,6 +21,11 @@ import { buildLeadersList } from "./services/leaders-list.js";
 import { syncMarkersForContacts } from "./services/getsales-markers.js";
 import { CONTACTS_TABLE } from "./services/supabase.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
+import {
+  buildFeasiblePhaseBRollupForCompany,
+  feasiblePhaseBOnlyWebhookUrl,
+  FEASIBLE_PROJECT_ID,
+} from "./services/feasible-phase-b-rollup.js";
 
 const SUMMARY_MODEL = () => process.env.ACCOUNT_SUMMARY_MODEL?.trim() || "google/gemma-4-31b-it";
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -270,6 +275,73 @@ export async function handlePostRemoveFromList(req: IncomingMessage, res: Server
   });
   if (error) return sendJson(res, 500, { error: error.message });
   sendJson(res, 200, { ok: true, removed: data as number });
+}
+
+// --- POST /api/feasible/run-phase-b-company { companyId, listUuid?, companyTypeTag? } ---
+// Triggers Feasible Phase-B-only n8n webhook for one company (rollup built from Supabase).
+export async function handlePostFeasibleRunPhaseBCompany(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+
+  const webhook = feasiblePhaseBOnlyWebhookUrl();
+  if (!webhook) {
+    return sendJson(res, 500, {
+      error: "N8N_FEASIBLE_PHASE_B_ONLY_WEBHOOK_URL or N8N_URL not configured",
+    });
+  }
+
+  const body = await readJsonBody(req);
+  const companyId = typeof body.companyId === "string" ? body.companyId.trim() : "";
+  if (!UUID_RE.test(companyId)) return sendJson(res, 400, { error: "companyId must be a UUID" });
+
+  const listUuid = typeof body.listUuid === "string" ? body.listUuid.trim() : "";
+  const companyTypeTag =
+    typeof body.companyTypeTag === "string" && body.companyTypeTag.trim()
+      ? body.companyTypeTag.trim()
+      : "services_mssp";
+
+  const { rollup, error: rollupErr } = await buildFeasiblePhaseBRollupForCompany(client, companyId, {
+    defaultCompanyTypeTag: companyTypeTag,
+  });
+  if (rollupErr || !rollup) return sendJson(res, 500, { error: rollupErr ?? "Failed to build rollup" });
+
+  if (!rollup.relevant_contacts_bundle.length && !rollup.excluded_contacts.length) {
+    return sendJson(res, 400, {
+      error:
+        "No Phase A contact data for this company — run the full Feasible pipeline (Phase A) on list contacts first.",
+    });
+  }
+
+  const payload = {
+    project_id: FEASIBLE_PROJECT_ID,
+    list_uuid: UUID_RE.test(listUuid) ? listUuid : "",
+    source_execution_id: "company-card",
+    default_company_type_tag: companyTypeTag,
+    max_companies: 0,
+    companies: [rollup],
+  };
+
+  try {
+    const r = await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const text = await r.text();
+    if (!r.ok) return sendJson(res, 502, { error: `n8n webhook ${r.status}: ${text.slice(0, 300)}` });
+    sendJson(res, 200, {
+      accepted: true,
+      companyId,
+      company_uuid: rollup.company_uuid,
+      relevant_contacts: rollup.relevant_contact_count_with_review,
+    });
+  } catch (e) {
+    sendJson(res, 502, { error: e instanceof Error ? e.message : String(e) });
+  }
 }
 
 // re-export for tests

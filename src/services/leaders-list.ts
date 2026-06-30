@@ -151,7 +151,7 @@ export async function buildLeadersList(
   const companyIds = [
     ...new Set(
       rows
-        .map((r) => str(r.company_id) ?? str(r.company_uuid))
+        .flatMap((r) => [str(r.company_id), str(r.company_uuid)])
         .filter((x): x is string => Boolean(x))
     ),
   ];
@@ -251,7 +251,10 @@ export async function buildLeadersList(
   const records: LeaderListRecord[] = rows.map((r) => {
     const uuid = String(r.uuid);
     const cid = str(r.company_id) ?? str(r.company_uuid);
-    const pov = cid ? povByCompany.get(cid) : undefined;
+    const gsUuid = str(r.company_uuid);
+    const pov =
+      (cid ? povByCompany.get(cid) : undefined) ??
+      (gsUuid ? povByCompany.get(gsUuid) : undefined);
     const stage = str(r.pipeline_stage_uuid) ? stageById.get(str(r.pipeline_stage_uuid)!) : undefined;
     const co = cid ? companyById.get(cid) : undefined;
 

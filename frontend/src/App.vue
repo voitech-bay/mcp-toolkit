@@ -58,7 +58,7 @@ const isAnalyticsGroupActive = computed(
 
 /** Grouped routes — highlight parent when any child is active. */
 const DATA_PATHS = ["/tables", "/companies", "/contacts", "/mssp-leaders", "/conversations", "/getsales-tags"] as const;
-const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses", "/hypothesis-tag-contacts"] as const;
+const CONTEXT_PATHS = ["/context", "/context-snapshots", "/hypotheses", "/hypothesis-tag-contacts", "/outreach-knowledge"] as const;
 const PIPELINE_PATHS = [
   "/sync",
   "/lists-checker",
@@ -111,6 +111,11 @@ const dataMenuOptions: DropdownOption[] = [
 ];
 
 const contextMenuOptions: DropdownOption[] = [
+  {
+    label: "Outreach knowledge",
+    key: "/outreach-knowledge",
+    icon: () => h(BookmarkIcon, { size: 14 }),
+  },
   {
     label: "Context builder",
     key: "/context",
