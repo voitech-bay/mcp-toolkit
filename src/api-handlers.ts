@@ -137,6 +137,11 @@ import {
 } from "./services/source-api.js";
 import { syncPipedriveDeals } from "./services/pipedrive-deals-sync.js";
 import {
+  extractWebhookLeadUuid,
+  isGetSalesWebhookSecretValid,
+  refreshGetSalesConversation,
+} from "./services/getsales-conversation-sync.js";
+import {
   listOpenRouterModels,
   generateOpenRouterMessage,
   pipeOpenRouterChatStreamToSse,
@@ -1022,6 +1027,73 @@ export async function handleConversation(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ contact: result.contact ?? null, messages: result.messages }));
+}
+
+export async function handleRefreshGetSalesConversation(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { projectId?: string; leadUuid?: string } | undefined;
+  const projectId = body?.projectId?.trim();
+  const leadUuid = body?.leadUuid?.trim();
+  if (!projectId || !leadUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include projectId and leadUuid" }));
+    return;
+  }
+  const result = await refreshGetSalesConversation(client, projectId, leadUuid);
+  res.writeHead(result.error ? 502 : 200);
+  res.end(JSON.stringify(result));
+}
+
+export async function handleGetSalesWebhook(
+  req: IncomingMessage,
+  res: ServerResponse,
+  projectId: string
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const token = req.headers["x-getsales-webhook-secret"];
+  const queryToken = getQueryParams(req).get("token") ?? undefined;
+  const received = typeof token === "string" ? token : queryToken;
+  if (!isGetSalesWebhookSecretValid(received)) {
+    res.writeHead(401);
+    res.end(JSON.stringify({ error: "Invalid webhook secret" }));
+    return;
+  }
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as Record<string, unknown> | undefined;
+  const leadUuid = body && typeof body === "object" ? extractWebhookLeadUuid(body) : null;
+  if (!leadUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Webhook payload does not include a lead UUID" }));
+    return;
+  }
+  const result = await refreshGetSalesConversation(client, projectId, leadUuid);
+  if (result.error) console.error(`[getsales-webhook] project=${projectId} lead=${leadUuid}: ${result.error}`);
+  res.writeHead(result.error ? 502 : 200);
+  res.end(JSON.stringify({ ok: !result.error, leadUuid, fetched: result.fetched, upserted: result.upserted, error: result.error }));
 }
 
 const ALLOWED_GENERATION_TONES = new Set<GenerationTone>([
@@ -3690,6 +3762,10 @@ function resolveLeadUuidFromPayload(item: Record<string, unknown>): string | nul
 
 /** Canonical workflow_name for n8n_workflow_results (matches Supabase migration 2026-06-06). */
 function deriveWorkflowNameFromResult(item: Record<string, unknown>): string {
+  // Explicit workflow_name wins (Velvetech research pipeline stamps its own stage names).
+  if (typeof item.workflow_name === "string" && item.workflow_name.trim()) {
+    return item.workflow_name.trim();
+  }
   if (typeof item.inmail_body === "string" && item.inmail_body.trim()) return "inmail";
   if (
     typeof item.pov_markdown === "string" ||
