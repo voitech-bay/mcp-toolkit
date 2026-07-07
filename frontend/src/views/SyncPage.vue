@@ -974,8 +974,12 @@ const preflightRows = computed(() => {
               </tr>
             </tbody>
           </table>
-          <div v-if="preflight.countsError" class="muted hint">Counts error: {{ preflight.countsError }}</div>
-          <div v-if="preflight.latestError" class="muted hint">Latest rows error: {{ preflight.latestError }}</div>
+          <NAlert v-if="preflight.countsError" type="warning" class="preflight-warning" :show-icon="false">
+            Counts error: {{ preflight.countsError }}
+          </NAlert>
+          <NAlert v-if="preflight.latestError" type="warning" class="preflight-warning" :show-icon="false">
+            Latest rows error: {{ preflight.latestError }}
+          </NAlert>
         </div>
         <div v-else-if="!preflightLoading" class="muted hint">Select a project to run preflight check.</div>
       </NSpin>
@@ -1378,6 +1382,11 @@ const preflightRows = computed(() => {
   overflow: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.preflight-warning {
+  margin-top: 0.75rem;
+  overflow-wrap: anywhere;
 }
 
 /* Sync control */

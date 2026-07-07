@@ -580,21 +580,20 @@ export async function getProjectLatestRows(
       flows: flowsRes.data ?? [],
       flow_leads: flowLeadsRes.data ?? [],
     };
-    if (companiesRes.error) return { latest, error: companiesRes.error.message };
-    if (contactsRes.error) return { latest, error: contactsRes.error.message };
-    if (messagesRes.error) return { latest, error: messagesRes.error.message };
-    if (sendersRes.error) return { latest, error: sendersRes.error.message };
-    if (contactListsRes.error) return { latest, error: contactListsRes.error.message };
-    if (getSalesTagsRes.error) return { latest, error: getSalesTagsRes.error.message };
-    if (pipelineStagesRes.error) return { latest, error: pipelineStagesRes.error.message };
-    if (flowsRes.error) return { latest, error: flowsRes.error.message };
-    if (flowLeadsRes.error) return { latest, error: flowLeadsRes.error.message };
+    if (companiesRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(companiesRes.error.message) };
+    if (contactsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(contactsRes.error.message) };
+    if (messagesRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(messagesRes.error.message) };
+    if (sendersRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(sendersRes.error.message) };
+    if (contactListsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(contactListsRes.error.message) };
+    if (getSalesTagsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(getSalesTagsRes.error.message) };
+    if (pipelineStagesRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(pipelineStagesRes.error.message) };
+    if (flowsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(flowsRes.error.message) };
+    if (flowLeadsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(flowLeadsRes.error.message) };
     return { latest, error: null };
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
     return {
       latest: emptyLatest(),
-      error: message,
+      error: normalizeSupabaseQueryErrorMessage(e),
     };
   }
 }
@@ -3905,6 +3904,31 @@ export interface LatestRows {
 }
 
 const DEFAULT_LATEST_LIMIT = 10;
+const UPSTREAM_ERROR_PREVIEW_MAX = 240;
+
+function normalizeSupabaseQueryErrorMessage(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? "Unknown Supabase query error");
+  const compact = raw.replace(/\s+/g, " ").trim();
+  if (!compact) return "Unknown Supabase query error";
+
+  const looksLikeHtml =
+    /<!doctype html/i.test(compact) ||
+    /<html[\s>]/i.test(compact) ||
+    /<body[\s>]/i.test(compact);
+
+  if (looksLikeHtml) {
+    const title = compact.match(/<title[^>]*>(.*?)<\/title>/i)?.[1]?.replace(/\s+/g, " ").trim();
+    const heading = compact.match(/<h1[^>]*>(.*?)<\/h1>/i)?.[1]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const code = compact.match(/\bError code\s+(\d{3})\b/i)?.[1];
+    const detail = title || heading || "HTML error page returned by Supabase";
+    return code && !detail.includes(code)
+      ? `Supabase request failed: ${detail} (HTTP ${code})`
+      : `Supabase request failed: ${detail}`;
+  }
+
+  if (compact.length <= UPSTREAM_ERROR_PREVIEW_MAX) return compact;
+  return `${compact.slice(0, UPSTREAM_ERROR_PREVIEW_MAX)}...`;
+}
 
 /**
  * Returns the latest rows per table (by created_at desc) for visualization.
@@ -3981,21 +4005,20 @@ export async function getLatestRows(
       flows: flowsRes.data ?? [],
       flow_leads: flowLeadsRes.data ?? [],
     };
-    if (companiesRes.error) return { latest, error: companiesRes.error.message };
-    if (contactsRes.error) return { latest, error: contactsRes.error.message };
-    if (messagesRes.error) return { latest, error: messagesRes.error.message };
-    if (sendersRes.error) return { latest, error: sendersRes.error.message };
-    if (contactListsRes.error) return { latest, error: contactListsRes.error.message };
-    if (getSalesTagsRes.error) return { latest, error: getSalesTagsRes.error.message };
-    if (pipelineStagesRes.error) return { latest, error: pipelineStagesRes.error.message };
-    if (flowsRes.error) return { latest, error: flowsRes.error.message };
-    if (flowLeadsRes.error) return { latest, error: flowLeadsRes.error.message };
+    if (companiesRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(companiesRes.error.message) };
+    if (contactsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(contactsRes.error.message) };
+    if (messagesRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(messagesRes.error.message) };
+    if (sendersRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(sendersRes.error.message) };
+    if (contactListsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(contactListsRes.error.message) };
+    if (getSalesTagsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(getSalesTagsRes.error.message) };
+    if (pipelineStagesRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(pipelineStagesRes.error.message) };
+    if (flowsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(flowsRes.error.message) };
+    if (flowLeadsRes.error) return { latest, error: normalizeSupabaseQueryErrorMessage(flowLeadsRes.error.message) };
     return { latest, error: null };
   } catch (e) {
-    const message = e instanceof Error ? e.message : String(e);
     return {
       latest: emptyLatest(),
-      error: message,
+      error: normalizeSupabaseQueryErrorMessage(e),
     };
   }
 }
