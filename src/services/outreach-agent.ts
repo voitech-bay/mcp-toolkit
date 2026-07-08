@@ -5,7 +5,7 @@ import { generateOpenRouterMessage } from "./openrouter.js";
 import { CONTACTS_TABLE, COMPANIES_TABLE, LINKEDIN_MESSAGES_TABLE, N8N_WORKFLOW_RESULTS_TABLE } from "./supabase.js";
 
 type Json = Record<string, unknown>;
-export type OutreachChannel = "inmail" | "message";
+export type OutreachChannel = "inmail" | "message" | "email";
 
 const CitationSchema = z.object({ id: z.string().min(1), title: z.string().min(1), url: z.string().url(), supports: z.string().min(1) });
 const ResearchSchema = z.object({
@@ -77,7 +77,7 @@ export async function loadKnowledge(client: SupabaseClient, projectId: string): 
   return { documents, manifest: documents.map(({ id, kind, title, version, source_checksum }) => ({ id, kind, title, version, source_checksum })) };
 }
 
-async function structuredCall<T>(params: { model: string; system: string; user: string; schema: z.ZodType<T>; tools?: unknown[]; trace: Json }): Promise<{ value: T; usage: Json | null; annotations: unknown[] }> {
+export async function structuredCall<T>(params: { model: string; system: string; user: string; schema: z.ZodType<T>; tools?: unknown[]; trace: Json }): Promise<{ value: T; usage: Json | null; annotations: unknown[] }> {
   const first = await generateOpenRouterMessage({ model: params.model, systemPrompt: params.system, userPrompt: params.user, temperature: 0.2, tools: params.tools, timeoutMs: 150_000, trace: params.trace });
   if (first.error || !first.data) throw new Error(first.error ?? "Model call failed");
   try { return { value: params.schema.parse(jsonFromText(first.data.text)), usage: first.data.usage, annotations: first.data.annotations }; }
@@ -128,12 +128,13 @@ export function validateVariant(channel: OutreachChannel, v: { subject: string |
   const warnings: string[] = [];
   if (/\{\{|\[first|<first|\bTBD\b/i.test(`${v.subject ?? ""} ${v.body}`)) warnings.push("Contains a placeholder");
   if (channel === "inmail") { if (!v.subject?.trim()) warnings.push("InMail subject is required"); if ((v.subject?.length ?? 0) > 200) warnings.push("Subject exceeds 200 characters"); if (v.body.length > 1900) warnings.push("Body exceeds 1,900 characters"); }
+  else if (channel === "email") { if (!v.subject?.trim()) warnings.push("Email subject is required"); if ((v.subject?.length ?? 0) > 200) warnings.push("Subject exceeds 200 characters"); if ((v.body.match(/\?/g) ?? []).length > 1) warnings.push("Email contains multiple CTAs/questions"); }
   else { if (v.subject) warnings.push("LinkedIn Message must not have a subject"); const questions = (v.body.match(/\?/g) ?? []).length; if (questions > 1) warnings.push("Message contains multiple CTAs/questions"); if (/reaching out|wanted to introduce myself|hope this message finds/i.test(v.body)) warnings.push("Message may reset an existing conversation"); }
   return warnings;
 }
 
 export async function generateVariants(args: { model: string; projectId: string; contactId: string; channel: OutreachChannel; prompt: string; pov: OutreachPov; context: OutreachContext; knowledge: Json[] }): Promise<{ variants: Array<{ subject: string | null; body: string; rationale: string; warnings: string[] }>; usage: Json | null }> {
-  const channelRules = args.channel === "inmail" ? "Each variant needs a concise subject and body. Subject <=200 chars; body <=1900 chars." : "Each variant has subject:null. Continue the existing conversation naturally; never reset it, repeat prior outreach, or use more than one CTA/question.";
+  const channelRules = args.channel === "inmail" ? "Each variant needs a concise subject and body. Subject <=200 chars; body <=1900 chars." : args.channel === "email" ? "Each variant needs a concise subject and cold-email body with no more than one CTA/question." : "Each variant has subject:null. Continue the existing conversation naturally; never reset it, repeat prior outreach, or use more than one CTA/question.";
   const call = await structuredCall({ model: args.model,
     system: `Write exactly three genuinely distinct outreach variants from the supplied POV. ${channelRules} No placeholders. No unsupported facts or product claims. Return JSON only: {"variants":[{"subject":string|null,"body":string,"rationale":string}, ... exactly 3]}. ACTIVE KNOWLEDGE:\n${knowledgeBlock(args.knowledge)}`,
     user: `USER PROMPT: ${args.prompt}\nPOV: ${JSON.stringify(args.pov)}\nTARGET CONVERSATION: ${JSON.stringify(args.context.target_messages)}`,

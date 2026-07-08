@@ -77,6 +77,7 @@ const PIPELINE_PATHS = [
   "/n8n/lead-views",
   "/n8n/workflow-results",
   "/inmail-review",
+  "/email-studio",
   "/calls/cold-n8n",
 ] as const;
 
@@ -188,6 +189,11 @@ const pipelineMenuOptions: DropdownOption[] = [
   {
     label: "Message log",
     key: "/inmail-review",
+    icon: () => h(MailIcon, { size: 14 }),
+  },
+  {
+    label: "Email Studio",
+    key: "/email-studio",
     icon: () => h(MailIcon, { size: 14 }),
   },
   {
