@@ -100,11 +100,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function resolveCredentials(override?: ApiCredentials): { baseUrl: string; apiKey: string } | null {
+function resolveCredentials(override?: ApiCredentials): ApiCredentials | null {
   const baseUrl = (override?.baseUrl ?? process.env.SOURCE_API_BASE_URL)?.replace(/\/$/, "");
   const apiKey = override?.apiKey ?? process.env.SOURCE_API_KEY;
+  const teamId = override?.teamId ?? process.env.SOURCE_TEAM_ID;
   if (!baseUrl || !apiKey) return null;
-  return { baseUrl, apiKey };
+  return {
+    baseUrl,
+    apiKey,
+    ...(teamId?.trim() ? { teamId: teamId.trim() } : {}),
+  };
 }
 
 /** Structured context for GetSales / Laravel failures (support tickets, debugging). */
@@ -163,12 +168,13 @@ export function fetchErrorFromUnknown(e: unknown): { error: string; errorDetail?
 
 async function fetchJson<T>(
   url: string,
-  apiKey: string,
+  credentials: Pick<ApiCredentials, "apiKey" | "teamId">,
   options: { method?: string; body?: string; headers?: Record<string, string> }
 ): Promise<T> {
   const { method = "GET", body, headers = {} } = options;
   const reqSnap = requestSnapshot(method, url, body);
   let lastError: Error | null = null;
+  const teamId = credentials.teamId?.trim();
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
@@ -176,8 +182,8 @@ async function fetchJson<T>(
         method,
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
-          ...(process.env.SOURCE_TEAM_ID ? { "Team-ID": process.env.SOURCE_TEAM_ID } : {}),
+          Authorization: `Bearer ${credentials.apiKey}`,
+          ...(teamId ? { "Team-ID": teamId } : {}),
           ...headers,
         },
         ...(body && { body }),
@@ -432,7 +438,7 @@ export async function fetchAllContacts(credentials?: ApiCredentials, onLog?: Fet
  */
 async function fetchContactsSearchPass(
   sinceUpdatedAt: string | null,
-  config: { baseUrl: string; apiKey: string },
+  config: ApiCredentials,
   onLog: FetchLogger | undefined,
   options: FetchIncrementalOptions | undefined
 ): Promise<FetchContactsResult> {
@@ -466,7 +472,7 @@ async function fetchContactsSearchPass(
         order_field: "updated_at",
         order_type: "desc",
       });
-      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config.apiKey, {
+      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config, {
         method: "POST",
         body,
       });
@@ -603,7 +609,7 @@ export async function fetchLeadUuidsByListUuid(
         order_field: "updated_at",
         order_type: "desc",
       });
-      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config.apiKey, {
+      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config, {
         method: "POST",
         body,
       });
@@ -676,7 +682,7 @@ export async function fetchContactsByListUuid(
         order_field: "updated_at",
         order_type: "desc",
       });
-      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config.apiKey, {
+      const res = await fetchJson<{ data?: ContactItem[]; total?: number }>(url, config, {
         method: "POST",
         body,
       });
@@ -725,7 +731,7 @@ export async function fetchContactByUuid(
   if (!trimmed) return null;
   const url = `${config.baseUrl}/leads/api/leads/${encodeURIComponent(trimmed)}`;
   try {
-    const json = await fetchJson<ContactItem>(url, config.apiKey, { method: "GET" });
+    const json = await fetchJson<ContactItem>(url, config, { method: "GET" });
     return unwrapContact(json);
   } catch (e) {
     if (e instanceof SourceApiRequestError && e.response?.status === 404) return null;
@@ -754,7 +760,7 @@ export async function fetchLeadMarkersByUuid(
   const trimmed = uuid.trim();
   if (!trimmed) return [];
   const url = `${config.baseUrl}/leads/api/leads/${encodeURIComponent(trimmed)}`;
-  const json = await fetchJson<{ markers?: LeadMarkerRow[] }>(url, config.apiKey, { method: "GET" });
+  const json = await fetchJson<{ markers?: LeadMarkerRow[] }>(url, config, { method: "GET" });
   return json.markers ?? [];
 }
 
@@ -771,7 +777,7 @@ export async function fetchCompanyByUuid(
   if (!trimmed) return null;
   const url = `${config.baseUrl}/leads/api/companies/${encodeURIComponent(trimmed)}`;
   try {
-    const json = await fetchJson<{ company?: Record<string, unknown> | null }>(url, config.apiKey, { method: "GET" });
+    const json = await fetchJson<{ company?: Record<string, unknown> | null }>(url, config, { method: "GET" });
     const company = json.company;
     if (company && typeof company === "object") return { ...company };
     return null;
@@ -801,7 +807,7 @@ export async function listLeadCustomFields(
   const config = resolveCredentials(credentials);
   if (!config) throw new Error("Source API credentials are not configured.");
   const url = `${config.baseUrl}/leads/api/custom-fields?filter[object]=lead`;
-  const json = await fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "GET" });
+  const json = await fetchJson<Record<string, unknown>>(url, config, { method: "GET" });
   const rows = asObjArray(json.data).length
     ? asObjArray(json.data)
     : asObjArray(json.custom_fields).length
@@ -824,7 +830,7 @@ export async function createLeadCustomField(
   const config = resolveCredentials(credentials);
   if (!config) throw new Error("Source API credentials are not configured.");
   const url = `${config.baseUrl}/leads/api/custom-fields`;
-  const json = await fetchJson<Record<string, unknown>>(url, config.apiKey, {
+  const json = await fetchJson<Record<string, unknown>>(url, config, {
     method: "POST",
     body: JSON.stringify({ object: "lead", name }),
   });
@@ -849,7 +855,7 @@ export async function updateLeadCustomFields(
   const trimmed = leadUuid.trim();
   if (!trimmed) throw new Error("updateLeadCustomFields: leadUuid required");
   const url = `${config.baseUrl}/leads/api/leads/${encodeURIComponent(trimmed)}`;
-  await fetchJson<Record<string, unknown>>(url, config.apiKey, {
+  await fetchJson<Record<string, unknown>>(url, config, {
     method: "PUT",
     body: JSON.stringify({ custom_fields: customFields }),
   });
@@ -888,7 +894,7 @@ export async function sendLinkedInMessage(
   if (!config) throw new Error("Source API credentials are not configured.");
   const body = buildLinkedInMessagePayload(params);
   const url = `${config.baseUrl}/flows/api/linkedin-messages`;
-  return fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "POST", body: JSON.stringify(body) });
+  return fetchJson<Record<string, unknown>>(url, config, { method: "POST", body: JSON.stringify(body) });
 }
 
 export interface SendEmailParams {
@@ -938,7 +944,7 @@ export async function sendEmail(
   if (!config) throw new Error("Source API credentials are not configured.");
   const body = buildEmailPayload(params);
   const url = `${config.baseUrl}/emails/api/emails/send-email`;
-  return fetchJson<Record<string, unknown>>(url, config.apiKey, { method: "POST", body: JSON.stringify(body) });
+  return fetchJson<Record<string, unknown>>(url, config, { method: "POST", body: JSON.stringify(body) });
 }
 
 /**
@@ -1113,7 +1119,7 @@ export async function fetchCompaniesByListUuidsBatched(
         });
         const res = await fetchJson<{ data?: CompanyItem[]; total?: number; has_more?: boolean }>(
           `${config.baseUrl}${COMPANIES_LIST_PATH}`,
-          config.apiKey,
+          config,
           { method: "POST", body }
         );
         const page = (res.data ?? []).map(unwrapCompany);
@@ -1164,6 +1170,54 @@ export async function fetchAllLinkedInMessages(credentials?: ApiCredentials, onL
   return fetchLinkedInMessagesIncremental(null, credentials, onLog);
 }
 
+/** Fetch every LinkedIn message for one contact, newest first. */
+export async function fetchLinkedInMessagesForLead(
+  leadUuid: string,
+  credentials?: ApiCredentials
+): Promise<FetchLinkedInMessagesResult> {
+  const config = resolveCredentials(credentials);
+  if (!config) {
+    return { data: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required", fetchedCount: 0 };
+  }
+  const uuid = leadUuid.trim();
+  if (!uuid) return { data: [], error: "leadUuid is required", fetchedCount: 0 };
+
+  const all: Record<string, unknown>[] = [];
+  let offset = 0;
+  try {
+    while (true) {
+      const limit = pageLimitForOffset(offset);
+      if (limit === 0) {
+        return {
+          data: all,
+          error: sourceApiEsPaginationTruncatedError("linkedin_messages", offset),
+          fetchedCount: all.length,
+        };
+      }
+      const query = new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+        order_field: "sent_at",
+        order_type: "desc",
+        "filter[lead_uuid]": uuid,
+      });
+      const res = await fetchJson<{
+        data?: Record<string, unknown>[];
+        has_more?: boolean;
+      }>(`${config.baseUrl}${LINKEDIN_MESSAGES_PATH}?${query.toString()}`, config, { method: "GET" });
+      const page = res.data ?? [];
+      all.push(...page);
+      if (page.length === 0 || !res.has_more) break;
+      offset += limit;
+      await sleep(DELAY_MS);
+    }
+    return { data: all, error: null, fetchedCount: all.length };
+  } catch (e) {
+    const fe = fetchErrorFromUnknown(e);
+    return { data: [], error: fe.error, errorDetail: fe.errorDetail, fetchedCount: 0 };
+  }
+}
+
 /**
  * Fetch LinkedIn messages from source (newest first). Stops when a row has created_at <= sinceCreatedAt.
  * If sinceCreatedAt is null, fetches all. Returns only rows with created_at > sinceCreatedAt.
@@ -1204,7 +1258,7 @@ export async function fetchLinkedInMessagesIncremental(
         data?: Record<string, unknown>[];
         has_more?: boolean;
         total?: number;
-      }>(url, config.apiKey, { method: "GET" });
+      }>(url, config, { method: "GET" });
       lastHasMore = res.has_more;
       const page = res.data ?? [];
       const preview = page.slice(0, 10).map((r) => {
@@ -1306,7 +1360,7 @@ export async function fetchSendersIncremental(
       const res = await fetchJson<{
         data?: Record<string, unknown>[];
         has_more?: boolean;
-      }>(url, config.apiKey, { method: "GET" });
+      }>(url, config, { method: "GET" });
       lastHasMore = res.has_more;
       const page = res.data ?? [];
       const preview = page.slice(0, 10).map((r) => {
@@ -1406,7 +1460,7 @@ export async function fetchFlowsIncremental(
       const res = await fetchJson<{
         data?: Record<string, unknown>[];
         has_more?: boolean;
-      }>(url, config.apiKey, { method: "GET" });
+      }>(url, config, { method: "GET" });
       lastHasMore = res.has_more;
       const page = res.data ?? [];
       const preview = page.slice(0, 10).map((r) => (typeof r.name === "string" ? r.name : (r.uuid ?? "?")));
@@ -1468,7 +1522,7 @@ export interface FetchFlowLeadsResult {
  */
 async function fetchFlowLeadsSearchPass(
   sinceCreatedAt: string | null,
-  config: { baseUrl: string; apiKey: string },
+  config: ApiCredentials,
   onLog: FetchLogger | undefined,
   options: FetchIncrementalOptions | undefined
 ): Promise<FetchFlowLeadsResult> {
@@ -1504,7 +1558,7 @@ async function fetchFlowLeadsSearchPass(
       });
       const res = await fetchJson<{ data?: Record<string, unknown>[]; total?: number; has_more?: boolean }>(
         url,
-        config.apiKey,
+        config,
         { method: "POST", body }
       );
       if (res.total != null) lastTotal = res.total;
@@ -1614,7 +1668,7 @@ export async function fetchAllCompanies(credentials?: ApiCredentials, onLog?: Fe
  */
 async function fetchCompaniesSearchPass(
   sinceUpdatedAt: string | null,
-  config: { baseUrl: string; apiKey: string },
+  config: ApiCredentials,
   onLog: FetchLogger | undefined,
   options: FetchIncrementalOptions | undefined,
   updatedAtRange: DateRangeFilter | null
@@ -1654,7 +1708,7 @@ async function fetchCompaniesSearchPass(
       });
       const res = await fetchJson<{ data?: CompanyItem[]; total?: number; has_more?: boolean }>(
         url,
-        config.apiKey,
+        config,
         { method: "POST", body }
       );
       if (res.total != null) lastTotal = res.total;
@@ -1724,7 +1778,7 @@ async function fetchCompaniesSearchPass(
 
 async function fetchCompaniesBucketRecursive(
   sinceUpdatedAt: string | null,
-  config: { baseUrl: string; apiKey: string },
+  config: ApiCredentials,
   onLog: FetchLogger | undefined,
   options: FetchIncrementalOptions | undefined,
   range: DateRangeFilter,
@@ -1899,7 +1953,7 @@ export async function fetchContactListsIncremental(
         data?: Record<string, unknown>[];
         has_more?: boolean;
         total?: number;
-      }>(url, config.apiKey, { method: "GET" });
+      }>(url, config, { method: "GET" });
       if (res.total != null) lastTotal = res.total;
       lastHasMore = res.has_more;
       const page = res.data ?? [];
@@ -2006,7 +2060,7 @@ export async function fetchTagsIncremental(
         data?: Record<string, unknown>[];
         has_more?: boolean;
         total?: number;
-      }>(url, config.apiKey, { method: "GET" });
+      }>(url, config, { method: "GET" });
       if (res.total != null) lastTotal = res.total;
       lastHasMore = res.has_more;
       const page = res.data ?? [];
@@ -2125,7 +2179,7 @@ export async function fetchPipelineStagesIncremental(
           data?: Record<string, unknown>[];
           has_more?: boolean;
           total?: number;
-        }>(url, config.apiKey, { method: "GET" });
+        }>(url, config, { method: "GET" });
         if (res.total != null) lastTotal = res.total;
         lastHasMore = res.has_more;
         const page = res.data ?? [];
@@ -2397,7 +2451,7 @@ export async function fetchLeadsMetricsForRange(
         url
       });
     }
-    const res = await fetchJson<unknown>(url, config.apiKey, { method: "POST", body });
+    const res = await fetchJson<unknown>(url, config, { method: "POST", body });
     const rawRows = extractMetricsRows(res);
     if (rawRows.length === 0 && onLog) {
       const preview =
@@ -2433,7 +2487,7 @@ export async function verifyGetSalesCredentials(
     `${config.baseUrl}${FLOWS_PATH}?limit=1&offset=0` +
     `&order_field=updated_at&order_type=desc`;
   try {
-    await fetchJson<unknown>(url, config.apiKey, { method: "GET" });
+    await fetchJson<unknown>(url, config, { method: "GET" });
     return { ok: true };
   } catch (e) {
     const fe = fetchErrorFromUnknown(e);

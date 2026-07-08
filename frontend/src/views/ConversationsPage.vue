@@ -433,6 +433,31 @@ async function fetchDialogue(convUuid: string) {
       sender: String(m["sender"] ?? ""),
       direction: messageDirection(m),
     }));
+    const projectId = projectStore.selectedProjectId;
+    const firstMessageLeadUuid = typeof msgs[0]?.lead_uuid === "string" ? msgs[0].lead_uuid : null;
+    const leadUuid = typeof j.contact?.uuid === "string" ? j.contact.uuid : firstMessageLeadUuid;
+    if (projectId && leadUuid) {
+      void fetch("/api/conversations/refresh", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, leadUuid }),
+      })
+        .then(async (refreshResponse) => {
+          if (!refreshResponse.ok || selectedConvUuid.value !== convUuid) return;
+          const refreshed = await refreshResponse.json();
+          if (refreshed.error || selectedConvUuid.value !== convUuid) return;
+          dialogueContact.value = refreshed.contact ?? dialogueContact.value;
+          const latest = (refreshed.messages ?? []) as Array<Record<string, unknown>>;
+          dialogueMessages.value = latest.map((m, i) => ({
+            key: i,
+            text: String(m["text"] ?? "—"),
+            sentAt: formatDate(m["sent_at"] as string | null),
+            sender: String(m["sender"] ?? ""),
+            direction: messageDirection(m),
+          }));
+        })
+        .catch(() => undefined);
+    }
   } catch (e) {
     dialogueError.value = e instanceof Error ? e.message : "Failed to load messages";
   } finally {
@@ -1053,11 +1078,18 @@ const filteredRelatedContacts = computed(() => {
                   >{{ item.receiverDisplayName }}</router-link>
                   <span v-else class="convpage__receiver">{{ item.receiverDisplayName }}</span>
                   <div class="convpage__receiver-sub">
-                    {{
-                      [item.receiverCompanyName, item.receiverTitle]
-                        .filter((x) => typeof x === "string" && x.trim())
-                        .join(" · ")
-                    }}
+                    <router-link
+                      v-if="item.receiverCompanyId && item.receiverCompanyName"
+                      :to="`/company/${item.receiverCompanyId}`"
+                      class="convpage__inline-link"
+                      @click.stop
+                    >{{ item.receiverCompanyName }}</router-link>
+                    <span v-else-if="item.receiverCompanyName">{{ item.receiverCompanyName }}</span>
+                    <span
+                      v-if="item.receiverCompanyName && item.receiverTitle"
+                      class="convpage__receiver-separator"
+                    > · </span>
+                    <span v-if="item.receiverTitle">{{ item.receiverTitle }}</span>
                   </div>
                 </div>
                 <span class="convpage__time">{{ formatDateShort(item.lastMessageAt) }}</span>
@@ -1239,11 +1271,27 @@ const filteredRelatedContacts = computed(() => {
                         <UserIcon :size="24" />
                       </div>
                       <div class="convpage__receiver-meta">
-                        <h3 class="convpage__receiver-name">{{ contactName || "—" }}</h3>
+                        <h3 class="convpage__receiver-name">
+                          <router-link
+                            v-if="dialogueContactId"
+                            :to="`/contact/${dialogueContactId}`"
+                            class="convpage__title-link"
+                          >{{ contactName || "—" }}</router-link>
+                          <span v-else>{{ contactName || "—" }}</span>
+                        </h3>
                         <p v-if="contactPosition" class="convpage__receiver-pos">{{ contactPosition }}</p>
-                        <NTag v-if="contactCompanyName || contactCompanyId" type="error" size="small">
-                          <BuildingIcon :size="12" style="margin-right:4px;vertical-align:middle" />{{
-                          contactCompanyName || contactCompanyId }}
+                        <router-link
+                          v-if="contactCompanyId"
+                          :to="`/company/${contactCompanyId}`"
+                          class="convpage__tag-link"
+                        >
+                          <NTag type="error" size="small">
+                            <BuildingIcon :size="12" style="margin-right:4px;vertical-align:middle" />{{
+                            contactCompanyName || contactCompanyId }}
+                          </NTag>
+                        </router-link>
+                        <NTag v-else-if="contactCompanyName" type="error" size="small">
+                          <BuildingIcon :size="12" style="margin-right:4px;vertical-align:middle" />{{ contactCompanyName }}
                         </NTag>
                         <NButton
                           v-if="!contactCompanyId && dialogueContactId"
@@ -1345,7 +1393,10 @@ const filteredRelatedContacts = computed(() => {
                   <div v-else class="convpage__related-list">
                     <div v-for="c in filteredRelatedContacts" :key="c.uuid" class="convpage__related-item">
                       <div class="convpage__related-info">
-                        <span class="convpage__related-name">{{ contactDisplayName(c) }}</span>
+                        <router-link
+                          :to="`/contact/${c.uuid}`"
+                          class="convpage__related-name convpage__inline-link"
+                        >{{ contactDisplayName(c) }}</router-link>
                         <span v-if="c.position" class="convpage__related-pos">{{ c.position }}</span>
                       </div>
                       <NTooltip v-if="c.conversations.length > 0" placement="left">
@@ -1597,6 +1648,28 @@ const filteredRelatedContacts = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.convpage__inline-link,
+.convpage__title-link,
+.convpage__tag-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.convpage__inline-link:hover,
+.convpage__title-link:hover {
+  color: #63e6be;
+  text-decoration: underline;
+}
+
+.convpage__tag-link {
+  display: inline-flex;
+  width: fit-content;
+}
+
+.convpage__receiver-separator {
+  opacity: 0.8;
 }
 
 .convpage__time {

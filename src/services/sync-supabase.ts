@@ -302,7 +302,7 @@ export function mapContactForSupabase(row: Record<string, unknown>): Record<stri
  * Map message row for LinkedinMessages: ensure uuid (use id if API sends id not uuid), whitelist
  * columns, omit generated_message_id/reply_received unless API sends them.
  */
-function mapMessageForSupabase(row: Record<string, unknown>): Record<string, unknown> {
+export function mapMessageForSupabase(row: Record<string, unknown>): Record<string, unknown> {
   const base = { ...row };
   if (base.uuid == null && base.id != null) {
     base.uuid = base.id;

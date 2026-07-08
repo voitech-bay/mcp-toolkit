@@ -30,6 +30,7 @@ const selectedProject = computed(() => projectStore.selectedProject);
 
 const credBaseUrl = ref(projectStore.selectedProject?.source_api_base_url ?? "");
 const credApiKey = ref("");
+const credTeamId = ref("");
 const showApiKey = ref(false);
 const savingCreds = ref(false);
 const testingSourceApi = ref(false);
@@ -368,9 +369,11 @@ async function loadCredentialsMeta() {
     const data = await r.json();
     if (!r.ok) throw new Error(data.error ?? "Failed to load credential metadata");
     credBaseUrl.value = data.source_api_base_url ?? "";
+    credTeamId.value = data.team_id ?? "";
   } catch (e) {
     console.error("[sync-page] load credential metadata:", e instanceof Error ? e.message : e);
     credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
+    credTeamId.value = "";
   }
 }
 
@@ -378,13 +381,15 @@ async function testSourceApiConnection() {
   if (!selectedProjectId.value) return;
   testingSourceApi.value = true;
   try {
-    const body: { projectId: string; baseUrl?: string; apiKey?: string } = {
+    const body: { projectId: string; baseUrl?: string; apiKey?: string; teamId?: string } = {
       projectId: selectedProjectId.value,
     };
     const bu = credBaseUrl.value.trim();
     if (bu) body.baseUrl = bu;
     const ak = credApiKey.value.trim();
     if (ak) body.apiKey = ak;
+    const teamId = credTeamId.value.trim();
+    if (teamId) body.teamId = teamId;
     const r = await fetch("/api/source-api-check", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -409,9 +414,10 @@ async function saveCredentials() {
   if (!selectedProjectId.value) return;
   savingCreds.value = true;
   try {
-    const body: { apiKey?: string; baseUrl?: string } = {};
+    const body: { apiKey?: string; baseUrl?: string; teamId?: string | null } = {};
     if (credApiKey.value.trim()) body.apiKey = credApiKey.value.trim();
     if (credBaseUrl.value !== undefined) body.baseUrl = credBaseUrl.value.trim() || undefined;
+    body.teamId = credTeamId.value.trim() || null;
     const r = await fetch(`/api/projects/${selectedProjectId.value}/credentials`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -686,6 +692,7 @@ watch(selectedProjectId, async (id) => {
   if (!id) return;
   credBaseUrl.value = projectStore.selectedProject?.source_api_base_url ?? "";
   credApiKey.value = "";
+  credTeamId.value = "";
   await Promise.all([loadCredentialsMeta(), loadPreflight(), loadHistory(), loadAnalyticsCollectedDays()]);
 });
 
@@ -881,11 +888,19 @@ const preflightRows = computed(() => {
               </template>
             </NInput>
           </div>
+          <div class="form-row">
+            <label class="form-label">Team ID</label>
+            <NInput
+              v-model:value="credTeamId"
+              placeholder="GetSales team id"
+              clearable
+            />
+          </div>
           <div class="credentials-actions">
             <NButton
               type="primary"
               :loading="savingCreds"
-              :disabled="!credApiKey.trim() && !credBaseUrl.trim()"
+              :disabled="!credApiKey.trim() && !credBaseUrl.trim() && !credTeamId.trim()"
               @click="saveCredentials"
             >
               Save Credentials

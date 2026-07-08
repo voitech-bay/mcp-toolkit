@@ -17,9 +17,9 @@ function decodeMasterKey(raw: string): Buffer {
 }
 
 function getMasterKey(): Buffer {
-  const raw = process.env.INTEGRATION_SECRETS_MASTER_KEY;
+  const raw = process.env.INTEGRATION_SECRETS_MASTER_KEY ?? process.env.ENCRYPTION_SECRET;
   if (!raw) {
-    throw new Error("INTEGRATION_SECRETS_MASTER_KEY is required for encrypted integration secrets");
+    throw new Error("INTEGRATION_SECRETS_MASTER_KEY or ENCRYPTION_SECRET is required for encrypted integration secrets");
   }
   return decodeMasterKey(raw);
 }

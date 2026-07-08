@@ -172,7 +172,7 @@ const pipelineMenuOptions: DropdownOption[] = [
     icon: () => h(RefreshCwIcon, { size: 14 }),
   },
   {
-    label: "Feasible launch",
+    label: "Launch",
     key: "/n8n/launch",
     icon: () => h(RocketIcon, { size: 14 }),
   },

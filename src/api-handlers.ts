@@ -134,8 +134,14 @@ import {
   fetchContactsByUuidsConcurrent,
   fetchLeadUuidsByListUuid,
   verifyGetSalesCredentials,
+  type ApiCredentials,
 } from "./services/source-api.js";
 import { syncPipedriveDeals } from "./services/pipedrive-deals-sync.js";
+import {
+  extractWebhookLeadUuid,
+  isGetSalesWebhookSecretValid,
+  refreshGetSalesConversation,
+} from "./services/getsales-conversation-sync.js";
 import {
   listOpenRouterModels,
   generateOpenRouterMessage,
@@ -1022,6 +1028,73 @@ export async function handleConversation(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ contact: result.contact ?? null, messages: result.messages }));
+}
+
+export async function handleRefreshGetSalesConversation(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { projectId?: string; leadUuid?: string } | undefined;
+  const projectId = body?.projectId?.trim();
+  const leadUuid = body?.leadUuid?.trim();
+  if (!projectId || !leadUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Body must include projectId and leadUuid" }));
+    return;
+  }
+  const result = await refreshGetSalesConversation(client, projectId, leadUuid);
+  res.writeHead(result.error ? 502 : 200);
+  res.end(JSON.stringify(result));
+}
+
+export async function handleGetSalesWebhook(
+  req: IncomingMessage,
+  res: ServerResponse,
+  projectId: string
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const token = req.headers["x-getsales-webhook-secret"];
+  const queryToken = getQueryParams(req).get("token") ?? undefined;
+  const received = typeof token === "string" ? token : queryToken;
+  if (!isGetSalesWebhookSecretValid(received)) {
+    res.writeHead(401);
+    res.end(JSON.stringify({ error: "Invalid webhook secret" }));
+    return;
+  }
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as Record<string, unknown> | undefined;
+  const leadUuid = body && typeof body === "object" ? extractWebhookLeadUuid(body) : null;
+  if (!leadUuid) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Webhook payload does not include a lead UUID" }));
+    return;
+  }
+  const result = await refreshGetSalesConversation(client, projectId, leadUuid);
+  if (result.error) console.error(`[getsales-webhook] project=${projectId} lead=${leadUuid}: ${result.error}`);
+  res.writeHead(result.error ? 502 : 200);
+  res.end(JSON.stringify({ ok: !result.error, leadUuid, fetched: result.fetched, upserted: result.upserted, error: result.error }));
 }
 
 const ALLOWED_GENERATION_TONES = new Set<GenerationTone>([
@@ -2151,6 +2224,7 @@ export async function handleUpdateProjectCredentials(
   const body = (await getParsedBody(req)) as {
     apiKey?: string | null;
     baseUrl?: string | null;
+    teamId?: string | null;
   } | undefined;
   if (!body) {
     res.writeHead(400);
@@ -2160,6 +2234,7 @@ export async function handleUpdateProjectCredentials(
   const result = await updateProjectCredentials(client, projectId, {
     apiKey: body.apiKey,
     baseUrl: body.baseUrl,
+    teamId: body.teamId,
   });
   if (result.error) {
     res.writeHead(500);
@@ -2260,6 +2335,8 @@ export async function handleUpdateProjectIntegrationSecret(
         apiBaseUrl?: string | null;
         apiKey?: string | null;
         baseUrl?: string | null;
+        teamId?: string | null;
+        team_id?: string | null;
       }
     | undefined;
   if (!body) {
@@ -2277,6 +2354,7 @@ export async function handleUpdateProjectIntegrationSecret(
     const result = await updateProjectCredentials(client, projectId, {
       apiKey: body.apiKey ?? body.apiToken,
       baseUrl: body.baseUrl ?? body.apiBaseUrl,
+      teamId: body.teamId ?? body.team_id,
     });
     if (result.error) {
       res.writeHead(500);
@@ -2431,7 +2509,7 @@ export async function handleSourceApiCheck(
     res.end(JSON.stringify({ error: "JSON body required" }));
     return;
   }
-  const b = body as { projectId?: string; baseUrl?: string; apiKey?: string };
+  const b = body as { projectId?: string; baseUrl?: string; apiKey?: string; teamId?: string };
   const projectId = b.projectId;
   if (!projectId) {
     res.writeHead(400);
@@ -2456,6 +2534,7 @@ export async function handleSourceApiCheck(
       ""
     ) ?? "";
   const apiKey = (b.apiKey?.trim() || savedCredentials.credentials?.apiKey || process.env.SOURCE_API_KEY) ?? "";
+  const teamId = b.teamId?.trim() || savedCredentials.credentials?.teamId || process.env.SOURCE_TEAM_ID?.trim();
   if (!baseUrl || !apiKey) {
     res.writeHead(400);
     res.end(
@@ -2465,7 +2544,7 @@ export async function handleSourceApiCheck(
     );
     return;
   }
-  const result = await verifyGetSalesCredentials({ baseUrl, apiKey });
+  const result = await verifyGetSalesCredentials({ baseUrl, apiKey, ...(teamId ? { teamId } : {}) });
   res.writeHead(200);
   res.end(JSON.stringify(result));
 }
@@ -2513,9 +2592,10 @@ export async function handleSyncPreflight(
   }
   const baseUrl = credentialsResult.credentials?.baseUrl ?? "";
   const apiKey = credentialsResult.credentials?.apiKey ?? "";
+  const teamId = credentialsResult.credentials?.teamId;
   let sourceApiCheck: { ok: boolean; error?: string };
   if (baseUrl && apiKey) {
-    const v = await verifyGetSalesCredentials({ baseUrl, apiKey });
+    const v = await verifyGetSalesCredentials({ baseUrl, apiKey, ...(teamId ? { teamId } : {}) });
     sourceApiCheck = v.ok ? { ok: true } : { ok: false, error: v.error };
   } else {
     sourceApiCheck = {
@@ -3410,7 +3490,7 @@ async function loadCompaniesForHydration(
 
 export async function hydrateContactsGsByListData(
   listUuid: string,
-  credentials: { baseUrl: string; apiKey: string },
+  credentials: ApiCredentials,
   loadCompanies: (companyIds: string[]) => Promise<{ map: Map<string, HydratedCompanyRow>; error: string | null }>,
   deps: {
     fetchContactsByListUuidFn?: FetchContactsByListUuidFn;
@@ -3436,7 +3516,7 @@ export async function hydrateContactsGsByListData(
  */
 export async function hydrateContactRows(
   rows: Array<Record<string, unknown>>,
-  credentials: { baseUrl: string; apiKey: string },
+  credentials: ApiCredentials,
   loadCompanies: (companyIds: string[]) => Promise<{ map: Map<string, HydratedCompanyRow>; error: string | null }>,
   deps: {
     fetchCompaniesByUuidsGroupedFn?: FetchCompaniesByUuidsGroupedFn;
@@ -4107,16 +4187,15 @@ export async function handlePostN8nWorkflowResults(
           message: `GetSales credentials: ${credentialsResult.error}`,
         });
       } else {
-        const baseUrl = credentialsResult.credentials?.baseUrl ?? "";
-        const apiKey = credentialsResult.credentials?.apiKey ?? "";
-        if (!baseUrl || !apiKey) {
+        const credentials = credentialsResult.credentials;
+        if (!credentials?.baseUrl || !credentials?.apiKey) {
           errors.push({
             index: firstIndexByLead.get(missingForGs[0]) ?? 0,
             message: "GetSales credentials missing on project and environment.",
           });
         } else {
           const { rows: gsRows, missing: gsMissing, errors: gsErrors } =
-            await fetchContactsByUuidsConcurrent({ baseUrl, apiKey }, missingForGs, {
+            await fetchContactsByUuidsConcurrent(credentials, missingForGs, {
               concurrency: 5,
             });
           for (const ge of gsErrors) {
@@ -4529,9 +4608,8 @@ export async function handlePostFindContactByUuid(
     res.end(JSON.stringify({ error: credentialsResult.error }));
     return;
   }
-  const baseUrl = credentialsResult.credentials?.baseUrl ?? "";
-  const apiKey = credentialsResult.credentials?.apiKey ?? "";
-  if (!baseUrl || !apiKey) {
+  const credentials = credentialsResult.credentials;
+  if (!credentials?.baseUrl || !credentials?.apiKey) {
     res.writeHead(400);
     res.end(
       JSON.stringify({
@@ -4542,7 +4620,7 @@ export async function handlePostFindContactByUuid(
   }
   let fetched: Record<string, unknown> | null = null;
   try {
-    fetched = await fetchContactByUuid({ baseUrl, apiKey }, leadUuid);
+    fetched = await fetchContactByUuid(credentials, leadUuid);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     res.writeHead(502);

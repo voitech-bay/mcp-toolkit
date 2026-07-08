@@ -248,30 +248,32 @@ export async function getGetSalesCredentials(
 export async function getGetSalesCredentialsMeta(
   client: SupabaseClient,
   projectId: string
-): Promise<{ data: { api_key_set: boolean; source_api_base_url: string | null }; error: string | null }> {
+): Promise<{ data: { api_key_set: boolean; source_api_base_url: string | null; team_id: string | null }; error: string | null }> {
   const { data: secret, error: secretError } = await getDecryptedIntegrationSecret(
     client,
     projectId,
     "getsales"
   );
-  if (secretError) return { data: { api_key_set: false, source_api_base_url: null }, error: secretError };
+  if (secretError) return { data: { api_key_set: false, source_api_base_url: null, team_id: null }, error: secretError };
   const secretBaseUrl = pickSecretString(secret, "base_url", "baseUrl");
   const secretApiKey = pickSecretString(secret, "api_key", "apiKey");
+  const secretTeamId = pickSecretString(secret, "team_id", "teamId");
   if (secretBaseUrl || secretApiKey) {
     return {
       data: {
         api_key_set: Boolean(secretApiKey),
         source_api_base_url: secretBaseUrl ?? null,
+        team_id: secretTeamId ?? null,
       },
       error: null,
     };
   }
 
   const { data: project, error: projectError } = await getProjectById(client, projectId);
-  if (projectError) return { data: { api_key_set: false, source_api_base_url: null }, error: projectError };
+  if (projectError) return { data: { api_key_set: false, source_api_base_url: null, team_id: null }, error: projectError };
   if (!project) {
     return {
-      data: { api_key_set: false, source_api_base_url: null },
+      data: { api_key_set: false, source_api_base_url: null, team_id: null },
       error: `Project not found: ${projectId}`,
     };
   }
@@ -279,6 +281,7 @@ export async function getGetSalesCredentialsMeta(
     data: {
       api_key_set: Boolean(project.source_api_key),
       source_api_base_url: project.source_api_base_url ?? null,
+      team_id: process.env.SOURCE_TEAM_ID?.trim() || null,
     },
     error: null,
   };
@@ -290,7 +293,7 @@ export async function getGetSalesCredentialsMeta(
 export async function updateProjectCredentials(
   client: SupabaseClient,
   id: string,
-  credentials: { apiKey?: string | null; baseUrl?: string | null }
+  credentials: { apiKey?: string | null; baseUrl?: string | null; teamId?: string | null }
 ): Promise<{ error: string | null }> {
   const { data: secret, error: secretError } = await getDecryptedIntegrationSecret(client, id, "getsales");
   if (secretError) return { error: secretError };
@@ -302,6 +305,8 @@ export async function updateProjectCredentials(
     pickSecretString(secret, "api_key", "apiKey") ?? project.source_api_key ?? null;
   const existingBaseUrl =
     pickSecretString(secret, "base_url", "baseUrl") ?? project.source_api_base_url ?? null;
+  const existingTeamId =
+    pickSecretString(secret, "team_id", "teamId") ?? process.env.SOURCE_TEAM_ID?.trim() ?? null;
   const apiKey =
     credentials.apiKey === undefined
       ? existingApiKey
@@ -314,12 +319,19 @@ export async function updateProjectCredentials(
       : credentials.baseUrl == null || credentials.baseUrl.trim() === ""
         ? null
         : credentials.baseUrl.trim().replace(/\/$/, "");
+  const teamId =
+    credentials.teamId === undefined
+      ? existingTeamId
+      : credentials.teamId == null || credentials.teamId.trim() === ""
+        ? null
+        : credentials.teamId.trim();
   if (!apiKey || !baseUrl) {
     return { error: "GetSales base URL and API key are required" };
   }
   return upsertProjectIntegrationSecret(client, id, "getsales", {
     api_key: apiKey,
     base_url: baseUrl,
+    ...(teamId ? { team_id: teamId } : {}),
   });
 }
 
