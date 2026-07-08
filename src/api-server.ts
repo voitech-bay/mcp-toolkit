@@ -24,6 +24,8 @@ import {
   handleAnalyticsSync,
   handleAnalyticsDayDelete,
   handleConversation,
+  handleRefreshGetSalesConversation,
+  handleGetSalesWebhook,
   handleGetCompanyContext,
   handleSetCompanyContext,
   handleGetCompanyContextCounts,
@@ -136,6 +138,8 @@ import {
   handleN8nLaunch,
   handleN8nLaunchStatus,
   handleN8nLaunchHistory,
+  handleVelvetechDrafts,
+  handleVelvetechDraftApprove,
 } from "./launcher-handlers.js";
 import { handleLeadViewsItems, handleLeadViewsDecide } from "./lead-views-handlers.js";
 import { handleMessageLog } from "./message-log-handlers.js";
@@ -147,6 +151,7 @@ import {
 import { attachEnrichmentTableSocket } from "./services/enrichment-realtime.js";
 import { createMcpHandler } from "./server.js";
 import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
+import { startScheduledGetSalesSync } from "./services/getsales-sync-scheduler.js";
 import {
   handleCreateOutreachRun,
   handleListOutreachRuns,
@@ -348,6 +353,7 @@ const server = createServer(async (req, res) => {
   );
   const difyWorkflowRunsMatch = pathname.match(/^\/api\/dify\/workflows\/([^/]+)\/runs$/);
   const n8nLaunchStatusMatch = pathname.match(/^\/api\/n8n\/launch\/([^/]+)\/status$/);
+  const getSalesWebhookMatch = pathname.match(/^\/api\/webhooks\/getsales\/([^/]+)$/);
   const outreachRunPovMatch = pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)\/pov$/);
   const outreachRunVariantsMatch = pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)\/variants$/);
   const outreachRunMatch = !outreachRunPovMatch && !outreachRunVariantsMatch && pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)$/);
@@ -392,6 +398,11 @@ const server = createServer(async (req, res) => {
     if (knowledgeMatch) { await handleKnowledge(req, res, knowledgeMatch[1]); return; }
     if (pathname.startsWith("/mcp")) {
       await mcpHandler(req, res);
+      return;
+    }
+
+    if (getSalesWebhookMatch) {
+      await handleGetSalesWebhook(req, res, decodeURIComponent(getSalesWebhookMatch[1]));
       return;
     }
 
@@ -659,6 +670,9 @@ const server = createServer(async (req, res) => {
       case "/api/webhooks/fireflies":
         await handleFirefliesWebhook(req, res);
         return;
+      case "/api/conversations/refresh":
+        await handleRefreshGetSalesConversation(req, res);
+        return;
       case "/api/supabase-table-query":
         await handleSupabaseTableQuery(req, res);
         return;
@@ -836,6 +850,12 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/n8n/launch/history":
         await handleN8nLaunchHistory(req, res);
+        return;
+      case "/api/n8n/velvetech/drafts":
+        await handleVelvetechDrafts(req, res);
+        return;
+      case "/api/n8n/velvetech/drafts/approve":
+        await handleVelvetechDraftApprove(req, res);
         return;
       case "/api/lead-views/items":
         await handleLeadViewsItems(req, res);
@@ -1279,4 +1299,5 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  WS   /api/sync-ws?runId=<id>");
   console.log("  WS   /api/workers-ws?role=worker|subscribe");
   console.log("  WS   /api/enrichment-ws?projectId=<id>");
+  startScheduledGetSalesSync();
 });

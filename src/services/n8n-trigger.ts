@@ -14,6 +14,9 @@ const N8N_BASE = (process.env.N8N_BASE_URL?.trim() || "https://primary-productio
   ""
 );
 export const FEASIBLE_PROJECT_ID = "94dc3b92-1cae-4360-a958-917a58063309";
+export const VELVETECH_PROJECT_ID = "51cc22a1-868e-42c4-974f-9a7c5f5dce20";
+
+export type WorkflowLaunchAdapter = "feasible_list" | "velvetech_research" | "velvetech_reply";
 
 export interface WorkflowRegistryEntry {
   /** Stable key used in API bodies and the launch record. */
@@ -25,6 +28,7 @@ export interface WorkflowRegistryEntry {
   /** n8n workflow id (for optional executions enrichment). */
   workflowId: string;
   project: string;
+  adapter: WorkflowLaunchAdapter;
 }
 
 /**
@@ -38,6 +42,23 @@ export const WORKFLOW_REGISTRY: WorkflowRegistryEntry[] = [
     webhookUrlEnv: "N8N_FEASIBLE_DIRECT_POV_WEBHOOK_URL",
     workflowId: "PqAsnwNHiezGsMTw",
     project: FEASIBLE_PROJECT_ID,
+    adapter: "feasible_list",
+  },
+  {
+    key: "velvetech_research",
+    label: "Velvetech — Research pipeline",
+    webhookUrlEnv: "N8N_VELVETECH_RESEARCH_WEBHOOK_URL",
+    workflowId: "l9pGpKlzrQuCj4Yn",
+    project: VELVETECH_PROJECT_ID,
+    adapter: "velvetech_research",
+  },
+  {
+    key: "velvetech_reply",
+    label: "Velvetech — Draft reply",
+    webhookUrlEnv: "N8N_VELVETECH_REPLY_WEBHOOK_URL",
+    workflowId: "bMc92zIIWe0wGAbE",
+    project: VELVETECH_PROJECT_ID,
+    adapter: "velvetech_reply",
   },
 ];
 
@@ -99,10 +120,39 @@ export async function triggerWorkflowByUuids(
   }
 }
 
-function resolveWebhookUrl(wf: WorkflowRegistryEntry): string {
+export async function triggerWorkflowPayload(
+  key: string,
+  payload: Record<string, unknown>
+): Promise<TriggerResult> {
+  const wf = findWorkflow(key);
+  if (!wf) return { ok: false, status: 400, error: `Unknown workflow: ${key}` };
+  const webhook = resolveWebhookUrl(wf);
+  if (!webhook) {
+    return { ok: false, status: 500, error: `${wf.webhookUrlEnv} not configured` };
+  }
+
+  try {
+    const r = await fetch(webhook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      return { ok: false, status: 502, error: `n8n webhook ${r.status}: ${text.slice(0, 300)}` };
+    }
+    return { ok: true, status: 200 };
+  } catch (e) {
+    return { ok: false, status: 502, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+export function resolveWebhookUrl(wf: WorkflowRegistryEntry): string {
   const configured = process.env[wf.webhookUrlEnv]?.trim();
   if (configured) return configured;
   if (wf.key === "feasible_direct_pov") return `${N8N_BASE}/webhook/feasible-pipeline-trigger`;
+  if (wf.key === "velvetech_research") return `${N8N_BASE}/webhook/velvetech-research-trigger`;
+  if (wf.key === "velvetech_reply") return `${N8N_BASE}/webhook/velvetech-reply-trigger`;
   return "";
 }
 

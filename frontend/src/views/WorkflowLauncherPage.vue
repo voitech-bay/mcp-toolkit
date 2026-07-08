@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, h } from "vue";
+import { ref, computed, onMounted, onUnmounted, h, watch } from "vue";
 import { useRouter } from "vue-router";
 import {
   NCard,
@@ -11,6 +11,8 @@ import {
   NAlert,
   NText,
   NEmpty,
+  NModal,
+  NInput,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, SelectOption } from "naive-ui";
@@ -21,6 +23,7 @@ interface WorkflowOption {
   key: string;
   label: string;
   project: string;
+  adapter: string;
   configured: boolean;
 }
 
@@ -48,14 +51,27 @@ interface LaunchRun {
   finished_at: string | null;
 }
 
+interface DraftRow {
+  id: string;
+  contact_id: string;
+  company_id: string | null;
+  contact_name: string;
+  company_name: string;
+  execution_id: string;
+  status: string;
+  sends: string[];
+  copy_ok: boolean;
+  copy_violations: string[];
+  sender_profile_uuid: string;
+  created_at: string;
+}
+
 const router = useRouter();
 const message = useMessage();
 const projectStore = useProjectStore();
 
-const FEASIBLE_PROJECT_ID = "94dc3b92-1cae-4360-a958-917a58063309";
-const projectId = computed(() =>
-  projectStore.selectedProjectId === FEASIBLE_PROJECT_ID ? FEASIBLE_PROJECT_ID : null
-);
+const VELVETECH_PROJECT_ID = "51cc22a1-868e-42c4-974f-9a7c5f5dce20";
+const projectId = computed(() => projectStore.selectedProjectId);
 
 const workflows = ref<WorkflowOption[]>([]);
 const selectedWorkflow = ref<string | null>(null);
@@ -66,6 +82,7 @@ const selectedList = ref<string | null>(null);
 const contacts = ref<ContactRow[]>([]);
 const contactsLoading = ref(false);
 const contactsError = ref("");
+const checkedContactKeys = ref<string[]>([]);
 
 const launching = ref(false);
 const currentRun = ref<LaunchRun | null>(null);
@@ -73,6 +90,9 @@ let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const history = ref<LaunchRun[]>([]);
 const historyLoading = ref(false);
+const drafts = ref<DraftRow[]>([]);
+const draftsLoading = ref(false);
+const approvingDraftId = ref<string | null>(null);
 
 const workflowOptions = computed<SelectOption[]>(() =>
   workflows.value.map((w) => ({
@@ -88,6 +108,18 @@ const listOptions = computed<SelectOption[]>(() =>
 
 const workflowLabel = (key: string): string =>
   workflows.value.find((w) => w.key === key)?.label ?? key;
+
+const selectedWorkflowOption = computed(() =>
+  workflows.value.find((w) => w.key === selectedWorkflow.value) ?? null
+);
+const isVelvetechProject = computed(() => projectId.value === VELVETECH_PROJECT_ID);
+const selectedCount = computed(() => checkedContactKeys.value.length || contacts.value.length);
+const launchButtonText = computed(() => {
+  const adapter = selectedWorkflowOption.value?.adapter;
+  if (adapter === "velvetech_reply") return `Draft replies for ${selectedCount.value}`;
+  if (adapter === "velvetech_research") return `Launch research for ${selectedCount.value}`;
+  return `Launch workflow for ${selectedCount.value}`;
+});
 
 function statusType(status: string): "default" | "info" | "success" | "warning" | "error" {
   switch (status) {
@@ -105,13 +137,21 @@ function statusType(status: string): "default" | "info" | "success" | "warning" 
 }
 
 async function loadWorkflows(): Promise<void> {
+  if (!projectId.value) {
+    workflows.value = [];
+    selectedWorkflow.value = null;
+    return;
+  }
   try {
-    const r = await fetch("/api/n8n/workflows");
+    const r = await fetch(`/api/n8n/workflows?projectId=${encodeURIComponent(projectId.value)}`);
     const data = (await r.json()) as { items?: WorkflowOption[]; error?: string };
     if (!r.ok) throw new Error(data.error ?? "Failed to load workflows");
     workflows.value = data.items ?? [];
-    const firstConfigured = workflows.value.find((w) => w.configured);
-    if (firstConfigured && !selectedWorkflow.value) selectedWorkflow.value = firstConfigured.key;
+    const currentStillAvailable = workflows.value.some((w) => w.key === selectedWorkflow.value);
+    if (!currentStillAvailable) {
+      const firstConfigured = workflows.value.find((w) => w.configured);
+      selectedWorkflow.value = firstConfigured?.key ?? null;
+    }
   } catch (e) {
     message.error(e instanceof Error ? e.message : "Failed to load workflows");
   }
@@ -131,6 +171,7 @@ async function loadLists(): Promise<void> {
 
 async function loadContacts(): Promise<void> {
   contacts.value = [];
+  checkedContactKeys.value = [];
   contactsError.value = "";
   if (!projectId.value || !selectedList.value) return;
   contactsLoading.value = true;
@@ -162,6 +203,22 @@ async function loadContacts(): Promise<void> {
   }
 }
 
+async function loadDrafts(): Promise<void> {
+  drafts.value = [];
+  if (!projectId.value || !isVelvetechProject.value) return;
+  draftsLoading.value = true;
+  try {
+    const r = await fetch(`/api/n8n/velvetech/drafts?projectId=${encodeURIComponent(projectId.value)}`);
+    const data = (await r.json()) as { rows?: DraftRow[]; error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed to load drafts");
+    drafts.value = data.rows ?? [];
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to load drafts");
+  } finally {
+    draftsLoading.value = false;
+  }
+}
+
 
 async function launch(): Promise<void> {
   if (!projectId.value) {
@@ -176,7 +233,10 @@ async function launch(): Promise<void> {
     message.warning("Select a GetSales list");
     return;
   }
-  const leadUuids = contacts.value.map((c) => c.uuid).filter(Boolean);
+  const picked = checkedContactKeys.value.length
+    ? contacts.value.filter((c) => checkedContactKeys.value.includes(c.uuid))
+    : contacts.value;
+  const leadUuids = picked.map((c) => c.uuid).filter(Boolean);
   if (leadUuids.length === 0) {
     message.warning("The selected list has no contacts to launch");
     return;
@@ -195,9 +255,10 @@ async function launch(): Promise<void> {
     });
     const data = (await r.json()) as { launchId?: string; error?: string };
     if (!r.ok || !data.launchId) throw new Error(data.error ?? "Launch failed");
-    message.success(`Launched Feasible workflow for ${leadUuids.length} contact(s)`);
+    message.success(`Launched ${workflowLabel(selectedWorkflow.value)} for ${leadUuids.length} contact(s)`);
+    checkedContactKeys.value = [];
     startPolling(data.launchId);
-    void loadHistory();
+    void Promise.all([loadHistory(), loadDrafts()]);
   } catch (e) {
     message.error(e instanceof Error ? e.message : "Launch failed");
   } finally {
@@ -248,6 +309,56 @@ async function loadHistory(): Promise<void> {
   }
 }
 
+async function approveDraft(row: DraftRow, editedSends?: string[]): Promise<void> {
+  if (!projectId.value) return;
+  approvingDraftId.value = row.id;
+  try {
+    const body: Record<string, unknown> = { projectId: projectId.value, draftId: row.id };
+    if (editedSends && editedSends.length > 0) body.sends = editedSends;
+    const r = await fetch("/api/n8n/velvetech/drafts/approve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = (await r.json()) as { ok?: boolean; error?: string };
+    if (!r.ok || !data.ok) throw new Error(data.error ?? "Approval failed");
+    message.success("Sent LinkedIn messages");
+    editingDraft.value = null;
+    void loadDrafts();
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Approval failed");
+  } finally {
+    approvingDraftId.value = null;
+  }
+}
+
+const editingDraft = ref<DraftRow | null>(null);
+const editText = ref("");
+
+function openDraftEditor(row: DraftRow): void {
+  editingDraft.value = row;
+  editText.value = row.sends.join("\n\n");
+}
+
+/** Blank line separates the individual LinkedIn sends in the editor. */
+function editedSendsFromText(): string[] {
+  return editText.value
+    .split(/\n\s*\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+async function approveEditedDraft(): Promise<void> {
+  const row = editingDraft.value;
+  if (!row) return;
+  const sends = editedSendsFromText();
+  if (sends.length === 0) {
+    message.error("Draft is empty");
+    return;
+  }
+  await approveDraft(row, sends);
+}
+
 function viewResults(launchId: string): void {
   const filters = encodeURIComponent(
     JSON.stringify([{ field: "result_text", op: "like", value: launchId }])
@@ -256,6 +367,7 @@ function viewResults(launchId: string): void {
 }
 
 const contactColumns = computed<DataTableColumns<ContactRow>>(() => [
+  { type: "selection", width: 42 },
   { title: "Name", key: "name", minWidth: 160, ellipsis: { tooltip: true } },
   { title: "Position", key: "position", minWidth: 180, ellipsis: { tooltip: true } },
   { title: "Company", key: "company_name", minWidth: 160, ellipsis: { tooltip: true } },
@@ -271,6 +383,58 @@ const contactColumns = computed<DataTableColumns<ContactRow>>(() => [
         "profile"
       );
     },
+  },
+]);
+
+const draftColumns = computed<DataTableColumns<DraftRow>>(() => [
+  {
+    title: "When",
+    key: "created_at",
+    width: 160,
+    render: (r) => new Date(r.created_at).toLocaleString(),
+  },
+  { title: "Contact", key: "contact_name", minWidth: 150, ellipsis: { tooltip: true } },
+  { title: "Company", key: "company_name", minWidth: 160, ellipsis: { tooltip: true } },
+  {
+    title: "Status",
+    key: "status",
+    width: 128,
+    render: (r) => h(NTag, { size: "small", type: r.status === "sent" ? "success" : r.status === "needs_human" ? "warning" : "info" }, { default: () => r.status }),
+  },
+  {
+    title: "Draft",
+    key: "sends",
+    minWidth: 360,
+    render: (r) => h("div", { style: "white-space:pre-wrap;line-height:1.35" }, r.sends.join("\n\n")),
+  },
+  {
+    title: "Issues",
+    key: "copy_violations",
+    width: 180,
+    render: (r) => r.copy_violations.length ? r.copy_violations.join(", ") : "—",
+  },
+  {
+    title: "Actions",
+    key: "actions",
+    width: 150,
+    fixed: "right",
+    render: (r) => h(NSpace, { size: 4 }, {
+      default: () => [
+        h(NButton, { size: "tiny", quaternary: true, onClick: () => viewResults(r.execution_id) }, { default: () => "View" }),
+        h(NButton, {
+          size: "tiny",
+          disabled: (r.status !== "pending_approval" && r.status !== "needs_human") || !r.sender_profile_uuid,
+          onClick: () => openDraftEditor(r),
+        }, { default: () => "Edit" }),
+        h(NButton, {
+          size: "tiny",
+          type: "primary",
+          disabled: r.status !== "pending_approval" || !r.sender_profile_uuid,
+          loading: approvingDraftId.value === r.id,
+          onClick: () => approveDraft(r),
+        }, { default: () => "Approve" }),
+      ],
+    }),
   },
 ]);
 
@@ -321,12 +485,18 @@ const historyColumns = computed<DataTableColumns<LaunchRun>>(() => [
 
 onMounted(async () => {
   if (projectStore.projects.length === 0) await projectStore.loadProjects();
-  if (projectStore.selectedProjectId !== FEASIBLE_PROJECT_ID) {
-    projectStore.selectProject(FEASIBLE_PROJECT_ID);
-  }
-  await Promise.all([loadWorkflows(), loadLists(), loadHistory()]);
+  await Promise.all([loadWorkflows(), loadLists(), loadHistory(), loadDrafts()]);
 });
 onUnmounted(stopPolling);
+
+watch(projectId, async () => {
+  selectedWorkflow.value = null;
+  selectedList.value = null;
+  contacts.value = [];
+  checkedContactKeys.value = [];
+  currentRun.value = null;
+  await Promise.all([loadWorkflows(), loadLists(), loadHistory(), loadDrafts()]);
+});
 </script>
 
 <template>
@@ -335,12 +505,12 @@ onUnmounted(stopPolling);
       <template #header>
         <NSpace align="center" size="small">
           <RocketIcon :size="18" />
-          <span>Feasible workflow launch</span>
+          <span>Workflow launch</span>
         </NSpace>
       </template>
 
       <NAlert v-if="!projectId" type="warning">
-        Select the Feasible project in the top bar to choose a GetSales list and launch.
+        Select a project in the top bar to choose a GetSales list and launch.
       </NAlert>
 
       <NSpace v-else vertical size="medium" style="width: 100%">
@@ -365,7 +535,7 @@ onUnmounted(stopPolling);
             :disabled="contacts.length === 0 || !selectedWorkflow || contactsLoading"
             @click="launch"
           >
-            Launch Feasible list
+            {{ launchButtonText }}
           </NButton>
         </NSpace>
 
@@ -373,21 +543,70 @@ onUnmounted(stopPolling);
 
         <template v-if="selectedList">
           <NSpace align="center" size="small">
-            <NText depth="3">{{ contacts.length }} contacts in this list</NText>
-          </NSpace>
+          <NText depth="3">{{ contacts.length }} contacts in this list</NText>
+          <NText depth="3">
+            {{ checkedContactKeys.length ? `${checkedContactKeys.length} selected` : "No selection means all contacts" }}
+          </NText>
+        </NSpace>
           <NDataTable
             :columns="contactColumns"
             :data="contacts"
             :loading="contactsLoading"
             :row-key="(row: ContactRow) => row.uuid"
+            v-model:checked-row-keys="checkedContactKeys"
             :max-height="420"
             size="small"
             striped
           />
         </template>
-        <NEmpty v-else description="Select a Feasible GetSales list to preview contacts" />
+        <NEmpty v-else description="Select a GetSales list to preview contacts" />
       </NSpace>
     </NCard>
+
+    <NCard v-if="isVelvetechProject" title="Velvetech reply drafts">
+      <NDataTable
+        :columns="draftColumns"
+        :data="drafts"
+        :loading="draftsLoading"
+        :row-key="(row: DraftRow) => row.id"
+        :max-height="420"
+        :scroll-x="1100"
+        size="small"
+        striped
+      />
+      <NEmpty v-if="!draftsLoading && drafts.length === 0" description="No Velvetech reply drafts yet" />
+    </NCard>
+
+    <NModal
+      :show="editingDraft !== null"
+      preset="card"
+      style="max-width: 640px"
+      :title="editingDraft ? `Edit draft — ${editingDraft.contact_name}` : ''"
+      @update:show="(v: boolean) => { if (!v) editingDraft = null; }"
+    >
+      <NSpace vertical size="medium">
+        <NAlert v-if="editingDraft && editingDraft.copy_violations.length" type="warning">
+          {{ editingDraft.copy_violations.join(", ") }}
+        </NAlert>
+        <NText depth="3">One LinkedIn message per block; separate messages with a blank line.</NText>
+        <NInput
+          v-model:value="editText"
+          type="textarea"
+          :autosize="{ minRows: 8, maxRows: 18 }"
+          placeholder="Message 1&#10;&#10;Message 2"
+        />
+        <NSpace justify="end">
+          <NButton @click="editingDraft = null">Cancel</NButton>
+          <NButton
+            type="primary"
+            :loading="editingDraft !== null && approvingDraftId === editingDraft.id"
+            @click="approveEditedDraft"
+          >
+            Approve &amp; send
+          </NButton>
+        </NSpace>
+      </NSpace>
+    </NModal>
 
     <NCard v-if="currentRun" title="Current run">
       <NSpace align="center" wrap size="medium">
