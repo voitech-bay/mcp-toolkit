@@ -65,6 +65,14 @@ const PRACTITIONER_BLOCK = `CANONICAL PRACTITIONER BLOCK (use near-verbatim when
 "Our approach is to combine data from external and internal scans, app findings and leak signals, then map how an attacker could realistically move through that environment toward critical assets. So yes, we do graph-style correlation, but we use context to decide if a path is actually meaningful: what's exposed publicly, how assets connect, how critical the target is, and whether the finding is exploitable in practice. The point is to focus on the few paths that are both realistic and high impact. We're also planning AI-driven active validation in the near future to tighten exploit proof on the paths we surface."
 AI-driven active validation is roadmap / near-term, never described as shipped.`;
 
+const DEMO_ASSETS = `DEMO NARRATIVE + SALES ASSETS (real talking points from live technical demos; use when relevant, never fabricate beyond these):
+- AI attacker hook: open-source AI attack agents (for example Cyberstrike, Strix) now let anyone clone a repo, point any LLM at an IP, domain or company, and prompt "hack this". They chain basic tools (nmap, RCE, network pivot) host by host toward the crown jewel. The shift is that attack capability is cheap and available to anyone.
+- Lab proof (frame as a lab demo, never a customer outcome): given one external IP, an open-source AI agent compromised a small three host lab to root in about one hour, fully automatic. Feasible scans the same environment from the defender side, with the credentials and time the attacker never has, and maps that same path first.
+- Verifiability angle: Feasible builds paths from trusted, verifiable scanner output (Tenable Nessus, Nuclei, Acunetix), not an unpredictable black box AI. Useful for CISO and GRC readers who need findings that survive audit and client reporting.
+- MSSP setup facts (use when a reader asks how it runs): default is SaaS cloud with nothing to install client side; each client gets an isolated tenant under the partner brand; internal scanning uses a light agent, either a VPN connector script or a local scanning VM; a user level account is enough, no root or admin; external scans need Feasible's IP whitelisted.
+- Live session offer (an available CTA for a warm reply where the reader asked for info, an overview, or how you help MSSPs): offer a live session covering (1) the AI attacker's view report, (2) how Feasible helps prevent the vulnerabilities that AI surfaces, and (3) a typical MSSP setup. A short numbered agenda for this specific session offer is allowed and is not treated as a rhetorical tricolon.
+- Known gaps, never claim as shipped: phishing and social engineering scenarios are a manual pentest service only; black box AI exploitation is a separate service, not the platform; AI driven active validation is roadmap. Never say "validated paths".`;
+
 const HARD_BANS = `HARD STYLE RULES (every message):
 - Aim for 30-40 words in the message body. Never exceed 70 words; 50-70 words is the absolute outer range, not the target.
 - Sound like the sender typed it quickly. Plain and a little clunky is good. Short fragments and uneven sentence rhythm are fine. Do not polish the transitions or make the copy feel composed.
@@ -136,6 +144,7 @@ export function buildFeasibleSystemPrompt(opts: FeasiblePromptOptions): string {
     CONVERSATION_LOGIC,
     FOUR_ANGLES,
     PRACTITIONER_BLOCK,
+    DEMO_ASSETS,
     HARD_BANS,
     CTA_SIG,
     channelGuide,
