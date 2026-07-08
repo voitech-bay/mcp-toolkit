@@ -67,6 +67,12 @@ const router = createRouter({
       meta: { title: "Message log | MCP Toolkit" },
     },
     {
+      path: "/email-studio",
+      name: "EmailStudio",
+      component: () => import("../views/EmailStudioPage.vue"),
+      meta: { title: "Email Studio | MCP Toolkit" },
+    },
+    {
       path: "/calls/cold-n8n",
       name: "ColdCallN8n",
       component: () => import("../views/ColdCallN8nPage.vue"),

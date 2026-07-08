@@ -1,0 +1,185 @@
+import type { IncomingMessage, ServerResponse } from "node:http";
+import { getSupabase } from "./services/supabase.js";
+import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
+import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, reanchorQuote, stableResearchPoints, validateDraft, type EmailStatus } from "./services/email-studio.js";
+
+type Json = Record<string, unknown>;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function send(res: ServerResponse, status: number, data: unknown) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
+async function body(req: IncomingMessage): Promise<Json> { const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer); try { const x = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); return x && typeof x === "object" && !Array.isArray(x) ? x as Json : {}; } catch { return {}; } }
+function url(req: IncomingMessage) { return new URL(req.url ?? "", "http://localhost"); }
+function actor(req: IncomingMessage) { return String(req.headers["x-user-id"] ?? "voitech-user").slice(0, 200); }
+function validProject(value: unknown): value is string { return typeof value === "string" && UUID_RE.test(value); }
+
+async function getScopedEmail(client: NonNullable<ReturnType<typeof getSupabase>>, id: string, projectId: string) {
+  if (!UUID_RE.test(id) || !validProject(projectId)) return null;
+  const enabled = await client.from("project_outreach_settings").select("email_studio_enabled").eq("project_id", projectId).maybeSingle();
+  if (!enabled.data?.email_studio_enabled) return null;
+  const r = await client.from("outreach_emails").select("*").eq("id", id).eq("project_id", projectId).maybeSingle();
+  return r.data as Json | null;
+}
+
+async function statusChange(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, to: EmailStatus, actorType: string, actorId: string | null, reason?: string, idempotencyKey?: string) {
+  const from = String(email.status) as EmailStatus;
+  if (!canTransition(from, to, actorType)) throw new Error(`Status cannot move from ${from} to ${to}`);
+  const now = new Date().toISOString();
+  const event = await client.from("outreach_email_status_events").insert({ email_id: email.id, from_status: from, to_status: to, actor_type: actorType, actor_id: actorId, reason: reason ?? null, idempotency_key: idempotencyKey ?? null }).select("id").single();
+  if (event.error) {
+    if (idempotencyKey && event.error.code === "23505") return email;
+    throw new Error(event.error.message);
+  }
+  const patch: Json = { status: to, updated_at: now };
+  if (to !== "approved") Object.assign(patch, { approved_by: null, approved_at: null, approved_version_id: null });
+  const updated = await client.from("outreach_emails").update(patch).eq("id", email.id).select("*").single();
+  if (updated.error) throw new Error(updated.error.message);
+  return updated.data as Json;
+}
+
+async function nextVersion(client: NonNullable<ReturnType<typeof getSupabase>>, emailId: string) {
+  const r = await client.from("outreach_email_versions").select("version_number").eq("email_id", emailId).order("version_number", { ascending: false }).limit(1).maybeSingle();
+  if (r.error) throw new Error(r.error.message);
+  return Number(r.data?.version_number ?? 0) + 1;
+}
+
+export async function handleEmailStudioList(req: IncomingMessage, res: ServerResponse) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const q = url(req).searchParams; const projectId = q.get("projectId") ?? "";
+  if (!validProject(projectId)) return send(res, 400, { error: "projectId is required" });
+  const enabled = await client.from("project_outreach_settings").select("email_studio_enabled").eq("project_id", projectId).maybeSingle(); if (!enabled.data?.email_studio_enabled) return send(res, 403, { error: "Email Studio is not enabled for this project" });
+  const page = Math.max(1, Number(q.get("page") ?? 1)); const pageSize = Math.min(100, Math.max(1, Number(q.get("pageSize") ?? 25))); const from = (page - 1) * pageSize;
+  let query = client.from("outreach_emails").select("*", { count: "exact" }).eq("project_id", projectId);
+  const status = q.get("status"); if (status === "failed") query = query.in("status", ["research_missing", "generation_failed", "sending_failed"]); else if (status && EMAIL_STATUSES.includes(status as EmailStatus)) query = query.eq("status", status);
+  const batch = q.get("batch"); if (batch) query = query.eq("batch_name", batch);
+  const campaign = q.get("campaign"); if (campaign) query = query.eq("campaign_id", campaign);
+  const persona = q.get("persona"); if (persona) query = query.eq("persona", persona);
+  const reviewer = q.get("reviewer"); if (reviewer) query = query.eq("assigned_reviewer_id", reviewer);
+  const quality = q.get("researchQuality"); if (quality && ["verified","partial","missing","unknown"].includes(quality)) query = query.eq("research_quality", quality);
+  const model = q.get("model"); if (model) query = query.eq("current_model", model);
+  const dateFrom = q.get("dateFrom"); if (dateFrom) query = query.gte("updated_at", `${dateFrom}T00:00:00.000Z`);
+  const dateTo = q.get("dateTo"); if (dateTo) query = query.lte("updated_at", `${dateTo}T23:59:59.999Z`);
+  const search = q.get("search")?.trim(); if (search) query = query.or(`current_subject.ilike.%${search.replace(/[%_,()]/g, "") }%,recipient_email.ilike.%${search.replace(/[%_,()]/g, "")}%,contact_name.ilike.%${search.replace(/[%_,()]/g, "")}%,company_name.ilike.%${search.replace(/[%_,()]/g, "")}%,batch_name.ilike.%${search.replace(/[%_,()]/g, "")}%,persona.ilike.%${search.replace(/[%_,()]/g, "")}%`);
+  if (q.get("hasOpenComments") === "true") {
+    const comments = await client.from("outreach_email_comments").select("email_id").eq("status", "open");
+    query = query.in("id", [...new Set((comments.data ?? []).map((x: { email_id: string }) => x.email_id))]);
+  }
+  const result = await query.order("updated_at", { ascending: false }).range(from, from + pageSize - 1);
+  if (result.error) return send(res, 500, { error: result.error.message });
+  const rows = (result.data ?? []) as Json[]; const ids = rows.map((x) => String(x.id));
+  const comments = ids.length ? await client.from("outreach_email_comments").select("email_id").in("email_id", ids).eq("status", "open") : { data: [] };
+  const counts = new Map<string, number>(); for (const c of comments.data ?? []) counts.set(c.email_id, (counts.get(c.email_id) ?? 0) + 1);
+  return send(res, 200, { data: rows.map((x) => ({ ...x, open_comment_count: counts.get(String(x.id)) ?? 0 })), total: result.count ?? 0, page, pageSize });
+}
+
+export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerResponse) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req);
+  if (!validProject(b.projectId) || !validProject(b.contactId)) return send(res, 400, { error: "projectId and contactId are required" });
+  const enabled = await client.from("project_outreach_settings").select("email_studio_enabled").eq("project_id", b.projectId).maybeSingle(); if (!enabled.data?.email_studio_enabled) return send(res, 403, { error: "Email Studio is not enabled for this project" });
+  const row = { project_id: b.projectId, contact_id: b.contactId, contact_name: String(b.contactName ?? ""), company_name: String(b.companyName ?? ""), company_id: validProject(b.companyId) ? b.companyId : null, campaign_id: String(b.campaignId ?? ""), batch_name: String(b.batchName ?? ""), persona: String(b.persona ?? ""), sequence_step: Math.max(1, Number(b.sequenceStep ?? 1)), recipient_email: b.recipientEmail ? String(b.recipientEmail).trim().toLowerCase() : null, assigned_reviewer_id: b.assignedReviewerId ? String(b.assignedReviewerId) : null, provenance: String(b.provenance ?? "voitech_generated"), status: b.researchSnapshotId ? "research_ready" : "research_missing", research_quality: b.researchSnapshotId ? "unknown" : "missing", research_snapshot_id: validProject(b.researchSnapshotId) ? b.researchSnapshotId : null };
+  const r = await client.from("outreach_emails").upsert(row, { onConflict: "project_id,contact_id,campaign_id,batch_name,sequence_step", ignoreDuplicates: false }).select("*").single();
+  if (r.error) return send(res, 500, { error: r.error.message });
+  await client.from("outreach_email_status_events").insert({ email_id: r.data.id, from_status: null, to_status: r.data.status, actor_type: "user", actor_id: actor(req), reason: "Email Studio record created" });
+  return send(res, 201, { data: r.data });
+}
+
+export async function handleEmailStudioGet(req: IncomingMessage, res: ServerResponse, id: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const projectId = url(req).searchParams.get("projectId") ?? "";
+  const email = await getScopedEmail(client, id, projectId); if (!email) return send(res, 404, { error: "Email not found" });
+  const [versions, comments, events, research, knowledge] = await Promise.all([
+    client.from("outreach_email_versions").select("*").eq("email_id", id).order("version_number", { ascending: false }),
+    client.from("outreach_email_comments").select("*,outreach_email_comment_replies(*)").eq("email_id", id).order("created_at"),
+    client.from("outreach_email_status_events").select("*").eq("email_id", id).order("created_at", { ascending: false }),
+    email.research_snapshot_id ? client.from("outreach_research_snapshots").select("*").eq("id", email.research_snapshot_id).maybeSingle() : Promise.resolve({ data: null }),
+    client.from("project_knowledge_documents").select("id,kind,title,version,priority").eq("project_id", projectId).eq("status", "active").order("priority"),
+  ]);
+  const current = (versions.data ?? []).find((x: Json) => x.id === email.current_version_id) ?? null;
+  return send(res, 200, { data: email, currentVersion: current, versions: versions.data ?? [], comments: comments.data ?? [], statusEvents: events.data ?? [], research: research.data ?? null, researchPoints: stableResearchPoints((research.data ?? {}) as Json), instructions: knowledge.data ?? [] });
+}
+
+export async function handleEmailStudioStatus(req: IncomingMessage, res: ServerResponse, id: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const projectId = String(b.projectId ?? "");
+  const email = await getScopedEmail(client, id, projectId); if (!email) return send(res, 404, { error: "Email not found" }); const to = String(b.status) as EmailStatus;
+  if (!EMAIL_STATUSES.includes(to)) return send(res, 400, { error: "Invalid status" });
+  try { return send(res, 200, { data: await statusChange(client, email, to, "user", actor(req), String(b.reason ?? "Manual workflow update")) }); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Status update failed" }); }
+}
+
+async function generateDraft(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, prompt: string, previous?: Json, comments: Json[] = [], includedResearchPointIds: string[] = []) {
+  const settings = await client.from("project_outreach_settings").select("*").eq("project_id", email.project_id).maybeSingle(); if (settings.error || !settings.data?.enabled) throw new Error("Outreach Agent is not enabled for this project");
+  const model = String(settings.data.default_model ?? "openai/gpt-5.2"); const context = await assembleOutreachContext(client, String(email.contact_id), Number(settings.data.contact_message_limit ?? 100), Number(settings.data.company_message_limit ?? 100));
+  const researchResult = email.research_snapshot_id ? await client.from("outreach_research_snapshots").select("*").eq("id", email.research_snapshot_id).single() : null;
+  const research = researchResult?.data ?? (await getOrCreateResearch(client, { projectId: String(email.project_id), contactId: String(email.contact_id), companyId: email.company_id ? String(email.company_id) : null, model, ttlDays: Number(settings.data.research_ttl_days ?? 30), context, force: false })).snapshot;
+  const knowledge = await loadKnowledge(client, String(email.project_id)); const points = stableResearchPoints(research as Json); const allowed = includedResearchPointIds.length ? points.filter((p) => includedResearchPointIds.includes(String(p.id))) : points;
+  const call = await structuredCall({ model, schema: EmailDraftSchema, trace: { feature: "email-studio", stage: previous ? "regenerate" : "generate", project_id: email.project_id, contact_id: email.contact_id },
+    system: "Write one research-based cold email. Return JSON only matching the supplied schema. Annotations use zero-based offsets into body only and exact text. Use concise user-facing audit explanations, never hidden chain-of-thought. Verified claims must reference supplied research IDs. Follow active project knowledge. Do not send or schedule anything.",
+    user: JSON.stringify({ task: prompt, recipient_context: context, research_points: allowed, active_knowledge: knowledge.documents, previous_version: previous ?? null, unresolved_comments: comments.map((c) => ({ id: c.id, selected_quote: c.selected_quote, body: c.body })), required_comment_ids: comments.map((c) => c.id), sequence_step: email.sequence_step }) });
+  call.value.annotations = normalizeAnnotationRanges(call.value.body, call.value.annotations); const validation = validateDraft(call.value.subject, call.value.body, call.value.annotations, new Set(allowed.map((x) => String(x.id))), new Set(knowledge.documents.map((x) => String(x.id)))); if (validation.some((x) => x.severity === "error")) throw new Error(`Generated draft failed validation: ${validation.filter((x) => x.severity === "error").map((x) => x.message).join("; ")}`);
+  return { draft: call.value, validation, model, knowledgeManifest: knowledge.manifest, research };
+}
+
+async function insertVersion(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, values: Json, makeCurrent: boolean) {
+  const versionNumber = await nextVersion(client, String(email.id));
+  if (makeCurrent) await client.from("outreach_email_versions").update({ state: "superseded" }).eq("email_id", email.id).eq("state", "current");
+  const ins = await client.from("outreach_email_versions").insert({ email_id: email.id, parent_version_id: email.current_version_id ?? null, version_number: versionNumber, state: makeCurrent ? "current" : "candidate", ...values }).select("*").single();
+  if (ins.error) throw new Error(ins.error.message);
+  if (makeCurrent) { const u = await client.from("outreach_emails").update({ current_version_id: ins.data.id, current_subject: ins.data.subject, current_body: ins.data.body, current_model: ins.data.model ?? null, updated_at: new Date().toISOString() }).eq("id", email.id); if (u.error) throw new Error(u.error.message); }
+  return ins.data as Json;
+}
+
+export async function handleEmailStudioGenerate(req: IncomingMessage, res: ServerResponse, id: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" });
+  try { const result = await generateDraft(client, email, String(b.prompt ?? "Create a concise, research-led cold email."), undefined, [], Array.isArray(b.includedResearchPointIds) ? b.includedResearchPointIds.map(String) : []); const version = await insertVersion(client, email, { subject: result.draft.subject, body: result.draft.body, author_type: "ai", author_id: "email-studio-agent", model: result.model, knowledge_manifest: result.knowledgeManifest, annotations: result.draft.annotations, validation_results: result.validation, generation_reason: "initial_generation" }, true); const updated = await statusChange(client, email, "ai_draft_made", "agent", "email-studio-agent", "Initial email generated"); await client.from("outreach_emails").update({ research_snapshot_id: (result.research as Json).id, research_quality: (result.research as Json).partial ? "partial" : "verified" }).eq("id", id); return send(res, 201, { data: updated, version }); } catch (e) { try { await statusChange(client, email, "generation_failed", "agent", "email-studio-agent", e instanceof Error ? e.message : "Generation failed"); } catch {} return send(res, 500, { error: e instanceof Error ? e.message : "Generation failed" }); }
+}
+
+export async function handleEmailStudioRegenerate(req: IncomingMessage, res: ServerResponse, id: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" });
+  const current = await client.from("outreach_email_versions").select("*").eq("id", email.current_version_id).single(); const comments = await client.from("outreach_email_comments").select("*").eq("email_id", id).eq("status", "open");
+  try { const scope = String(b.scope ?? "full"); const selectionDirective = scope === "full" ? "" : ` Preserve all content outside this exact ${scope}: ${JSON.stringify(b.selection ?? null)}.`; const result = await generateDraft(client, email, `${String(b.prompt ?? `Regenerate the ${scope} email and address every unresolved comment.`)}${selectionDirective}`, current.data as Json, (comments.data ?? []) as Json[], Array.isArray(b.includedResearchPointIds) ? b.includedResearchPointIds.map(String) : []); const version = await insertVersion(client, email, { subject: result.draft.subject, body: result.draft.body, author_type: "ai", author_id: "email-studio-agent", model: result.model, knowledge_manifest: result.knowledgeManifest, prompt_manifest: { scope, selection: b.selection ?? null }, annotations: result.draft.annotations, validation_results: result.validation, generation_reason: `feedback_${scope}` }, false);
+    const returnedResolutions = result.draft.feedback_resolutions ?? []; const resolutions = new Map(returnedResolutions.map((x) => [x.comment_id, x])); for (const c of (comments.data ?? []) as Json[]) { const rr = resolutions.get(String(c.id)) ?? { outcome: "not_followed", explanation: "The model did not return a resolution for this comment." }; await client.from("outreach_email_feedback_resolutions").upsert({ email_id: id, version_id: version.id, comment_id: c.id, outcome: rr.outcome, explanation: rr.explanation }, { onConflict: "version_id,comment_id" }); }
+    await statusChange(client, email, "regenerated", "agent", "email-studio-agent", "Feedback regeneration candidate created"); return send(res, 201, { version, resolutions: returnedResolutions });
+  } catch (e) { return send(res, 500, { error: e instanceof Error ? e.message : "Regeneration failed" }); }
+}
+
+export async function handleEmailStudioAdoptVersion(req: IncomingMessage, res: ServerResponse, emailId: string, versionId: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, emailId, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const v = await client.from("outreach_email_versions").select("*").eq("id", versionId).eq("email_id", emailId).single(); if (v.error) return send(res, 404, { error: "Version not found" });
+  await client.from("outreach_email_versions").update({ state: "superseded" }).eq("email_id", emailId).eq("state", "current"); await client.from("outreach_email_versions").update({ state: "current" }).eq("id", versionId);
+  const comments = await client.from("outreach_email_comments").select("*").eq("email_id", emailId).eq("status", "open"); for (const c of (comments.data ?? []) as Json[]) { const anchor = reanchorQuote(String(v.data.body), String(c.selected_quote), Number(c.start_offset), String(c.context_before), String(c.context_after)); await client.from("outreach_email_comments").update({ mapped_version_id: versionId, mapped_start_offset: anchor?.start ?? null, mapped_end_offset: anchor?.end ?? null, updated_at: new Date().toISOString() }).eq("id", c.id); }
+  const updated = await client.from("outreach_emails").update({ current_version_id: versionId, current_subject: v.data.subject, current_body: v.data.body, current_model: v.data.model ?? null, updated_at: new Date().toISOString() }).eq("id", emailId).select("*").single(); return send(res, 200, { data: updated.data, version: v.data });
+}
+
+export async function handleEmailStudioHumanVersion(req: IncomingMessage, res: ServerResponse, id: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const subject = String(b.subject ?? "").trim(), content = String(b.body ?? "").trim(); if (!subject || !content) return send(res, 400, { error: "subject and body are required" });
+  try { const validation = validateDraft(subject, content, []); const version = await insertVersion(client, email, { subject, body: content, author_type: "human", author_id: actor(req), annotations: [], validation_results: validation, generation_reason: "manual_edit" }, true); let updated: Json = email; if (email.status === "approved" || email.status === "final_check") updated = await statusChange(client, email, "needs_review", "user", actor(req), "Content edited; prior approval invalidated"); return send(res, 201, { data: updated, version }); } catch (e) { return send(res, 500, { error: e instanceof Error ? e.message : "Save failed" }); }
+}
+
+export async function handleEmailStudioCreateComment(req: IncomingMessage, res: ServerResponse, id: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const version = await client.from("outreach_email_versions").select("body").eq("id", email.current_version_id).single(); const start = Number(b.startOffset), end = Number(b.endOffset), quote = String(b.selectedQuote ?? ""); if (!quote || start < 0 || end <= start || String(version.data?.body ?? "").slice(start, end) !== quote) return send(res, 400, { error: "Comment selection no longer matches the current version" });
+  const r = await client.from("outreach_email_comments").insert({ email_id: id, source_version_id: email.current_version_id, selected_quote: quote, start_offset: start, end_offset: end, context_before: String(b.contextBefore ?? ""), context_after: String(b.contextAfter ?? ""), body: String(b.body ?? "").trim(), author_id: actor(req), mapped_version_id: email.current_version_id, mapped_start_offset: start, mapped_end_offset: end }).select("*").single(); if (r.error) return send(res, 500, { error: r.error.message });
+  if (email.status !== "comments_made") try { await statusChange(client, email, "comments_made", "user", actor(req), "Review comment added"); } catch {}
+  return send(res, 201, { data: r.data });
+}
+
+function nestedProjectId(value: unknown): unknown { return Array.isArray(value) ? value[0]?.project_id : (value as Json | null)?.project_id; }
+
+export async function handleEmailStudioPatchComment(req: IncomingMessage, res: ServerResponse, commentId: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); if (!validProject(b.projectId)) return send(res, 400, { error: "projectId is required" }); const c = await client.from("outreach_email_comments").select("*,outreach_emails!inner(project_id)").eq("id", commentId).single(); if (c.error || nestedProjectId(c.data.outreach_emails) !== b.projectId) return send(res, 404, { error: "Comment not found" }); const patch: Json = { updated_at: new Date().toISOString() }; if (b.status === "open" || b.status === "resolved") { patch.status = b.status; patch.resolved_at = b.status === "resolved" ? new Date().toISOString() : null; } if (typeof b.body === "string" && b.body.trim()) patch.body = b.body.trim(); const r = await client.from("outreach_email_comments").update(patch).eq("id", commentId).select("*").single(); return send(res, r.error ? 500 : 200, r.error ? { error: r.error.message } : { data: r.data });
+}
+
+export async function handleEmailStudioReply(req: IncomingMessage, res: ServerResponse, commentId: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); if (!validProject(b.projectId) || !String(b.body ?? "").trim()) return send(res, 400, { error: "projectId and body are required" }); const c = await client.from("outreach_email_comments").select("email_id,outreach_emails!inner(project_id)").eq("id", commentId).single(); if (c.error || nestedProjectId(c.data.outreach_emails) !== b.projectId) return send(res, 404, { error: "Comment not found" }); const r = await client.from("outreach_email_comment_replies").insert({ comment_id: commentId, body: String(b.body).trim(), author_id: actor(req) }).select("*").single(); return send(res, r.error ? 500 : 201, r.error ? { error: r.error.message } : { data: r.data });
+}
+
+export async function handleEmailStudioApprove(req: IncomingMessage, res: ServerResponse, id: string) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const open = await client.from("outreach_email_comments").select("id", { count: "exact", head: true }).eq("email_id", id).eq("status", "open"); if ((open.count ?? 0) > 0) return send(res, 409, { error: "Resolve all comments before approval" });
+  try { const updated = await statusChange(client, email, "approved", "user", actor(req), "Current version approved"); const r = await client.from("outreach_emails").update({ approved_version_id: email.current_version_id, approved_by: actor(req), approved_at: new Date().toISOString() }).eq("id", id).select("*").single(); return send(res, 200, { data: r.data ?? updated }); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Approval failed" }); }
+}
+
+export async function handleEmailStudioVersions(req: IncomingMessage, res: ServerResponse, id: string) { const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const projectId = url(req).searchParams.get("projectId") ?? ""; const email = await getScopedEmail(client, id, projectId); if (!email) return send(res, 404, { error: "Email not found" }); const r = await client.from("outreach_email_versions").select("*").eq("email_id", id).order("version_number", { ascending: false }); return send(res, r.error ? 500 : 200, r.error ? { error: r.error.message } : { data: r.data }); }
+
+export async function handleSmartleadEmailEvent(req: IncomingMessage, res: ServerResponse) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const eventId = String(b.event_id ?? b.eventId ?? ""), eventType = String(b.event_type ?? b.eventType ?? "").toLowerCase(); if (!eventId || !eventType) return send(res, 400, { error: "event_id and event_type are required" });
+  const existing = await client.from("outreach_email_delivery_events").select("*").eq("provider", "smartlead").eq("provider_event_id", eventId).maybeSingle(); if (existing.data) return send(res, 200, { data: existing.data, replay: true });
+  const messageId = String(b.message_id ?? b.messageId ?? ""), leadId = String(b.lead_id ?? b.leadId ?? ""), campaignId = String(b.campaign_id ?? b.campaignId ?? ""), recipient = String(b.recipient_email ?? b.email ?? "").trim().toLowerCase(), step = Number(b.sequence_step ?? b.sequenceNumber ?? 0);
+  let candidates: Json[] = []; if (messageId) { const r = await client.from("outreach_emails").select("*").eq("smartlead_message_id", messageId); candidates = (r.data ?? []) as Json[]; } if (!candidates.length && leadId && campaignId) { const r = await client.from("outreach_emails").select("*").eq("smartlead_lead_id", leadId).eq("smartlead_campaign_id", campaignId); candidates = (r.data ?? []) as Json[]; } if (!candidates.length && recipient && campaignId && step > 0) { const r = await client.from("outreach_emails").select("*").eq("recipient_email", recipient).eq("smartlead_campaign_id", campaignId).eq("sequence_step", step); candidates = (r.data ?? []) as Json[]; }
+  const matchStatus = candidates.length === 1 ? "matched" : candidates.length > 1 ? "ambiguous" : "unmatched"; const occurred = String(b.occurred_at ?? b.timestamp ?? new Date().toISOString()); const ins = await client.from("outreach_email_delivery_events").insert({ provider: "smartlead", provider_event_id: eventId, event_type: eventType, payload: b, email_id: candidates.length === 1 ? candidates[0].id : null, match_status: matchStatus, match_reason: candidates.length === 1 ? "Unique Smartlead identifiers matched" : `${candidates.length} matching records`, occurred_at: occurred }).select("*").single(); if (ins.error) return send(res, 500, { error: ins.error.message });
+  if (candidates.length === 1 && ["sent", "email_sent", "delivered"].includes(eventType)) { const email = candidates[0]; try { await statusChange(client, email, "sent", "smartlead", "smartlead", `Verified Smartlead ${eventType} event`, `smartlead:${eventId}:sent`); await client.from("outreach_emails").update({ sent_at: occurred, smartlead_message_id: messageId || email.smartlead_message_id }).eq("id", email.id); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Delivery status failed", event: ins.data }); } }
+  return send(res, 202, { data: ins.data });
+}

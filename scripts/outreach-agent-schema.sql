@@ -71,7 +71,11 @@ create table if not exists public.outreach_agent_runs (
 create index if not exists outreach_runs_contact_idx on public.outreach_agent_runs(project_id, contact_id, created_at desc);
 
 alter table public.generated_messages add column if not exists outreach_run_id uuid references public.outreach_agent_runs(id) on delete set null;
-alter table public.generated_messages add column if not exists channel text check (channel is null or channel in ('inmail','message'));
+alter table public.generated_messages add column if not exists channel text check (channel is null or channel in ('inmail','message','email'));
+do $$ begin
+  alter table public.generated_messages drop constraint if exists generated_messages_channel_check;
+  alter table public.generated_messages add constraint generated_messages_channel_check check (channel is null or channel in ('inmail','message','email'));
+end $$;
 alter table public.generated_messages add column if not exists subject text;
 alter table public.generated_messages add column if not exists variant_index integer;
 alter table public.generated_messages add column if not exists draft_status text default 'draft';

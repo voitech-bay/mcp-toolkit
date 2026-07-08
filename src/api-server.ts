@@ -156,6 +156,22 @@ import {
   handleKnowledge,
   handleActivateKnowledge,
 } from "./outreach-agent-handlers.js";
+import {
+  handleEmailStudioAdoptVersion,
+  handleEmailStudioApprove,
+  handleEmailStudioCreate,
+  handleEmailStudioCreateComment,
+  handleEmailStudioGenerate,
+  handleEmailStudioGet,
+  handleEmailStudioHumanVersion,
+  handleEmailStudioList,
+  handleEmailStudioPatchComment,
+  handleEmailStudioRegenerate,
+  handleEmailStudioReply,
+  handleEmailStudioStatus,
+  handleEmailStudioVersions,
+  handleSmartleadEmailEvent,
+} from "./email-studio-handlers.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
 const mcpHandler = createMcpHandler();
@@ -337,8 +353,32 @@ const server = createServer(async (req, res) => {
   const outreachRunMatch = !outreachRunPovMatch && !outreachRunVariantsMatch && pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)$/);
   const knowledgeActivateMatch = pathname.match(/^\/api\/projects\/([^/]+)\/outreach-knowledge\/([^/]+)\/activate$/);
   const knowledgeMatch = !knowledgeActivateMatch && pathname.match(/^\/api\/projects\/([^/]+)\/outreach-knowledge$/);
+  const emailStudioStatusMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/status$/);
+  const emailStudioGenerateMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/generate$/);
+  const emailStudioRegenerateMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/regenerate$/);
+  const emailStudioCommentsMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/comments$/);
+  const emailStudioApproveMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/approve$/);
+  const emailStudioVersionsMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/versions$/);
+  const emailStudioHumanVersionMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/human-version$/);
+  const emailStudioAdoptMatch = pathname.match(/^\/api\/email-studio\/emails\/([^/]+)\/versions\/([^/]+)\/adopt$/);
+  const emailStudioEmailMatch = !emailStudioStatusMatch && !emailStudioGenerateMatch && !emailStudioRegenerateMatch && !emailStudioCommentsMatch && !emailStudioApproveMatch && !emailStudioVersionsMatch && !emailStudioHumanVersionMatch && !emailStudioAdoptMatch && pathname.match(/^\/api\/email-studio\/emails\/([^/]+)$/);
+  const emailStudioCommentReplyMatch = pathname.match(/^\/api\/email-studio\/comments\/([^/]+)\/replies$/);
+  const emailStudioCommentMatch = !emailStudioCommentReplyMatch && pathname.match(/^\/api\/email-studio\/comments\/([^/]+)$/);
 
   try {
+    if (pathname === "/api/email-studio/emails") { if (req.method === "GET") await handleEmailStudioList(req, res); else if (req.method === "POST") await handleEmailStudioCreate(req, res); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioStatusMatch) { if (req.method === "PATCH") await handleEmailStudioStatus(req, res, emailStudioStatusMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioGenerateMatch) { if (req.method === "POST") await handleEmailStudioGenerate(req, res, emailStudioGenerateMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioRegenerateMatch) { if (req.method === "POST") await handleEmailStudioRegenerate(req, res, emailStudioRegenerateMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioCommentsMatch) { if (req.method === "POST") await handleEmailStudioCreateComment(req, res, emailStudioCommentsMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioApproveMatch) { if (req.method === "POST") await handleEmailStudioApprove(req, res, emailStudioApproveMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioVersionsMatch) { if (req.method === "GET") await handleEmailStudioVersions(req, res, emailStudioVersionsMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioHumanVersionMatch) { if (req.method === "POST") await handleEmailStudioHumanVersion(req, res, emailStudioHumanVersionMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioAdoptMatch) { if (req.method === "POST") await handleEmailStudioAdoptVersion(req, res, emailStudioAdoptMatch[1], emailStudioAdoptMatch[2]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioEmailMatch) { if (req.method === "GET") await handleEmailStudioGet(req, res, emailStudioEmailMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioCommentReplyMatch) { if (req.method === "POST") await handleEmailStudioReply(req, res, emailStudioCommentReplyMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (emailStudioCommentMatch) { if (req.method === "PATCH") await handleEmailStudioPatchComment(req, res, emailStudioCommentMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/outreach-agent/runs") {
       if (req.method === "POST") await handleCreateOutreachRun(req, res);
       else if (req.method === "GET") await handleListOutreachRuns(req, res);
