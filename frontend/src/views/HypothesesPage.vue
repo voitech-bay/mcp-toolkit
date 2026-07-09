@@ -11,6 +11,7 @@ import {
   NForm,
   NFormItem,
   NInput,
+  NSelect,
   NTag,
   NPopover,
   NSpin,
@@ -34,6 +35,81 @@ interface HypothesisRow {
   target_count: number;
   getsales_tag_uuid: string | null;
   getsales_tag_name: string | null;
+  attached_lists: Array<{ uuid: string; name: string }>;
+  attached_list_count: number;
+}
+
+const CONTEXT_FIELDS = [
+  ["core_concept", "Core concept / offering"],
+  ["icp_description", "ICP description"],
+  ["pains_and_signals", "Pains and buying signals"],
+  ["expertise_and_differentiators", "Expertise and differentiators"],
+  ["proof_and_customer_cases", "Proof and customer cases"],
+  ["objections_and_competitors", "Objections and competitors"],
+  ["exclusions", "Exclusions"],
+] as const;
+type ContextField = typeof CONTEXT_FIELDS[number][0];
+const emptyContext = (): Record<ContextField, string> => Object.fromEntries(
+  CONTEXT_FIELDS.map(([key]) => [key, ""])
+) as Record<ContextField, string>;
+const projectContext = ref(emptyContext());
+const contextUpdatedAt = ref<string | null>(null);
+const contextLoading = ref(false);
+const contextSaving = ref(false);
+const contextEditing = ref(false);
+
+async function fetchProjectContext() {
+  const projectId = projectStore.selectedProjectId;
+  projectContext.value = emptyContext();
+  contextUpdatedAt.value = null;
+  if (!projectId) return;
+  contextLoading.value = true;
+  try {
+    const r = await fetch(`/api/project-gtm-context?projectId=${encodeURIComponent(projectId)}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Failed to load project context");
+    for (const [key] of CONTEXT_FIELDS) projectContext.value[key] = j.data?.[key] ?? "";
+    contextUpdatedAt.value = j.data?.updated_at ?? null;
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to load project context");
+  } finally {
+    contextLoading.value = false;
+  }
+}
+
+async function saveProjectContext() {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId) return;
+  contextSaving.value = true;
+  try {
+    const r = await fetch(`/api/project-gtm-context?projectId=${encodeURIComponent(projectId)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.fromEntries(
+        CONTEXT_FIELDS.map(([key]) => [key, projectContext.value[key].trim() || null])
+      )),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Failed to save project context");
+    contextUpdatedAt.value = j.data?.updated_at ?? null;
+    contextEditing.value = false;
+    message.success("Project context saved.");
+  } catch (e) {
+    message.error(e instanceof Error ? e.message : "Failed to save project context");
+  } finally {
+    contextSaving.value = false;
+  }
+}
+
+const listOptions = ref<Array<{ label: string; value: string }>>([]);
+async function fetchContactLists() {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId) { listOptions.value = []; return; }
+  const r = await fetch(`/api/contact-lists?projectId=${encodeURIComponent(projectId)}`);
+  const j = await r.json();
+  listOptions.value = (j.data ?? []).map((row: { uuid: string; name: string }) => ({
+    label: row.name || row.uuid, value: row.uuid,
+  }));
 }
 
 interface TargetRow {
@@ -104,6 +180,8 @@ watch(() => projectStore.selectedProjectId, () => {
   tagContactsError.value = {};
   tagContactsTagName.value = {};
   fetchHypotheses();
+  void fetchProjectContext();
+  void fetchContactLists();
 }, { immediate: true });
 
 async function loadTargets(hypothesisId: string) {
@@ -155,12 +233,23 @@ function onExpandedRowsChange(keys: DataTableRowKey[]) {
     const id = String(key);
     loadTargets(id);
     const row = hypotheses.value.find((h) => h.id === id);
-    void loadTagContacts(id, Boolean(row?.getsales_tag_uuid));
+    void loadTagContacts(id, Boolean(row?.getsales_tag_uuid || row?.attached_list_count));
   }
 }
 
 // --- Columns ---
 const columns = computed<DataTableColumns<HypothesisRow>>(() => [
+  {
+    key: "attached_lists",
+    title: "Lists",
+    width: 150,
+    render: (row) => row.attached_list_count
+      ? h(NPopover, { trigger: "hover" }, {
+          trigger: () => h(NTag, { size: "small", bordered: false, type: "info" }, { default: () => `${row.attached_list_count} list${row.attached_list_count === 1 ? "" : "s"}` }),
+          default: () => h("div", row.attached_lists.map((list) => h("div", { key: list.uuid }, list.name))),
+        })
+      : "—",
+  },
   {
     key: "name",
     title: "Name",
@@ -276,6 +365,7 @@ const editingId = ref<string | null>(null);
 const formName = ref("");
 const formDescription = ref("");
 const formPersona = ref("");
+const formListUuids = ref<string[]>([]);
 const formSubmitting = ref(false);
 
 function openCreateModal() {
@@ -283,6 +373,7 @@ function openCreateModal() {
   formName.value = "";
   formDescription.value = "";
   formPersona.value = "";
+  formListUuids.value = [];
   formModalOpen.value = true;
 }
 
@@ -291,6 +382,7 @@ function openEditModal(row: HypothesisRow) {
   formName.value = row.name;
   formDescription.value = row.description ?? "";
   formPersona.value = row.target_persona ?? "";
+  formListUuids.value = (row.attached_lists ?? []).map((list) => list.uuid);
   formModalOpen.value = true;
 }
 
@@ -309,6 +401,7 @@ async function submitForm() {
           name: formName.value.trim(),
           description: formDescription.value.trim() || null,
           targetPersona: formPersona.value.trim() || null,
+          listUuids: formListUuids.value,
         }),
       });
       const json = await r.json();
@@ -325,6 +418,7 @@ async function submitForm() {
           name: formName.value.trim(),
           description: formDescription.value.trim() || null,
           targetPersona: formPersona.value.trim() || null,
+          listUuids: formListUuids.value,
         }),
       });
       const json = await r.json();
@@ -441,7 +535,7 @@ function renderExpand(row: HypothesisRow) {
   const targets = targetsByHypothesis.value[row.id];
   const isLoading = targetsLoading.value[row.id];
   const err = targetsError.value[row.id];
-  const hasTag = Boolean(row.getsales_tag_uuid);
+  const hasTag = Boolean(row.getsales_tag_uuid || row.attached_list_count);
   const tagContacts = tagContactsByHypothesis.value[row.id];
   const tagLoading = tagContactsLoading.value[row.id];
   const tagErr = tagContactsError.value[row.id];
@@ -496,7 +590,7 @@ function renderExpand(row: HypothesisRow) {
   return h("div", { class: "expand-wrap" }, [
     hasTag
       ? h("div", { class: "expand-section" }, [
-          h("div", { class: "expand-section__title" }, `Contacts (tag “${tagLabel}”)`),
+          h("div", { class: "expand-section__title" }, row.getsales_tag_uuid ? `Contacts (tag “${tagLabel}” + attached lists)` : "Contacts (attached lists)"),
           tagContactsBlock(),
         ])
       : null,
@@ -510,6 +604,35 @@ function renderExpand(row: HypothesisRow) {
 
 <template>
   <div class="hypotheses-page">
+    <NCard title="Project GTM context" :segmented="{ content: true }">
+      <template #header-extra>
+        <NSpace align="center">
+          <span v-if="contextUpdatedAt" class="updated-at">
+            Saved {{ new Date(contextUpdatedAt).toLocaleString() }}
+          </span>
+          <NButton v-if="!contextEditing" size="small" @click="contextEditing = true">Edit context</NButton>
+          <template v-else>
+            <NButton size="small" :disabled="contextSaving" @click="contextEditing = false; fetchProjectContext()">Cancel</NButton>
+            <NButton type="primary" size="small" :loading="contextSaving" @click="saveProjectContext">Save context</NButton>
+          </template>
+        </NSpace>
+      </template>
+      <NSpin :show="contextLoading">
+        <div class="context-grid">
+          <div v-for="[key, label] in CONTEXT_FIELDS" :key="key" class="context-field">
+            <div class="context-field__label">{{ label }}</div>
+            <NInput
+              v-if="contextEditing"
+              v-model:value="projectContext[key]"
+              type="textarea"
+              :autosize="{ minRows: 3, maxRows: 8 }"
+              :placeholder="`Add ${label.toLowerCase()}…`"
+            />
+            <div v-else class="context-field__value">{{ projectContext[key] || "Not set" }}</div>
+          </div>
+        </div>
+      </NSpin>
+    </NCard>
     <NCard>
       <div class="toolbar">
         <div class="toolbar-left">
@@ -576,6 +699,17 @@ function renderExpand(row: HypothesisRow) {
             :disabled="formSubmitting"
           />
         </NFormItem>
+        <NFormItem label="Contact lists">
+          <NSelect
+            v-model:value="formListUuids"
+            multiple
+            filterable
+            clearable
+            :options="listOptions"
+            placeholder="Attach lists that define this hypothesis scope…"
+            :disabled="formSubmitting"
+          />
+        </NFormItem>
       </NForm>
       <template #footer>
         <NSpace justify="end">
@@ -612,6 +746,32 @@ function renderExpand(row: HypothesisRow) {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+}
+
+.context-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+}
+
+.context-field__label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 0.35rem;
+  opacity: 0.72;
+}
+
+.context-field__value {
+  min-height: 3.5rem;
+  white-space: pre-wrap;
+  padding: 0.65rem;
+  border-radius: 6px;
+  background: rgba(128, 128, 128, 0.08);
+}
+
+.updated-at {
+  font-size: 0.75rem;
+  opacity: 0.55;
 }
 
 .toolbar {

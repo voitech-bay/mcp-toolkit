@@ -32,8 +32,17 @@ import {
   markSyncRunFinishedIfStillRunning,
   getAllCompanies,
   addCompaniesToProject,
+  createProjectCompanyRecord,
+  updateProjectCompanyRecord,
+  deleteProjectCompanyRecords,
+  createProjectContactRecord,
+  updateProjectContactRecord,
+  deleteProjectContactRecords,
   getProjectCompanies,
   getHypothesesWithCounts,
+  getProjectGtmContext,
+  getContextMapInsights,
+  upsertProjectGtmContext,
   getHypothesisTargets,
   createHypothesis,
   updateHypothesis,
@@ -984,7 +993,9 @@ export async function handleSupabaseTableQuery(
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
   const search = params.get("search") ?? undefined;
-  const result = await queryTableWithFilters(client, table, { filters, search, limit, offset });
+  const sortBy = params.get("sortBy") ?? undefined;
+  const sortDirection = params.get("sortDirection") === "asc" ? "asc" : "desc";
+  const result = await queryTableWithFilters(client, table, { filters, search, limit, offset, sortBy, sortDirection });
   if (result.error) {
     res.writeHead(500);
     res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
@@ -2751,6 +2762,71 @@ export async function handleAddCompaniesToProject(
   res.end(JSON.stringify({ added: result.data.length, data: result.data }));
 }
 
+export async function handleProjectCompanyRecords(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  const body = (await getParsedBody(req)) as Record<string, unknown> | undefined;
+  const projectId = String(body?.projectId ?? "");
+  if (!client || !projectId) {
+    res.writeHead(client ? 400 : 500);
+    res.end(JSON.stringify({ error: client ? "projectId is required" : "Supabase not configured" }));
+    return;
+  }
+  if (req.method === "POST") {
+    const name = String(body?.name ?? "").trim();
+    if (!name) { res.writeHead(400); res.end(JSON.stringify({ error: "name is required" })); return; }
+    const result = await createProjectCompanyRecord(client, projectId, { ...body, name });
+    res.writeHead(result.error ? 500 : 201);
+    res.end(JSON.stringify(result));
+    return;
+  }
+  if (req.method === "PATCH") {
+    const companyId = String(body?.companyId ?? "");
+    if (!companyId) { res.writeHead(400); res.end(JSON.stringify({ error: "companyId is required" })); return; }
+    const result = await updateProjectCompanyRecord(client, projectId, companyId, body ?? {});
+    res.writeHead(result.error ? 500 : 200);
+    res.end(JSON.stringify(result.error ? result : { data: { companyId }, error: null }));
+    return;
+  }
+  if (req.method === "DELETE") {
+    const companyIds = Array.isArray(body?.companyIds) ? body.companyIds.map(String) : [];
+    const result = await deleteProjectCompanyRecords(client, projectId, companyIds);
+    res.writeHead(result.error ? 500 : 200);
+    res.end(JSON.stringify(result));
+    return;
+  }
+  res.writeHead(405); res.end(JSON.stringify({ error: "Method not allowed" }));
+}
+
+export async function handleProjectContactRecords(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  const body = (await getParsedBody(req)) as Record<string, unknown> | undefined;
+  const projectId = String(body?.projectId ?? "");
+  if (!client || !projectId) {
+    res.writeHead(client ? 400 : 500);
+    res.end(JSON.stringify({ error: client ? "projectId is required" : "Supabase not configured" }));
+    return;
+  }
+  if (req.method === "POST") {
+    const result = await createProjectContactRecord(client, projectId, body ?? {});
+    res.writeHead(result.error ? 500 : 201); res.end(JSON.stringify(result)); return;
+  }
+  if (req.method === "PATCH") {
+    const contactId = String(body?.contactId ?? "");
+    if (!contactId) { res.writeHead(400); res.end(JSON.stringify({ error: "contactId is required" })); return; }
+    const result = await updateProjectContactRecord(client, projectId, contactId, body ?? {});
+    res.writeHead(result.error ? 500 : 200);
+    res.end(JSON.stringify(result.error ? result : { data: { contactId }, error: null })); return;
+  }
+  if (req.method === "DELETE") {
+    const contactIds = Array.isArray(body?.contactIds) ? body.contactIds.map(String) : [];
+    const result = await deleteProjectContactRecords(client, projectId, contactIds);
+    res.writeHead(result.error ? 500 : 200); res.end(JSON.stringify(result)); return;
+  }
+  res.writeHead(405); res.end(JSON.stringify({ error: "Method not allowed" }));
+}
+
 // --- Companies & Hypotheses endpoints ---
 
 export async function handleGetProjectCompanies(
@@ -2779,9 +2855,21 @@ export async function handleGetProjectCompanies(
   }
   const search = params.get("search") ?? undefined;
   const companyId = params.get("companyId") ?? undefined;
+  const listUuid = params.get("listUuid") ?? undefined;
+  const status = params.get("status") ?? undefined;
+  const industry = params.get("industry") ?? undefined;
+  const employeesRange = params.get("employeesRange") ?? undefined;
+  const hypothesisId = params.get("hypothesisId") ?? undefined;
+  const allowedSort = ["created_at", "name", "domain", "industry", "employees_range", "status"] as const;
+  const requestedSort = params.get("sortBy");
+  const sortBy = allowedSort.find((value) => value === requestedSort);
+  const sortDirection = params.get("sortDirection") === "asc" ? "asc" : "desc";
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
-  const result = await getProjectCompanies(client, projectId, { search, limit, offset, companyId });
+  const result = await getProjectCompanies(client, projectId, {
+    search, limit, offset, companyId, listUuid, status, industry, employeesRange,
+    hypothesisId, sortBy, sortDirection,
+  });
   if (result.error) {
     res.writeHead(500);
     res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
@@ -2825,6 +2913,59 @@ export async function handleGetHypotheses(
   res.end(JSON.stringify({ data: result.data }));
 }
 
+export async function handleProjectGtmContext(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const projectId = getQueryParams(req).get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  if (req.method === "GET") {
+    const result = await getProjectGtmContext(client, projectId);
+    res.writeHead(result.error ? 500 : 200);
+    res.end(JSON.stringify(result.error ? { data: null, error: result.error } : { data: result.data }));
+    return;
+  }
+  if (req.method === "PUT") {
+    const body = (await getParsedBody(req)) as Record<string, unknown> | undefined;
+    if (!body) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ error: "JSON body required" }));
+      return;
+    }
+    const result = await upsertProjectGtmContext(client, projectId, body);
+    res.writeHead(result.error ? 500 : 200);
+    res.end(JSON.stringify(result.error ? { data: null, error: result.error } : { data: result.data }));
+    return;
+  }
+  res.writeHead(405, { Allow: "GET, PUT" });
+  res.end(JSON.stringify({ error: "Method not allowed" }));
+}
+
+export async function handleGetContextMap(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  const projectId = getQueryParams(req).get("projectId");
+  if (!client || !projectId) {
+    res.writeHead(client ? 400 : 500);
+    res.end(JSON.stringify({ error: client ? "projectId is required" : "Supabase not configured" }));
+    return;
+  }
+  const result = await getContextMapInsights(client, projectId);
+  res.writeHead(result.error ? 500 : 200);
+  res.end(JSON.stringify(result));
+}
+
 export async function handleCreateHypothesis(
   req: IncomingMessage,
   res: ServerResponse
@@ -2847,6 +2988,7 @@ export async function handleCreateHypothesis(
     name?: string;
     description?: string | null;
     targetPersona?: string | null;
+    listUuids?: string[];
   } | undefined;
   if (!body?.projectId || !body?.name) {
     res.writeHead(400);
@@ -2858,6 +3000,7 @@ export async function handleCreateHypothesis(
     name: body.name,
     description: body.description,
     targetPersona: body.targetPersona,
+    listUuids: Array.isArray(body.listUuids) ? body.listUuids : undefined,
   });
   if (result.error) {
     res.writeHead(500);
@@ -2890,6 +3033,7 @@ export async function handleUpdateHypothesis(
     name?: string;
     description?: string | null;
     targetPersona?: string | null;
+    listUuids?: string[];
   } | undefined;
   if (!body) {
     res.writeHead(400);
@@ -2900,6 +3044,7 @@ export async function handleUpdateHypothesis(
     name: body.name,
     description: body.description,
     targetPersona: body.targetPersona,
+    listUuids: Array.isArray(body.listUuids) ? body.listUuids : undefined,
   });
   if (result.error) {
     res.writeHead(500);

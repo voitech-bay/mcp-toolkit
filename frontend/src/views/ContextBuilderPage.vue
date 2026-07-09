@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { provide, ref, watch } from "vue";
+import { computed, provide, ref, watch } from "vue";
 import { VueFlow } from "@vue-flow/core";
 import { Background } from "@vue-flow/background";
 import { Controls } from "@vue-flow/controls";
-import { NButton, NCard, NEmpty, NModal, NSpace, NTag, useMessage } from "naive-ui";
+import { NButton, NCard, NDrawer, NDrawerContent, NEmpty, NInput, NModal, NSelect, NSpace, NTag, useMessage } from "naive-ui";
 import { useProjectStore } from "../stores/project";
 import { useContextBuilder, CONTEXT_BUILDER_KEY } from "../composables/useContextBuilder";
 import { mergeConversationsForBuildContext } from "../lib/conversationBuildContext";
@@ -12,17 +12,81 @@ import HypothesisNode from "../components/context-builder/HypothesisNode.vue";
 import CompanyNode from "../components/context-builder/CompanyNode.vue";
 import ContactNode from "../components/context-builder/ContactNode.vue";
 import ConversationNode from "../components/context-builder/ConversationNode.vue";
+import InsightNode from "../components/context-builder/InsightNode.vue";
 
 const projectStore = useProjectStore();
 const ctx = useContextBuilder();
 const message = useMessage();
 
 const vueFlowRef = ref<InstanceType<typeof VueFlow> | null>(null);
+const search = ref("");
+const insightLimit = ref(100);
+const insightSource = ref<string | null>(null);
+const insights = ref<Array<Record<string, any>>>([]);
+const insightWarnings = ref<string[]>([]);
+const inspectedNode = ref<Record<string, unknown> | null>(null);
+const inspectedTitle = computed(() => {
+  const d = inspectedNode.value;
+  return String(d?.name ?? [d?.firstName, d?.lastName].filter(Boolean).join(" ") ?? d?.nodeType ?? "Map node");
+});
+
+function inspectNode(event: { node?: { data?: Record<string, unknown> } }) {
+  inspectedNode.value = event.node?.data ?? null;
+}
 
 // Destructure computed refs as top-level bindings so Vue's template compiler
 // auto-unwraps them — without this, VueFlow receives the ComputedRef wrapper
 // object instead of the plain array, causing a spread error on init.
 const { flowNodes, flowEdges, selectedNodes } = ctx;
+const sourceNodes = computed(() => flowNodes.value);
+const insightNodes = computed(() => {
+  const sources = sourceNodes.value;
+  const filtered = insights.value
+    .filter((item) => !insightSource.value || item.source_type === insightSource.value)
+    .slice(0, insightLimit.value);
+  return filtered.map((item, index) => {
+    const parent = item.parent_type === "project"
+      ? sources.find((node) => node.id === "center")
+      : sources.find((node) => String((node.data as any)?.entityId ?? "") === item.parent_id);
+    return {
+      id: item.id, type: "insight",
+      position: {
+        x: (parent?.position.x ?? 0) + 300 + (index % 4) * 215,
+        y: (parent?.position.y ?? 0) + Math.floor(index / 4) * 115,
+      },
+      data: { nodeType: "insight", ...item },
+    };
+  });
+});
+const allMapNodes = computed(() => [...sourceNodes.value, ...insightNodes.value] as any[]);
+const insightEdges = computed(() => insightNodes.value.map((node) => {
+  const item = node.data as Record<string, any>;
+  const parent = item.parent_type === "project"
+    ? sourceNodes.value.find((source) => source.id === "center")
+    : sourceNodes.value.find((source) => String((source.data as any)?.entityId ?? "") === item.parent_id);
+  return parent ? { id: `edge-${parent.id}-${node.id}`, source: parent.id, target: node.id, type: "smoothstep" } : null;
+}).filter(Boolean) as any[]);
+const allMapEdges = computed(() => [...flowEdges.value, ...insightEdges.value]);
+const displayedNodes = computed(() => {
+  const needle = search.value.trim().toLowerCase();
+  if (!needle) return allMapNodes.value;
+  return allMapNodes.value.filter((node) =>
+    node.id === "center" || JSON.stringify(node.data ?? {}).toLowerCase().includes(needle)
+  );
+});
+const displayedNodeIds = computed(() => new Set(displayedNodes.value.map((node) => node.id)));
+const displayedEdges = computed(() =>
+  allMapEdges.value.filter((edge) => displayedNodeIds.value.has(edge.source) && displayedNodeIds.value.has(edge.target))
+);
+
+async function loadInsights(projectId: string | null) {
+  insights.value = []; insightWarnings.value = [];
+  if (!projectId) return;
+  const r = await fetch(`/api/context-map?projectId=${encodeURIComponent(projectId)}`);
+  const j = await r.json();
+  if (!r.ok) { message.error(j.error ?? "Failed to load insights"); return; }
+  insights.value = j.data ?? []; insightWarnings.value = j.warnings ?? [];
+}
 
 // Provide context builder to all descendant node components
 provide(CONTEXT_BUILDER_KEY, ctx);
@@ -32,16 +96,18 @@ watch(
   () => projectStore.selectedProjectId,
   () => {
     ctx.clearGraph();
+    void loadInsights(projectStore.selectedProjectId);
     vueFlowRef.value?.fitView();
   },
   { immediate: false }
 );
+void loadInsights(projectStore.selectedProjectId);
 
 setTimeout(() => {
   vueFlowRef.value?.fitView();
 }, 50);
 
-// ── Build Context ─────────────────────────────────────────────────────────────
+// ── Save map snapshot ─────────────────────────────────────────────────────────
 
 const buildLoading = ref(false);
 const showResult = ref(false);
@@ -53,7 +119,7 @@ function copyResult() {
   });
 }
 
-async function buildContext() {
+async function saveMapSnapshot() {
   const projectId = projectStore.selectedProjectId;
   if (!projectId) {
     message.warning("No project selected.");
@@ -82,13 +148,14 @@ async function buildContext() {
     });
     const json = (await res.json()) as { data?: { context_text: string }; error?: string };
     if (!res.ok || json.error) {
-      message.error(json.error ?? "Failed to build context.");
+      message.error(json.error ?? "Failed to save map snapshot.");
       return;
     }
     resultText.value = json.data!.context_text;
     showResult.value = true;
+    message.success("Map snapshot saved.");
   } catch (e) {
-    message.error("Network error while building context.");
+    message.error("Network error while saving map snapshot.");
   } finally {
     buildLoading.value = false;
   }
@@ -99,6 +166,29 @@ async function buildContext() {
   <div class="context-page">
     <div class="overlay">
       <NCard size="small" class="overlay-card" embedded>
+        <div class="map-heading">Context Map</div>
+        <NInput
+          v-model:value="search"
+          size="small"
+          clearable
+          placeholder="Search visible sources…"
+          style="margin: 8px 0"
+        />
+        <NSelect
+          v-model:value="insightSource"
+          size="small"
+          clearable
+          placeholder="All insight sources"
+          :options="[
+            { label: 'Project context', value: 'project_context' },
+            { label: 'Company context', value: 'company_context' },
+            { label: 'Contact context', value: 'contact_context' },
+            { label: 'Enrichment', value: 'enrichment' },
+            { label: 'Research', value: 'research' },
+            { label: 'Job postings', value: 'job_posting' },
+          ]"
+        />
+        <div v-if="insightWarnings.length" class="map-warning">{{ insightWarnings.length }} source warning(s)</div>
         <div class="overlay-title">
           <span>Selected</span>
           <NTag size="small" :bordered="false" type="info">{{ selectedNodes.length }}</NTag>
@@ -133,9 +223,9 @@ async function buildContext() {
               size="small"
               type="primary"
               :loading="buildLoading"
-              @click="buildContext"
+              @click="saveMapSnapshot"
             >
-              Build context
+              Save map snapshot
             </NButton>
 
             <NButton
@@ -162,12 +252,13 @@ async function buildContext() {
 
     <VueFlow
       ref="vueFlowRef"
-      v-model:nodes="flowNodes"
-      :edges="flowEdges"
+      :nodes="displayedNodes"
+      :edges="displayedEdges"
       :min-zoom="0.15"
       :max-zoom="2"
       :default-edge-options="{ type: 'smoothstep', animated: false }"
       class="context-flow"
+      @node-click="inspectNode"
     >
       <!-- Custom node types via slots -->
       <template #node-center="nodeProps">
@@ -185,17 +276,35 @@ async function buildContext() {
       <template #node-conversation="nodeProps">
         <ConversationNode v-bind="nodeProps" />
       </template>
+      <template #node-insight="nodeProps">
+        <InsightNode v-bind="nodeProps" />
+      </template>
 
       <Background pattern-color="rgba(255,255,255,0.06)" :gap="24" />
       <Controls position="bottom-right" />
     </VueFlow>
+    <NButton v-if="insights.length > insightLimit" class="show-more" size="small" @click="insightLimit += 100">
+      Show 100 more insights
+    </NButton>
   </div>
+
+  <NDrawer :show="Boolean(inspectedNode)" :width="440" placement="right" @update:show="(show) => { if (!show) inspectedNode = null; }">
+    <NDrawerContent :title="inspectedTitle" closable>
+      <NSpace vertical size="large">
+        <NTag size="small" type="info" :bordered="false">{{ inspectedNode?.nodeType }}</NTag>
+        <div v-for="(value, key) in inspectedNode" :key="key" class="detail-row">
+          <div class="detail-label">{{ String(key).replace(/_/g, " ") }}</div>
+          <div class="detail-value">{{ value == null || value === "" ? "—" : value }}</div>
+        </div>
+      </NSpace>
+    </NDrawerContent>
+  </NDrawer>
 
   <!-- Context result modal -->
   <NModal
     v-model:show="showResult"
     preset="card"
-    title="Generated Context"
+    title="Saved Map Snapshot"
     style="width: 720px; max-width: 95vw"
   >
     <pre class="context-result">{{ resultText }}</pre>
@@ -233,6 +342,30 @@ async function buildContext() {
   flex: 1;
   background: #0e1017;
 }
+
+.map-heading {
+  font-weight: 700;
+  font-size: 1rem;
+}
+
+.detail-row {
+  border-bottom: 1px solid rgba(128, 128, 128, 0.18);
+  padding-bottom: 0.75rem;
+}
+
+.detail-label {
+  text-transform: capitalize;
+  font-size: 0.72rem;
+  opacity: 0.55;
+  margin-bottom: 0.25rem;
+}
+
+.detail-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.map-warning { color: #f2c97d; font-size: .72rem; margin-top: 6px; }
+.show-more { position: absolute; right: 58px; bottom: 16px; z-index: 5; }
 
 .context-result {
   font-family: "Consolas", "Fira Mono", "Menlo", monospace;

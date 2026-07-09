@@ -18,10 +18,12 @@ import {
   NCheckbox,
   NPopover,
   NSpin,
+  NDrawer,
+  NDrawerContent,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon } from "lucide-vue-next";
+import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon, Pencil, Plus, Trash2 } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 
@@ -80,6 +82,61 @@ const searchInput = ref("");
 const appliedSearch = ref("");
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const showAll = ref(false);
+const statusFilter = ref<string | null>(null);
+const industryFilter = ref("");
+const employeesFilter = ref("");
+const listFilter = ref<string | null>(null);
+const hypothesisFilter = ref<string | null>(null);
+const sortBy = ref("created_at");
+const sortDirection = ref<"asc" | "desc">("desc");
+const listOptions = ref<Array<{ label: string; value: string }>>([]);
+const editorOpen = ref(false);
+const editorSaving = ref(false);
+const editingCompanyId = ref<string | null>(null);
+const companyForm = ref({ name: "", domain: "", website: "", linkedin: "", industry: "", employees_range: "", status: "" });
+
+function openCompanyEditor(row?: CompanyRow) {
+  editingCompanyId.value = row?.company_id ?? null;
+  companyForm.value = {
+    name: row?.name ?? "", domain: row?.domain ?? "", website: "", linkedin: row?.linkedin ?? "",
+    industry: (row as any)?.industry ?? "", employees_range: (row as any)?.employees_range ?? "", status: (row as any)?.status ?? "",
+  };
+  editorOpen.value = true;
+}
+
+async function saveCompany() {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || !companyForm.value.name.trim()) { message.warning("Company name is required."); return; }
+  editorSaving.value = true;
+  try {
+    const r = await fetch("/api/project-company-records", {
+      method: editingCompanyId.value ? "PATCH" : "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, companyId: editingCompanyId.value, ...companyForm.value }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Save failed");
+    editorOpen.value = false; message.success(editingCompanyId.value ? "Company updated." : "Company created."); await fetchCompanies();
+  } catch (e) { message.error(e instanceof Error ? e.message : "Save failed"); }
+  finally { editorSaving.value = false; }
+}
+
+async function deleteCompanies(ids: string[]) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || ids.length === 0 || !window.confirm(`Remove ${ids.length} company(s) from this project?`)) return;
+  const r = await fetch("/api/project-company-records", {
+    method: "DELETE", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId, companyIds: ids }),
+  });
+  const j = await r.json();
+  if (!r.ok) { message.error(j.error ?? "Delete failed"); return; }
+  checkedKeys.value = []; message.success(`Removed ${j.data?.removed ?? ids.length} company(s).`); await fetchCompanies();
+}
+
+function clearCompanyFilters() {
+  searchInput.value = ""; appliedSearch.value = ""; statusFilter.value = null; industryFilter.value = "";
+  employeesFilter.value = ""; listFilter.value = null; hypothesisFilter.value = null;
+  sortBy.value = "created_at"; sortDirection.value = "desc"; page.value = 1;
+}
 
 // --- Context modal ---
 const ctxModalOpen = ref(false);
@@ -199,6 +256,12 @@ async function fetchCompanies() {
     });
     if (projectId) q.set("projectId", projectId);
     if (appliedSearch.value) q.set("search", appliedSearch.value);
+    if (statusFilter.value) q.set("status", statusFilter.value);
+    if (industryFilter.value.trim()) q.set("industry", industryFilter.value.trim());
+    if (employeesFilter.value.trim()) q.set("employeesRange", employeesFilter.value.trim());
+    if (listFilter.value) q.set("listUuid", listFilter.value);
+    if (hypothesisFilter.value) q.set("hypothesisId", hypothesisFilter.value);
+    q.set("sortBy", sortBy.value); q.set("sortDirection", sortDirection.value);
 
     let url: string;
     if (showAll.value) {
@@ -255,7 +318,7 @@ async function fetchCompanies() {
 }
 
 watch(
-  [() => projectStore.selectedProjectId, page, pageSize, appliedSearch, showAll],
+  [() => projectStore.selectedProjectId, page, pageSize, appliedSearch, showAll, statusFilter, industryFilter, employeesFilter, listFilter, hypothesisFilter, sortBy, sortDirection],
   () => fetchCompanies(),
   { immediate: true }
 );
@@ -268,6 +331,15 @@ watch(
     checkedKeys.value = [];
     searchInput.value = "";
     appliedSearch.value = "";
+    const projectId = projectStore.selectedProjectId;
+    listOptions.value = [];
+    hypotheses.value = [];
+    if (projectId) {
+      void fetch(`/api/contact-lists?projectId=${encodeURIComponent(projectId)}`).then((r) => r.json()).then((j) => {
+        listOptions.value = (j.data ?? []).map((row: { uuid: string; name: string }) => ({ label: row.name, value: row.uuid }));
+      });
+      void fetchHypotheses();
+    }
   }
 );
 
@@ -283,6 +355,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   {
     key: "name",
     title: "Name",
+    sorter: true,
     ellipsis: { tooltip: true },
     render: (row) => {
       const label = h(
@@ -300,6 +373,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   {
     key: "domain",
     title: "Domain",
+    sorter: true,
     ellipsis: { tooltip: true },
     render: (row) => row.domain ?? "—",
   },
@@ -428,6 +502,16 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     width: 120,
     render: (row) => new Date(row.created_at).toLocaleDateString(),
   },
+  ...(!showAll.value ? [{
+    key: "actions",
+    title: "",
+    width: 90,
+    fixed: "right" as const,
+    render: (row: CompanyRow) => h(NSpace, { size: 2 }, () => [
+      h(NButton, { quaternary: true, size: "tiny", onClick: () => openCompanyEditor(row) }, () => h(Pencil, { size: 13 })),
+      h(NButton, { quaternary: true, size: "tiny", type: "error", onClick: () => void deleteCompanies([row.company_id]) }, () => h(Trash2, { size: 13 })),
+    ]),
+  }] : []),
 ]);
 
 // --- Selection helpers ---
@@ -537,6 +621,9 @@ async function submitAddToHypothesis() {
         <div class="toolbar-right">
           <span v-if="loading" class="toolbar-loading-hint">Loading…</span>
           <NCheckbox v-model:checked="showAll" size="small">Show all</NCheckbox>
+          <NButton v-if="!showAll" size="small" type="primary" @click="openCompanyEditor()">
+            <template #icon><Plus :size="13" /></template>New
+          </NButton>
           <NInput
             v-model:value="searchInput"
             placeholder="Search name or domain…"
@@ -545,6 +632,14 @@ async function submitAddToHypothesis() {
             style="width: 220px"
           />
         </div>
+      </div>
+      <div v-if="!showAll" class="company-filters">
+        <NSelect v-model:value="statusFilter" :options="[{ label: 'Active', value: 'active' }, { label: 'Inactive', value: 'inactive' }]" placeholder="Status…" clearable size="small" />
+        <NInput v-model:value="industryFilter" placeholder="Exact industry…" clearable size="small" />
+        <NInput v-model:value="employeesFilter" placeholder="Employee range…" clearable size="small" />
+        <NSelect v-model:value="listFilter" :options="listOptions" placeholder="Contact list…" clearable filterable size="small" />
+        <NSelect v-model:value="hypothesisFilter" :options="hypotheses" placeholder="Hypothesis…" clearable filterable size="small" />
+        <NButton size="small" @click="clearCompanyFilters">Clear filters</NButton>
       </div>
 
       <!-- Bulk action bar -->
@@ -570,6 +665,12 @@ async function submitAddToHypothesis() {
           Add {{ inProjectSelected.length }} to hypothesis
         </NButton>
         <NButton quaternary size="small" @click="checkedKeys = []">Clear</NButton>
+        <NButton
+          v-if="inProjectSelected.length > 0"
+          type="error"
+          size="small"
+          @click="deleteCompanies(inProjectSelected.map((row) => row.company_id))"
+        >Delete {{ inProjectSelected.length }}</NButton>
       </div>
 
       <NAlert v-if="error" type="error" style="margin-bottom: 0.75rem">{{ error }}</NAlert>
@@ -594,12 +695,28 @@ async function submitAddToHypothesis() {
           onUpdatePage: (p: number) => { page = p; },
           onUpdatePageSize: (ps: number) => { pageSize = ps; page = 1; },
         }"
+        @update:sorter="(sorter: any) => { sortBy = sorter?.columnKey ?? 'created_at'; sortDirection = sorter?.order === 'ascend' ? 'asc' : 'desc'; page = 1; }"
       />
       <NEmpty
         v-else-if="!loading"
         :description="showAll ? 'No companies found' : 'No companies in this project — check \'Show all\' to browse and add'"
       />
     </NCard>
+
+    <NDrawer v-model:show="editorOpen" :width="440" placement="right">
+      <NDrawerContent :title="editingCompanyId ? 'Edit company' : 'New company'" closable>
+        <NForm>
+          <NFormItem label="Name" required><NInput v-model:value="companyForm.name" /></NFormItem>
+          <NFormItem label="Domain"><NInput v-model:value="companyForm.domain" /></NFormItem>
+          <NFormItem label="Website"><NInput v-model:value="companyForm.website" /></NFormItem>
+          <NFormItem label="LinkedIn"><NInput v-model:value="companyForm.linkedin" /></NFormItem>
+          <NFormItem label="Industry"><NInput v-model:value="companyForm.industry" /></NFormItem>
+          <NFormItem label="Employee range"><NInput v-model:value="companyForm.employees_range" /></NFormItem>
+          <NFormItem label="Project status"><NInput v-model:value="companyForm.status" /></NFormItem>
+        </NForm>
+        <template #footer><NSpace justify="end"><NButton @click="editorOpen = false">Cancel</NButton><NButton type="primary" :loading="editorSaving" @click="saveCompany">Save</NButton></NSpace></template>
+      </NDrawerContent>
+    </NDrawer>
 
     <!-- Add to hypothesis modal -->
     <NModal
@@ -723,6 +840,13 @@ async function submitAddToHypothesis() {
   font-size: 0.82rem;
   opacity: 0.65;
   margin-right: 0.25rem;
+}
+
+.company-filters {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(140px, 1fr)) auto;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
 }
 
 .bulk-bar {

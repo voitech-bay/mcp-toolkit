@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { getSupabase } from "./services/supabase.js";
+import { CONTACTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
 import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
 import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, reanchorQuote, stableResearchPoints, validateDraft, type EmailStatus } from "./services/email-studio.js";
 
@@ -10,6 +10,90 @@ async function body(req: IncomingMessage): Promise<Json> { const chunks: Buffer[
 function url(req: IncomingMessage) { return new URL(req.url ?? "", "http://localhost"); }
 function actor(req: IncomingMessage) { return String(req.headers["x-user-id"] ?? "voitech-user").slice(0, 200); }
 function validProject(value: unknown): value is string { return typeof value === "string" && UUID_RE.test(value); }
+function str(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
+
+type ResolvedContact = {
+  uuid: string;
+  name: string;
+  company_name: string;
+  company_uuid: string | null;
+  work_email: string | null;
+};
+
+function contactSummary(row: Record<string, unknown>): ResolvedContact {
+  const first = str(row.first_name);
+  const last = str(row.last_name);
+  const name = str(row.name) || [first, last].filter(Boolean).join(" ");
+  return {
+    uuid: String(row.uuid),
+    name,
+    company_name: str(row.company_name),
+    company_uuid: row.company_uuid ? String(row.company_uuid) : null,
+    work_email: row.work_email ? String(row.work_email) : null,
+  };
+}
+
+async function findContactsByName(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  projectId: string,
+  firstName: string,
+  lastName: string,
+  companyName = "",
+) {
+  const first = firstName.trim();
+  const last = lastName.trim();
+  const company = companyName.trim();
+  const fullName = [first, last].filter(Boolean).join(" ");
+  const select = "uuid, name, first_name, last_name, company_name, company_uuid, work_email";
+
+  let byParts = client.from(CONTACTS_TABLE).select(select).eq("project_id", projectId).ilike("first_name", first).ilike("last_name", last);
+  if (company) byParts = byParts.ilike("company_name", `%${escapeIlikeMetacharacters(company)}%`);
+  const partsResult = await byParts.order("created_at", { ascending: false }).limit(10);
+  if (partsResult.error) throw new Error(partsResult.error.message);
+  if ((partsResult.data ?? []).length > 0) return (partsResult.data ?? []) as Record<string, unknown>[];
+
+  let byName = client.from(CONTACTS_TABLE).select(select).eq("project_id", projectId).ilike("name", fullName);
+  if (company) byName = byName.ilike("company_name", `%${escapeIlikeMetacharacters(company)}%`);
+  const nameResult = await byName.order("created_at", { ascending: false }).limit(10);
+  if (nameResult.error) throw new Error(nameResult.error.message);
+  return (nameResult.data ?? []) as Record<string, unknown>[];
+}
+
+async function resolveContactForEmailStudio(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  projectId: string,
+  input: { contactId?: unknown; firstName?: unknown; lastName?: unknown; companyName?: unknown },
+): Promise<{ contact: ResolvedContact } | { error: string; status: number; matches?: ResolvedContact[] }> {
+  const contactId = str(input.contactId);
+  if (validProject(contactId)) {
+    const found = await client.from(CONTACTS_TABLE).select("uuid, name, first_name, last_name, company_name, company_uuid, work_email").eq("project_id", projectId).eq("uuid", contactId).maybeSingle();
+    if (found.error) return { error: found.error.message, status: 500 };
+    if (!found.data) return { error: "Contact not found in this project.", status: 404 };
+    return { contact: contactSummary(found.data as Record<string, unknown>) };
+  }
+
+  const firstName = str(input.firstName);
+  const lastName = str(input.lastName);
+  const companyName = str(input.companyName);
+  if (!firstName || !lastName) {
+    return { error: "First name and last name are required.", status: 400 };
+  }
+
+  const matches = (await findContactsByName(client, projectId, firstName, lastName, companyName)).map((row) => contactSummary(row));
+  if (matches.length === 0) {
+    return { error: "No contact found with that name in this project.", status: 404 };
+  }
+  if (matches.length > 1) {
+    return {
+      error: companyName
+        ? "Multiple contacts still match. Pick one from the list."
+        : "Multiple contacts match. Add a company name or pick one from the list.",
+      status: 409,
+      matches,
+    };
+  }
+  return { contact: matches[0] };
+}
 
 async function getScopedEmail(client: NonNullable<ReturnType<typeof getSupabase>>, id: string, projectId: string) {
   if (!UUID_RE.test(id) || !validProject(projectId)) return null;
@@ -70,11 +154,58 @@ export async function handleEmailStudioList(req: IncomingMessage, res: ServerRes
   return send(res, 200, { data: rows.map((x) => ({ ...x, open_comment_count: counts.get(String(x.id)) ?? 0 })), total: result.count ?? 0, page, pageSize });
 }
 
+export async function handleEmailStudioContactSearch(req: IncomingMessage, res: ServerResponse) {
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const q = url(req).searchParams;
+  const projectId = q.get("projectId") ?? "";
+  if (!validProject(projectId)) return send(res, 400, { error: "projectId is required" });
+  const enabled = await client.from("project_outreach_settings").select("email_studio_enabled").eq("project_id", projectId).maybeSingle();
+  if (!enabled.data?.email_studio_enabled) return send(res, 403, { error: "Email Studio is not enabled for this project" });
+
+  const firstName = q.get("firstName")?.trim() ?? "";
+  const lastName = q.get("lastName")?.trim() ?? "";
+  const companyName = q.get("companyName")?.trim() ?? "";
+  if (!firstName || !lastName) return send(res, 400, { error: "firstName and lastName are required" });
+
+  try {
+    const matches = (await findContactsByName(client, projectId, firstName, lastName, companyName)).map((row) => contactSummary(row));
+    return send(res, 200, { data: matches });
+  } catch (e) {
+    return send(res, 500, { error: e instanceof Error ? e.message : "Contact search failed" });
+  }
+}
+
 export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerResponse) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req);
-  if (!validProject(b.projectId) || !validProject(b.contactId)) return send(res, 400, { error: "projectId and contactId are required" });
+  if (!validProject(b.projectId)) return send(res, 400, { error: "projectId is required" });
   const enabled = await client.from("project_outreach_settings").select("email_studio_enabled").eq("project_id", b.projectId).maybeSingle(); if (!enabled.data?.email_studio_enabled) return send(res, 403, { error: "Email Studio is not enabled for this project" });
-  const row = { project_id: b.projectId, contact_id: b.contactId, contact_name: String(b.contactName ?? ""), company_name: String(b.companyName ?? ""), company_id: validProject(b.companyId) ? b.companyId : null, campaign_id: String(b.campaignId ?? ""), batch_name: String(b.batchName ?? ""), persona: String(b.persona ?? ""), sequence_step: Math.max(1, Number(b.sequenceStep ?? 1)), recipient_email: b.recipientEmail ? String(b.recipientEmail).trim().toLowerCase() : null, assigned_reviewer_id: b.assignedReviewerId ? String(b.assignedReviewerId) : null, provenance: String(b.provenance ?? "voitech_generated"), status: b.researchSnapshotId ? "research_ready" : "research_missing", research_quality: b.researchSnapshotId ? "unknown" : "missing", research_snapshot_id: validProject(b.researchSnapshotId) ? b.researchSnapshotId : null };
+
+  const resolved = await resolveContactForEmailStudio(client, b.projectId, {
+    contactId: b.contactId,
+    firstName: b.firstName,
+    lastName: b.lastName,
+    companyName: b.companyName,
+  });
+  if ("error" in resolved) return send(res, resolved.status, resolved.matches ? { error: resolved.error, matches: resolved.matches } : { error: resolved.error });
+  const contact = resolved.contact;
+
+  const row = {
+    project_id: b.projectId,
+    contact_id: contact.uuid,
+    contact_name: str(b.contactName) || contact.name,
+    company_name: str(b.companyName) || contact.company_name,
+    company_id: validProject(b.companyId) ? b.companyId : contact.company_uuid,
+    campaign_id: String(b.campaignId ?? ""),
+    batch_name: String(b.batchName ?? ""),
+    persona: String(b.persona ?? ""),
+    sequence_step: Math.max(1, Number(b.sequenceStep ?? 1)),
+    recipient_email: b.recipientEmail ? String(b.recipientEmail).trim().toLowerCase() : contact.work_email,
+    assigned_reviewer_id: b.assignedReviewerId ? String(b.assignedReviewerId) : null,
+    provenance: String(b.provenance ?? "voitech_generated"),
+    status: b.researchSnapshotId ? "research_ready" : "research_missing",
+    research_quality: b.researchSnapshotId ? "unknown" : "missing",
+    research_snapshot_id: validProject(b.researchSnapshotId) ? b.researchSnapshotId : null,
+  };
   const r = await client.from("outreach_emails").upsert(row, { onConflict: "project_id,contact_id,campaign_id,batch_name,sequence_step", ignoreDuplicates: false }).select("*").single();
   if (r.error) return send(res, 500, { error: r.error.message });
   await client.from("outreach_email_status_events").insert({ email_id: r.data.id, from_status: null, to_status: r.data.status, actor_type: "user", actor_id: actor(req), reason: "Email Studio record created" });

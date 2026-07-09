@@ -9,6 +9,7 @@ import {
   listCompanyContextsByCompanyId,
   listContactContextsByContactId,
   getHypothesesWithCounts,
+  getProjectGtmContext,
 } from "./supabase.js";
 
 /** Shapes of selected node data from the frontend (mirrors ReplyContextModal / context builder). */
@@ -228,6 +229,19 @@ export async function buildReplyContextPrompt(
   const contactNodes = nodes.contacts ?? [];
   const hypothesisNodes = nodes.hypotheses ?? [];
   const conversationNodes = nodes.conversations ?? [];
+  const projectContextResult = await getProjectGtmContext(client, projectId);
+  const projectContext = projectContextResult.data;
+  const projectContextLines = projectContext
+    ? [
+        ["Core concept / offering", projectContext.core_concept],
+        ["ICP", projectContext.icp_description],
+        ["Pains and buying signals", projectContext.pains_and_signals],
+        ["Expertise and differentiators", projectContext.expertise_and_differentiators],
+        ["Proof and customer cases", projectContext.proof_and_customer_cases],
+        ["Objections and competitors", projectContext.objections_and_competitors],
+        ["Exclusions", projectContext.exclusions],
+      ].filter(([, value]) => value?.trim()).map(([label, value]) => `${label}:\n${value}`).join("\n\n")
+    : "";
 
   const mainCompany =
     companyNodes[0] ??
@@ -427,6 +441,8 @@ export async function buildReplyContextPrompt(
     "",
     `Company contexts:\n${companyContextLines}`,
     "",
+    projectContextLines ? `Project GTM context:\n${projectContextLines}` : "",
+    projectContextLines ? "" : "",
     hypothesisBlock ? hypothesisBlock : "",
     hypothesisBlock ? "" : "",
     ...contactBlocks,

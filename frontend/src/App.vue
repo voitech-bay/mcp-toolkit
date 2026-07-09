@@ -124,7 +124,7 @@ const backlogMenuOptions: DropdownOption[] = [
     icon: () => h(BookmarkIcon, { size: 14 }),
   },
   {
-    label: "Context builder",
+    label: "Context map",
     key: "/context",
     icon: () => h(NetworkIcon, { size: 14 }),
   },

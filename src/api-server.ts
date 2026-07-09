@@ -44,8 +44,12 @@ import {
   handleSyncHistory,
   handleGetAllCompanies,
   handleAddCompaniesToProject,
+  handleProjectCompanyRecords,
+  handleProjectContactRecords,
   handleGetProjectCompanies,
   handleGetHypotheses,
+  handleProjectGtmContext,
+  handleGetContextMap,
   handleCreateHypothesis,
   handleUpdateHypothesis,
   handleDeleteHypothesis,
@@ -166,6 +170,7 @@ import {
   handleEmailStudioApprove,
   handleEmailStudioCreate,
   handleEmailStudioCreateComment,
+  handleEmailStudioContactSearch,
   handleEmailStudioGenerate,
   handleEmailStudioGet,
   handleEmailStudioHumanVersion,
@@ -372,6 +377,7 @@ const server = createServer(async (req, res) => {
   const emailStudioCommentMatch = !emailStudioCommentReplyMatch && pathname.match(/^\/api\/email-studio\/comments\/([^/]+)$/);
 
   try {
+    if (pathname === "/api/email-studio/contact-search") { if (req.method === "GET") await handleEmailStudioContactSearch(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/emails") { if (req.method === "GET") await handleEmailStudioList(req, res); else if (req.method === "POST") await handleEmailStudioCreate(req, res); else { res.writeHead(405); res.end(); } return; }
     if (emailStudioStatusMatch) { if (req.method === "PATCH") await handleEmailStudioStatus(req, res, emailStudioStatusMatch[1]); else { res.writeHead(405); res.end(); } return; }
     if (emailStudioGenerateMatch) { if (req.method === "POST") await handleEmailStudioGenerate(req, res, emailStudioGenerateMatch[1]); else { res.writeHead(405); res.end(); } return; }
@@ -927,6 +933,12 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/project-company-records":
+        await handleProjectCompanyRecords(req, res);
+        return;
+      case "/api/project-contact-records":
+        await handleProjectContactRecords(req, res);
+        return;
       case "/api/companies/by-ids":
         await handleGetCompaniesByIds(req, res);
         return;
@@ -949,6 +961,12 @@ const server = createServer(async (req, res) => {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
+        return;
+      case "/api/project-gtm-context":
+        await handleProjectGtmContext(req, res);
+        return;
+      case "/api/context-map":
+        await handleGetContextMap(req, res);
         return;
       case "/api/build-context":
         if (req.method === "POST") {

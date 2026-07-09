@@ -5,6 +5,7 @@ import {
   NCard,
   NDataTable,
   NInput,
+  NSelect,
   NButton,
   NSpace,
   NAlert,
@@ -15,10 +16,12 @@ import {
   NTag,
   NAvatar,
   NSpin,
+  NDrawer,
+  NDrawerContent,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { UsersIcon, FileTextIcon, BuildingIcon } from "lucide-vue-next";
+import { UsersIcon, FileTextIcon, BuildingIcon, Pencil, Plus, Trash2 } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
@@ -53,6 +56,63 @@ const PAGE_SIZES = [10, 25, 50, 100];
 const searchInput = ref("");
 const appliedSearch = ref("");
 const checkedKeys = ref<DataTableRowKey[]>([]);
+const roleFilter = ref("");
+const emailFilter = ref("");
+const listFilter = ref<string | null>(null);
+const sortBy = ref("created_at");
+const sortDirection = ref<"asc" | "desc">("desc");
+const listOptions = ref<Array<{ label: string; value: string }>>([]);
+const editorOpen = ref(false);
+const editorSaving = ref(false);
+const editingContactId = ref<string | null>(null);
+const contactForm = ref({ first_name: "", last_name: "", position: "", work_email: "", personal_email: "", company_name: "", location: "" });
+
+function openContactEditor(row?: ContactRow) {
+  editingContactId.value = row ? contactRowId(row) : null;
+  contactForm.value = {
+    first_name: row?.first_name ?? "", last_name: row?.last_name ?? "",
+    position: row?.position ?? "", work_email: row?.work_email ?? "",
+    personal_email: row?.email ?? "", company_name: row?.company_name ?? "", location: "",
+  };
+  editorOpen.value = true;
+}
+
+async function saveContact() {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || (!contactForm.value.first_name.trim() && !contactForm.value.last_name.trim())) {
+    message.warning("A first or last name is required."); return;
+  }
+  editorSaving.value = true;
+  try {
+    const r = await fetch("/api/project-contact-records", {
+      method: editingContactId.value ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId, contactId: editingContactId.value, ...contactForm.value }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Save failed");
+    editorOpen.value = false; message.success(editingContactId.value ? "Contact updated." : "Contact created.");
+    await fetchContacts();
+  } catch (e) { message.error(e instanceof Error ? e.message : "Save failed"); }
+  finally { editorSaving.value = false; }
+}
+
+async function deleteContacts(ids: string[]) {
+  const projectId = projectStore.selectedProjectId;
+  if (!projectId || ids.length === 0 || !window.confirm(`Remove ${ids.length} contact(s) from this project?`)) return;
+  const r = await fetch("/api/project-contact-records", {
+    method: "DELETE", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ projectId, contactIds: ids }),
+  });
+  const j = await r.json();
+  if (!r.ok) { message.error(j.error ?? "Delete failed"); return; }
+  checkedKeys.value = []; message.success(`Removed ${j.data?.removed ?? ids.length} contact(s).`); await fetchContacts();
+}
+
+function clearFilters() {
+  searchInput.value = ""; appliedSearch.value = ""; roleFilter.value = ""; emailFilter.value = "";
+  listFilter.value = null; sortBy.value = "created_at"; sortDirection.value = "desc"; page.value = 1;
+}
 
 const debouncedSearch = useDebounceFn(() => {
   appliedSearch.value = searchInput.value.trim();
@@ -227,14 +287,19 @@ async function fetchContacts() {
   loading.value = true;
   error.value = "";
   try {
-    const filters = encodeURIComponent(JSON.stringify({ project_id: projectId }));
+    const filterValues: Record<string, string> = { project_id: projectId };
+    if (roleFilter.value.trim()) filterValues.position = roleFilter.value.trim();
+    if (emailFilter.value.trim()) filterValues.work_email = emailFilter.value.trim();
+    if (listFilter.value) filterValues.list_uuid = listFilter.value;
     const q = new URLSearchParams({
       table: "contacts",
-      filters,
+      filters: encodeURIComponent(JSON.stringify(filterValues)),
       limit: String(pageSize.value),
       offset: String((page.value - 1) * pageSize.value),
     });
     if (appliedSearch.value) q.set("search", appliedSearch.value);
+    q.set("sortBy", sortBy.value);
+    q.set("sortDirection", sortDirection.value);
     const r = await fetch(`/api/supabase-table-query?${q.toString()}`);
     const j = await r.json();
     if (!r.ok) {
@@ -255,13 +320,21 @@ async function fetchContacts() {
 }
 
 watch(
-  () => [projectStore.selectedProjectId, page.value, pageSize.value, appliedSearch.value],
+  () => [projectStore.selectedProjectId, page.value, pageSize.value, appliedSearch.value, roleFilter.value, emailFilter.value, listFilter.value, sortBy.value, sortDirection.value],
   () => {
     checkedKeys.value = [];
     fetchContacts();
   },
   { immediate: true }
 );
+
+watch(() => projectStore.selectedProjectId, async (projectId) => {
+  listOptions.value = [];
+  if (!projectId) return;
+  const r = await fetch(`/api/contact-lists?projectId=${encodeURIComponent(projectId)}`);
+  const j = await r.json();
+  listOptions.value = (j.data ?? []).map((row: { uuid: string; name: string }) => ({ label: row.name, value: row.uuid }));
+}, { immediate: true });
 
 function onUpdatePage(p: number) {
   page.value = p;
@@ -297,6 +370,7 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
   {
     key: "name",
     title: "Name",
+    sorter: true,
     width: 200,
     ellipsis: { tooltip: true },
     render: (row) => {
@@ -312,6 +386,7 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
   {
     key: "position",
     title: "Role",
+    sorter: true,
     width: 180,
     ellipsis: { tooltip: true },
     render: (row) => row.position ?? "—",
@@ -396,6 +471,16 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
       );
     },
   },
+  {
+    key: "actions",
+    title: "",
+    width: 90,
+    fixed: "right",
+    render: (row) => h(NSpace, { size: 2 }, () => [
+      h(NButton, { quaternary: true, size: "tiny", onClick: () => openContactEditor(row) }, () => h(Pencil, { size: 13 })),
+      h(NButton, { quaternary: true, size: "tiny", type: "error", onClick: () => { const id = contactRowId(row); if (id) void deleteContacts([id]); } }, () => h(Trash2, { size: 13 })),
+    ]),
+  },
 ]);
 </script>
 
@@ -408,13 +493,19 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
           <span>Contacts</span>
           <span v-if="loading" style="opacity:0.6;font-size:0.82rem">Loading…</span>
         </div>
-        <NInput
-          v-model:value="searchInput"
-          placeholder="Search name or role…"
-          clearable
-          size="small"
-          style="width: 280px"
-        />
+        <NSpace>
+          <NButton size="small" type="primary" @click="openContactEditor()"><template #icon><Plus :size="13" /></template>New</NButton>
+          <NInput v-model:value="searchInput" placeholder="Search name or role…" clearable size="small" style="width: 220px" />
+        </NSpace>
+      </div>
+      <div class="filters">
+        <NInput v-model:value="roleFilter" placeholder="Exact role…" clearable size="small" />
+        <NInput v-model:value="emailFilter" placeholder="Exact work email…" clearable size="small" />
+        <NSelect v-model:value="listFilter" :options="listOptions" placeholder="Contact list…" clearable filterable size="small" />
+        <NButton size="small" @click="clearFilters">Clear filters</NButton>
+        <NButton v-if="checkedKeys.length" size="small" type="error" @click="deleteContacts(checkedKeys.map(String))">
+          Delete {{ checkedKeys.length }}
+        </NButton>
       </div>
     </template>
 
@@ -433,9 +524,27 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
         v-model:checked-row-keys="checkedKeys"
         remote
         :pagination="pagination"
+        @update:sorter="(sorter: any) => { sortBy = sorter?.columnKey === 'name' ? 'first_name' : (sorter?.columnKey ?? 'created_at'); sortDirection = sorter?.order === 'ascend' ? 'asc' : 'desc'; page = 1; }"
       />
     </template>
   </NCard>
+
+  <NDrawer v-model:show="editorOpen" :width="440" placement="right">
+    <NDrawerContent :title="editingContactId ? 'Edit contact' : 'New contact'" closable>
+      <NForm>
+        <NFormItem label="First name"><NInput v-model:value="contactForm.first_name" /></NFormItem>
+        <NFormItem label="Last name"><NInput v-model:value="contactForm.last_name" /></NFormItem>
+        <NFormItem label="Role"><NInput v-model:value="contactForm.position" /></NFormItem>
+        <NFormItem label="Work email"><NInput v-model:value="contactForm.work_email" /></NFormItem>
+        <NFormItem label="Personal email"><NInput v-model:value="contactForm.personal_email" /></NFormItem>
+        <NFormItem label="Company"><NInput v-model:value="contactForm.company_name" /></NFormItem>
+        <NFormItem label="Location"><NInput v-model:value="contactForm.location" /></NFormItem>
+      </NForm>
+      <template #footer>
+        <NSpace justify="end"><NButton @click="editorOpen = false">Cancel</NButton><NButton type="primary" :loading="editorSaving" @click="saveContact">Save</NButton></NSpace>
+      </template>
+    </NDrawerContent>
+  </NDrawer>
 
   <NModal v-model:show="ctxModalOpen" preset="card" style="width: 720px">
     <template #header>
@@ -488,3 +597,11 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
   />
 </template>
 
+<style scoped>
+.filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto auto;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+</style>

@@ -20,6 +20,7 @@ import {
 import { buildLeadersList } from "./services/leaders-list.js";
 import { syncMarkersForContacts } from "./services/getsales-markers.js";
 import { CONTACTS_TABLE, getGetSalesCredentials } from "./services/supabase.js";
+import { fetchContactByUuid } from "./services/source-api.js";
 import { FEASIBLE_PROJECT_ID } from "./services/feasible-context.js";
 import { generateOpenRouterMessage } from "./services/openrouter.js";
 import {
@@ -59,6 +60,38 @@ async function readJsonBody(req: IncomingMessage): Promise<Json> {
   }
 }
 
+function contactAvatarUrl(contact: Json): string {
+  const v = contact.avatar_url;
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** When avatar_url is missing locally, fetch the lead from GetSales and persist the photo URL. */
+async function hydrateContactAvatarIfMissing(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  contact: Json,
+): Promise<Json> {
+  if (contactAvatarUrl(contact)) return contact;
+  const uuid = typeof contact.uuid === "string" ? contact.uuid.trim() : "";
+  const projectId = typeof contact.project_id === "string" ? contact.project_id.trim() : "";
+  if (!uuid || !projectId) return contact;
+
+  const credentialsResult = await getGetSalesCredentials(client, projectId);
+  const credentials = credentialsResult.credentials;
+  if (!credentials?.baseUrl || !credentials?.apiKey) return contact;
+
+  try {
+    const fetched = await fetchContactByUuid(credentials, uuid);
+    if (!fetched) return contact;
+    const avatarUrl = typeof fetched.avatar_url === "string" ? fetched.avatar_url.trim() : "";
+    if (!avatarUrl) return contact;
+    const { error } = await client.from(CONTACTS_TABLE).update({ avatar_url: avatarUrl }).eq("uuid", uuid);
+    if (error) return contact;
+    return { ...contact, avatar_url: avatarUrl };
+  } catch {
+    return contact;
+  }
+}
+
 // --- GET /api/cards/contact?uuid= --------------------------------------------
 export async function handleGetContactCard(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
@@ -68,7 +101,10 @@ export async function handleGetContactCard(req: IncomingMessage, res: ServerResp
   if (!UUID_RE.test(uuid)) return sendJson(res, 400, { error: "uuid must be a UUID" });
   const { data, error } = await buildContactCard(client, uuid, { includeCompanyReplyContacts: true });
   if (error) return sendJson(res, error === "Contact not found" ? 404 : 500, { error });
-  sendJson(res, 200, data);
+  if (!data) return sendJson(res, 404, { error: "Contact not found" });
+  const contact = (data.contact as Json) ?? {};
+  const hydratedContact = await hydrateContactAvatarIfMissing(client, contact);
+  sendJson(res, 200, { ...data, contact: hydratedContact });
 }
 
 // --- GET /api/cards/company?id= -----------------------------------------------
