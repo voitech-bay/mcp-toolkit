@@ -4412,7 +4412,7 @@ export interface TableQueryFilters {
 
 /** Columns to search with ILIKE %term% per table (case-insensitive). */
 export const SEARCH_COLUMNS_BY_TABLE: Record<string, string[]> = {
-  contacts: ["company_name", "first_name", "last_name", "position"],
+  contacts: ["company_name", "first_name", "last_name", "name", "position", "work_email"],
   linkedin_messages: ["text"],
   senders: ["first_name", "last_name"],
 };

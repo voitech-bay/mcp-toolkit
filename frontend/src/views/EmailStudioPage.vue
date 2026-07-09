@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from "vue";
-import { NAlert, NButton, NCard, NCheckbox, NDataTable, NDrawer, NDrawerContent, NEmpty, NFormItem, NInput, NInputNumber, NModal, NPagination, NSelect, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns } from "naive-ui";
+import { NAlert, NAvatar, NButton, NCard, NCheckbox, NCollapse, NCollapseItem, NDataTable, NDrawer, NDrawerContent, NEmpty, NFormItem, NInput, NInputNumber, NModal, NPagination, NSelect, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns } from "naive-ui";
 import { useProjectStore } from "../stores/project";
 
 type Json = Record<string, any>;
 interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
 interface Annotation { id:string; text:string; start:number; end:number; purpose:string; research_point_ids:string[]; instruction_ids:string[]; explanation:string; classification:"verified"|"product_truth"|"instruction"|"inference"; confidence:string; warnings:string[] }
+interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
+
 const store = useProjectStore(); const toast = useMessage(); const dialog = useDialog();
 const rows = ref<EmailRow[]>([]), total = ref(0), page = ref(1), pageSize = ref(25), loading = ref(false), error = ref("");
 const search = ref(""), statusFilter = ref<string|null>(null), campaignFilter = ref(""), batchFilter = ref(""), personaFilter = ref(""), reviewerFilter = ref(""), modelFilter = ref(""), qualityFilter = ref<string|null>(null), dateFrom = ref(""), dateTo = ref(""), openOnly = ref(false), savedView = ref("all");
@@ -13,9 +15,8 @@ const detailOpen = ref(false), detailLoading = ref(false), detail = ref<Json|nul
 const subject = ref(""), emailBody = ref(""), dirty = ref(false), selectedResearch = ref<string[]>([]), selectedText = ref({ quote:"", start:0, end:0 });
 const commentDraft = ref(""), regenerationPrompt = ref(""), actionLoading = ref(""), candidate = ref<Json|null>(null), compareOpen = ref(false), createOpen = ref(false);
 const replyDrafts = ref<Record<string,string>>({});
-type ContactMatch = { uuid:string; name:string; company_name:string; work_email:string|null };
-const newEmail = ref({ firstName:"", lastName:"", contactId:"", companyName:"", recipientEmail:"", campaignId:"", batchName:"", persona:"", sequenceStep:1 });
-const contactMatches = ref<ContactMatch[]>([]), contactSearchLoading = ref(false), selectedContact = ref<ContactMatch|null>(null);
+const pickerSearch = ref(""), pickerContacts = ref<PickerContact[]>([]), pickerTotal = ref(0), pickerPage = ref(1), pickerPageSize = ref(20), pickerLoading = ref(false), selectedPickerContact = ref<PickerContact|null>(null);
+const emailOptions = ref({ campaignId:"", batchName:"", persona:"", sequenceStep:1 });
 const bodyInput = ref<InstanceType<typeof NInput>|null>(null);
 
 const humanize = (value:string) => value.replace(/_/g, " ");
@@ -26,6 +27,13 @@ const currentVersion = computed(() => detail.value?.currentVersion ?? null); con
 const annotations = computed<Annotation[]>(() => (currentVersion.value?.annotations ?? []).slice().sort((a:Annotation,b:Annotation) => a.start-b.start));
 const researchPoints = computed<Json[]>(() => detail.value?.researchPoints ?? []);
 const canApprove = computed(() => detail.value?.data?.status === "final_check" && openComments.value.length === 0);
+const canStartEmail = computed(() => !!selectedPickerContact.value && !pickerLoading.value && !actionLoading.value);
+
+function contactLabel(c: PickerContact): string {
+  return (typeof c.name === "string" && c.name.trim())
+    || [c.first_name, c.last_name].filter((x) => typeof x === "string" && x).join(" ")
+    || "Unknown";
+}
 
 function fmt(v:string|null) { return v ? new Date(v).toLocaleString() : "—"; }
 function qs() { const q = new URLSearchParams({ projectId:String(store.selectedProjectId), page:String(page.value), pageSize:String(pageSize.value) }); if(search.value.trim())q.set("search",search.value.trim()); const status = savedView.value !== "all" ? savedView.value : statusFilter.value; if(status)q.set("status",status); if(campaignFilter.value)q.set("campaign",campaignFilter.value); if(batchFilter.value)q.set("batch",batchFilter.value); if(personaFilter.value)q.set("persona",personaFilter.value); if(reviewerFilter.value)q.set("reviewer",reviewerFilter.value); if(modelFilter.value)q.set("model",modelFilter.value); if(qualityFilter.value)q.set("researchQuality",qualityFilter.value); if(dateFrom.value)q.set("dateFrom",dateFrom.value); if(dateTo.value)q.set("dateTo",dateTo.value); if(openOnly.value)q.set("hasOpenComments","true"); return q; }
@@ -39,6 +47,83 @@ const columns:DataTableColumns<EmailRow> = [
   {title:"Comments",key:"open_comment_count",width:90},{title:"Updated",key:"updated_at",render:r=>fmt(r.updated_at)},
   {title:"",key:"actions",width:90,render:r=>h(NButton,{size:"small",type:"primary",secondary:true,onClick:()=>openEmail(r.id)},{default:()=>"Review"})},
 ];
+
+const pickerColumns: DataTableColumns<PickerContact> = [
+  {
+    key: "avatar",
+    title: "",
+    width: 44,
+    render: (row) => h(NAvatar, { round: true, size: 32, src: (row.avatar_url as string) || undefined }, { default: () => contactLabel(row).charAt(0).toUpperCase() }),
+  },
+  {
+    key: "name",
+    title: "Contact",
+    render: (row) => h("div", [h("strong", contactLabel(row)), h("div", { class: "muted" }, row.work_email || "No email")]),
+  },
+  { key: "company_name", title: "Company", ellipsis: { tooltip: true }, render: (row) => row.company_name || "—" },
+  { key: "position", title: "Role", ellipsis: { tooltip: true }, render: (row) => row.position || "—" },
+];
+
+async function loadPickerContacts() {
+  if (!store.selectedProjectId || !createOpen.value) return;
+  pickerLoading.value = true;
+  try {
+    const q = new URLSearchParams({
+      table: "contacts",
+      filters: encodeURIComponent(JSON.stringify({ project_id: store.selectedProjectId })),
+      limit: String(pickerPageSize.value),
+      offset: String((pickerPage.value - 1) * pickerPageSize.value),
+      sortBy: "first_name",
+      sortDirection: "asc",
+    });
+    if (pickerSearch.value.trim()) q.set("search", pickerSearch.value.trim());
+    const r = await fetch(`/api/supabase-table-query?${q}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Could not load contacts");
+    pickerContacts.value = (j.data ?? []) as PickerContact[];
+    pickerTotal.value = j.total ?? 0;
+  } catch (e) {
+    pickerContacts.value = [];
+    pickerTotal.value = 0;
+    toast.error(e instanceof Error ? e.message : "Could not load contacts");
+  } finally {
+    pickerLoading.value = false;
+  }
+}
+
+function resetCreateForm() {
+  pickerSearch.value = "";
+  pickerContacts.value = [];
+  pickerTotal.value = 0;
+  pickerPage.value = 1;
+  selectedPickerContact.value = null;
+  emailOptions.value = { campaignId: "", batchName: "", persona: "", sequenceStep: 1 };
+}
+
+function openCreateModal() {
+  resetCreateForm();
+  createOpen.value = true;
+  void loadPickerContacts();
+}
+
+function selectPickerContact(row: PickerContact) {
+  selectedPickerContact.value = row;
+}
+
+const pickerRowProps = (row: PickerContact) => ({
+  style: "cursor: pointer",
+  onClick: () => selectPickerContact(row),
+});
+
+let pickerTimer: number | undefined;
+watch([pickerSearch, pickerPage, pickerPageSize], () => {
+  if (!createOpen.value) return;
+  window.clearTimeout(pickerTimer);
+  pickerTimer = window.setTimeout(() => { void loadPickerContacts(); }, 250);
+});
+watch(pickerSearch, () => { pickerPage.value = 1; });
+watch(createOpen, (open) => { if (!open) resetCreateForm(); });
+
 async function openEmail(id:string) { selectedId.value=id; detailOpen.value=true; detailLoading.value=true; candidate.value=null; try { const r=await fetch(`/api/email-studio/emails/${id}?projectId=${store.selectedProjectId}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); detail.value=j; subject.value=j.currentVersion?.subject??""; emailBody.value=j.currentVersion?.body??""; selectedResearch.value=(j.researchPoints??[]).map((x:Json)=>x.id); dirty.value=false; if(j.data.status==="ai_draft_made") await setStatus("needs_review",false); } catch(e){toast.error(e instanceof Error?e.message:"Could not open email")} finally{detailLoading.value=false} }
 async function refreshDetail(){if(selectedId.value)await openEmail(selectedId.value)}
 async function request(path:string, options:RequestInit={}) { actionLoading.value=path; try { const r=await fetch(path,{...options,headers:{"Content-Type":"application/json",...(options.headers??{})}}); const j=await r.json(); if(!r.ok)throw new Error(j.error??"Action failed"); return j; } finally{actionLoading.value=""} }
@@ -52,14 +137,35 @@ function paragraphSelection(){const start=emailBody.value.lastIndexOf("\n",Math.
 async function generate(initial=false,scope="full"){try{const path=initial?"generate":"regenerate";const selection=scope==="selection"?selectedText.value:scope==="paragraph"?paragraphSelection():null;const j=await request(`/api/email-studio/emails/${selectedId.value}/${path}`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId,prompt:regenerationPrompt.value||undefined,scope,selection,includedResearchPointIds:selectedResearch.value})});if(initial){toast.success("AI draft created");await refreshDetail()}else{candidate.value=j.version;compareOpen.value=true;toast.success("Regeneration candidate ready")}}catch(e){toast.error(e instanceof Error?e.message:"Generation failed")}}
 async function adopt(){if(!candidate.value)return;try{await request(`/api/email-studio/emails/${selectedId.value}/versions/${candidate.value.id}/adopt`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId})});compareOpen.value=false;candidate.value=null;toast.success("New version adopted");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Could not adopt version")}}
 async function approve(){dialog.warning({title:"Approve this email?",content:"Approval locks the current version. Only Smartlead can mark it sent.",positiveText:"Approve",negativeText:"Cancel",onPositiveClick:async()=>{try{await request(`/api/email-studio/emails/${selectedId.value}/approve`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId})});toast.success("Email approved");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Approval failed")}}})}
-async function createEmail(){try{const payload:Record<string,unknown>={projectId:store.selectedProjectId,firstName:newEmail.value.firstName.trim(),lastName:newEmail.value.lastName.trim(),companyName:newEmail.value.companyName.trim()||undefined,campaignId:newEmail.value.campaignId,batchName:newEmail.value.batchName,persona:newEmail.value.persona,sequenceStep:newEmail.value.sequenceStep};if(selectedContact.value)payload.contactId=selectedContact.value.uuid;if(newEmail.value.recipientEmail.trim())payload.recipientEmail=newEmail.value.recipientEmail.trim();const r=await fetch("/api/email-studio/emails",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});const j=await r.json();if(!r.ok){if(r.status===409&&Array.isArray(j.matches)){contactMatches.value=j.matches;toast.warning(j.error??"Multiple contacts match");return}throw new Error(j.error??"Could not create record")}createOpen.value=false;resetCreateForm();await load();await openEmail(j.data.id)}catch(e){toast.error(e instanceof Error?e.message:"Could not create record")}}
-function resetCreateForm(){newEmail.value={firstName:"",lastName:"",contactId:"",companyName:"",recipientEmail:"",campaignId:"",batchName:"",persona:"",sequenceStep:1};contactMatches.value=[];selectedContact.value=null}
-function selectContact(c:ContactMatch){selectedContact.value=c;newEmail.value.contactId=c.uuid;newEmail.value.companyName=c.company_name||newEmail.value.companyName;newEmail.value.recipientEmail=c.work_email||newEmail.value.recipientEmail;contactMatches.value=[c]}
-const canCreateEmail = computed(() => !contactSearchLoading.value && !!selectedContact.value);
-let contactSearchTimer:number|undefined;
-async function searchContacts(){if(!store.selectedProjectId)return;const firstName=newEmail.value.firstName.trim(),lastName=newEmail.value.lastName.trim();if(!firstName||!lastName){contactMatches.value=[];selectedContact.value=null;return}contactSearchLoading.value=true;try{const q=new URLSearchParams({projectId:String(store.selectedProjectId),firstName,lastName});if(newEmail.value.companyName.trim())q.set("companyName",newEmail.value.companyName.trim());const r=await fetch(`/api/email-studio/contact-search?${q}`);const j=await r.json();if(!r.ok)throw new Error(j.error);contactMatches.value=j.data??[];if(contactMatches.value.length===1)selectContact(contactMatches.value[0]);else if(selectedContact.value&&!contactMatches.value.some(x=>x.uuid===selectedContact.value?.uuid))selectedContact.value=null}catch{contactMatches.value=[]}finally{contactSearchLoading.value=false}}
-watch(()=>[newEmail.value.firstName,newEmail.value.lastName,newEmail.value.companyName,createOpen.value],()=>{if(!createOpen.value)return;window.clearTimeout(contactSearchTimer);contactSearchTimer=window.setTimeout(searchContacts,300)},{deep:true});
-watch(createOpen,(open)=>{if(!open)resetCreateForm()});
+
+async function startEmailForContact() {
+  const contact = selectedPickerContact.value;
+  if (!contact?.uuid) return;
+  try {
+    const payload: Record<string, unknown> = {
+      projectId: store.selectedProjectId,
+      contactId: contact.uuid,
+      contactName: contactLabel(contact),
+      companyName: contact.company_name ?? "",
+      recipientEmail: contact.work_email ?? "",
+      campaignId: emailOptions.value.campaignId,
+      batchName: emailOptions.value.batchName,
+      persona: emailOptions.value.persona,
+      sequenceStep: emailOptions.value.sequenceStep,
+    };
+    const r = await fetch("/api/email-studio/emails", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Could not start email");
+    createOpen.value = false;
+    resetCreateForm();
+    await load();
+    await openEmail(j.data.id);
+    toast.success(`Email started for ${contactLabel(contact)}`);
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Could not start email");
+  }
+}
+
 async function copy(){await navigator.clipboard.writeText(`${subject.value}\n\n${emailBody.value}`);toast.success("Copied")}
 function annotationColor(a:Annotation){return a.warnings?.length?"#d03050":a.classification==="verified"?"#2080f0":a.classification==="product_truth"?"#18a058":a.classification==="instruction"?"#8a2be2":"#f0a020"}
 const annotatedSegments=computed(()=>{const out:Json[]=[];let at=0;for(const a of annotations.value){if(a.start>at)out.push({text:emailBody.value.slice(at,a.start)});out.push({text:emailBody.value.slice(a.start,a.end),annotation:a});at=a.end}if(at<emailBody.value.length)out.push({text:emailBody.value.slice(at)});return out});
@@ -67,7 +173,7 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
 </script>
 
 <template>
-  <div class="studio"><NSpace justify="space-between" align="center"><div><h1>Email Studio</h1><NText depth="3">Research-led email production, review, and verified delivery history.</NText></div><NButton type="primary" @click="createOpen=true">New email record</NButton></NSpace>
+  <div class="studio"><NSpace justify="space-between" align="center"><div><h1>Email Studio</h1><NText depth="3">Pick a contact, draft with research, review, and approve before Smartlead sends.</NText></div><NButton type="primary" @click="openCreateModal">Write email</NButton></NSpace>
     <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; only verified Smartlead events mark records as sent.</NAlert>
     <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
     <NAlert v-if="error" type="error" style="margin-top:12px">{{error}}</NAlert><NDataTable :columns="columns" :data="rows" :loading="loading" :row-key="r=>r.id" style="margin-top:12px"/><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="total" show-size-picker :page-sizes="[25,50,100]" style="margin-top:12px"/>
@@ -81,8 +187,53 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
       </div></template></NSpin></NDrawerContent></NDrawer>
 
     <NModal v-model:show="compareOpen" preset="card" title="Review regenerated candidate" style="width:min(1200px,95vw)"><div class="compare"><div><h3>Current version</h3><strong>{{currentVersion?.subject}}</strong><pre>{{currentVersion?.body}}</pre></div><div><h3>Candidate v{{candidate?.version_number}}</h3><strong>{{candidate?.subject}}</strong><pre>{{candidate?.body}}</pre></div></div><template #footer><NSpace justify="end"><NButton @click="compareOpen=false">Keep current</NButton><NButton type="primary" @click="adopt">Adopt candidate</NButton></NSpace></template></NModal>
-    <NModal v-model:show="createOpen" preset="card" title="Create email record" style="width:min(680px,94vw)"><div class="create-grid"><NFormItem label="First name *"><NInput v-model:value="newEmail.firstName" placeholder="Jane"/></NFormItem><NFormItem label="Last name *"><NInput v-model:value="newEmail.lastName" placeholder="Smith"/></NFormItem><NFormItem label="Company"><NInput v-model:value="newEmail.companyName" placeholder="Optional — helps if names are duplicated"/></NFormItem><div v-if="contactSearchLoading||contactMatches.length||selectedContact||(!contactSearchLoading&&newEmail.firstName.trim()&&newEmail.lastName.trim())" class="contact-pick"><NText depth="3">{{contactSearchLoading?"Searching contacts…":selectedContact?`Selected: ${selectedContact.name}${selectedContact.company_name?` · ${selectedContact.company_name}`:""}`:contactMatches.length===0?"No contact found with that name in this project.":"Pick the matching contact"}}</NText><div v-if="contactMatches.length>1" class="contact-options"><button v-for="c in contactMatches" :key="c.uuid" type="button" class="contact-option" :class="{selected:selectedContact?.uuid===c.uuid}" @click="selectContact(c)"><strong>{{c.name}}</strong><span>{{c.company_name||"No company"}}{{c.work_email?` · ${c.work_email}`:""}}</span></button></div></div><NFormItem label="Recipient email"><NInput v-model:value="newEmail.recipientEmail" placeholder="Auto-filled when contact is selected"/></NFormItem><NFormItem label="Campaign ID"><NInput v-model:value="newEmail.campaignId"/></NFormItem><NFormItem label="Batch"><NInput v-model:value="newEmail.batchName"/></NFormItem><NFormItem label="Persona"><NInput v-model:value="newEmail.persona"/></NFormItem><NFormItem label="Sequence step"><NInputNumber v-model:value="newEmail.sequenceStep" :min="1"/></NFormItem></div><template #footer><NSpace justify="end"><NButton @click="createOpen=false">Cancel</NButton><NButton type="primary" :disabled="!canCreateEmail" @click="createEmail">Create</NButton></NSpace></template></NModal>
+
+    <NModal v-model:show="createOpen" preset="card" title="Write email for contact" style="width:min(860px,96vw)">
+      <NText depth="3">Pick someone from your project contacts. You’ll land straight in the email workspace to research and draft.</NText>
+      <NInput v-model:value="pickerSearch" clearable placeholder="Search name, company, role, or email…" style="margin:14px 0 10px" />
+      <NDataTable
+        :columns="pickerColumns"
+        :data="pickerContacts"
+        :loading="pickerLoading"
+        :row-key="(row) => row.uuid"
+        :row-props="pickerRowProps"
+        :row-class-name="(row) => (selectedPickerContact?.uuid === row.uuid ? 'picker-row-selected' : '')"
+        size="small"
+        :max-height="360"
+        :scroll-x="720"
+      />
+      <NPagination
+        v-model:page="pickerPage"
+        v-model:page-size="pickerPageSize"
+        :item-count="pickerTotal"
+        :page-sizes="[20, 50, 100]"
+        show-size-picker
+        size="small"
+        style="margin-top:10px"
+      />
+      <NAlert v-if="selectedPickerContact" type="success" :show-icon="false" style="margin-top:12px">
+        Selected: <strong>{{ contactLabel(selectedPickerContact) }}</strong>
+        <span v-if="selectedPickerContact.company_name"> · {{ selectedPickerContact.company_name }}</span>
+        <span v-if="selectedPickerContact.work_email"> · {{ selectedPickerContact.work_email }}</span>
+      </NAlert>
+      <NCollapse style="margin-top:12px">
+        <NCollapseItem title="Optional email settings" name="options">
+          <div class="create-grid">
+            <NFormItem label="Campaign ID"><NInput v-model:value="emailOptions.campaignId" /></NFormItem>
+            <NFormItem label="Batch"><NInput v-model:value="emailOptions.batchName" /></NFormItem>
+            <NFormItem label="Persona"><NInput v-model:value="emailOptions.persona" /></NFormItem>
+            <NFormItem label="Sequence step"><NInputNumber v-model:value="emailOptions.sequenceStep" :min="1" /></NFormItem>
+          </div>
+        </NCollapseItem>
+      </NCollapse>
+      <template #footer>
+        <NSpace justify="end">
+          <NButton @click="createOpen=false">Cancel</NButton>
+          <NButton type="primary" :disabled="!canStartEmail" :loading="!!actionLoading" @click="startEmailForContact">Start email</NButton>
+        </NSpace>
+      </template>
+    </NModal>
   </div>
 </template>
 
-<style scoped>.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 180px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.instruction{margin:7px 0}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.contact-pick{grid-column:1/-1;margin:0 0 8px}.contact-options{display:flex;flex-direction:column;gap:8px;margin-top:8px}.contact-option{display:flex;flex-direction:column;align-items:flex-start;text-align:left;border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;background:transparent;color:inherit;cursor:pointer}.contact-option.selected,.contact-option:hover{border-color:#2080f0;background:rgba(32,128,240,.08)}.contact-option span{opacity:.7;font-size:.85em;margin-top:4px}.muted{opacity:.55;font-size:.8em}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>
+<style scoped>.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 180px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.instruction{margin:7px 0}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.muted{opacity:.55;font-size:.8em}:deep(.picker-row-selected td){background:rgba(32,128,240,.12)!important}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>
