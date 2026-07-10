@@ -3,10 +3,10 @@
  *
  * Generalizes the single-contact pattern in inmail-review-handlers.ts
  * (handleInmailRunNew → fetch(N8N_INMAIL_SINGLE_WEBHOOK_URL, ...)) to a small
- * registry of pipelines launched from the app. The Feasible parent workflow is
- * list-driven: it receives a GetSales list UUID and fetches contacts in n8n.
- * The backend still stores the selected lead UUIDs so run history can compute
- * aggregates from rows pushed back to /api/n8n/workflow-results.
+ * registry of pipelines launched from the app. Feasible uses a list-driven
+ * parent workflow; Velvetech accepts bare lead UUIDs from Launch or cards.
+ * The backend stores selected lead UUIDs so run history can compute aggregates
+ * from rows pushed back to /api/n8n/workflow-results.
  */
 
 const N8N_BASE = (process.env.N8N_BASE_URL?.trim() || "https://primary-production-36cb4.up.railway.app").replace(
@@ -32,8 +32,8 @@ export interface WorkflowRegistryEntry {
 }
 
 /**
- * Launchable pipelines. The launch page is Feasible-only; webhook URL can be
- * overridden by env, otherwise it uses the production Feasible list trigger.
+ * Launchable pipelines per project (Feasible list-only; Velvetech list or bare UUIDs).
+ * Webhook URLs are overridden by env when set.
  */
 export const WORKFLOW_REGISTRY: WorkflowRegistryEntry[] = [
   {

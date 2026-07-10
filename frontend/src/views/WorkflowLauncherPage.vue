@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, h, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter, RouterLink } from "vue-router";
 import {
   NCard,
   NSpace,
@@ -11,28 +11,27 @@ import {
   NAlert,
   NText,
   NEmpty,
-  NModal,
+  NTabs,
+  NTabPane,
   NInput,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, SelectOption } from "naive-ui";
 import { RocketIcon } from "lucide-vue-next";
 import { useProjectStore } from "../stores/project";
+import { useWorkflowLaunch } from "../composables/useWorkflowLaunch";
+import { isFeasibleProjectId, isVelvetechProjectId } from "../project-ids";
 
-interface WorkflowOption {
-  key: string;
-  label: string;
-  project: string;
-  adapter: string;
-  configured: boolean;
-}
+type TargetMode = "list" | "contacts" | "company";
 
 interface ContactRow {
   uuid: string;
   name: string;
   position: string;
   company_name: string;
+  company_id: string | null;
   linkedin_url: string | null;
+  synced: boolean;
 }
 
 interface LaunchRun {
@@ -51,30 +50,27 @@ interface LaunchRun {
   finished_at: string | null;
 }
 
-interface DraftRow {
-  id: string;
-  contact_id: string;
-  company_id: string | null;
-  contact_name: string;
-  company_name: string;
-  execution_id: string;
-  status: string;
-  sends: string[];
-  copy_ok: boolean;
-  copy_violations: string[];
-  sender_profile_uuid: string;
-  created_at: string;
+interface CompanyOption {
+  company_id: string;
+  name: string;
+  domain: string | null;
 }
 
+const TARGET_MODE_KEY = "n8n-launch-target-mode";
+
+const route = useRoute();
 const router = useRouter();
 const message = useMessage();
 const projectStore = useProjectStore();
+const { launching, workflows, loadWorkflows, launch: launchWorkflow } = useWorkflowLaunch();
 
-const VELVETECH_PROJECT_ID = "51cc22a1-868e-42c4-974f-9a7c5f5dce20";
 const projectId = computed(() => projectStore.selectedProjectId);
+const isVelvetech = computed(() => isVelvetechProjectId(projectId.value));
+const isFeasible = computed(() => isFeasibleProjectId(projectId.value));
+const showTargetTabs = computed(() => isVelvetech.value);
 
-const workflows = ref<WorkflowOption[]>([]);
 const selectedWorkflow = ref<string | null>(null);
+const targetMode = ref<TargetMode>("list");
 
 const lists = ref<{ uuid: string; name: string }[]>([]);
 const selectedList = ref<string | null>(null);
@@ -84,15 +80,23 @@ const contactsLoading = ref(false);
 const contactsError = ref("");
 const checkedContactKeys = ref<string[]>([]);
 
-const launching = ref(false);
+const contactSearch = ref("");
+const contactPickerPage = ref(1);
+const contactPickerPageSize = ref(50);
+const contactPickerTotal = ref(0);
+
+const companySearch = ref("");
+const companyOptions = ref<CompanyOption[]>([]);
+const selectedCompanyId = ref<string | null>(null);
+const companyLoading = ref(false);
+const companyCardLoading = ref(false);
+const selectedCompanyName = ref("");
+
 const currentRun = ref<LaunchRun | null>(null);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const history = ref<LaunchRun[]>([]);
 const historyLoading = ref(false);
-const drafts = ref<DraftRow[]>([]);
-const draftsLoading = ref(false);
-const approvingDraftId = ref<string | null>(null);
 
 const workflowOptions = computed<SelectOption[]>(() =>
   workflows.value.map((w) => ({
@@ -106,19 +110,44 @@ const listOptions = computed<SelectOption[]>(() =>
   lists.value.map((l) => ({ label: l.name, value: l.uuid }))
 );
 
-const workflowLabel = (key: string): string =>
-  workflows.value.find((w) => w.key === key)?.label ?? key;
+const companySelectOptions = computed<SelectOption[]>(() =>
+  companyOptions.value.map((c) => ({
+    label: c.domain ? `${c.name} (${c.domain})` : c.name,
+    value: c.company_id,
+  }))
+);
 
 const selectedWorkflowOption = computed(() =>
   workflows.value.find((w) => w.key === selectedWorkflow.value) ?? null
 );
-const isVelvetechProject = computed(() => projectId.value === VELVETECH_PROJECT_ID);
-const selectedCount = computed(() => checkedContactKeys.value.length || contacts.value.length);
+
+const requiresList = computed(() => selectedWorkflowOption.value?.adapter === "feasible_list");
+
+const selectedContacts = computed(() => {
+  if (checkedContactKeys.value.length) {
+    return contacts.value.filter((c) => checkedContactKeys.value.includes(c.uuid));
+  }
+  return contacts.value;
+});
+
+const unsyncedSelectedCount = computed(
+  () => selectedContacts.value.filter((c) => !c.synced).length
+);
+
+const selectedCount = computed(() => selectedContacts.value.length);
+
 const launchButtonText = computed(() => {
   const adapter = selectedWorkflowOption.value?.adapter;
   if (adapter === "velvetech_reply") return `Draft replies for ${selectedCount.value}`;
   if (adapter === "velvetech_research") return `Launch research for ${selectedCount.value}`;
   return `Launch workflow for ${selectedCount.value}`;
+});
+
+const canLaunch = computed(() => {
+  if (!selectedWorkflow.value || contactsLoading.value || selectedCount.value === 0) return false;
+  if (requiresList.value && !selectedList.value) return false;
+  if (unsyncedSelectedCount.value > 0) return false;
+  return true;
 });
 
 function statusType(status: string): "default" | "info" | "success" | "warning" | "error" {
@@ -136,24 +165,63 @@ function statusType(status: string): "default" | "info" | "success" | "warning" 
   }
 }
 
-async function loadWorkflows(): Promise<void> {
-  if (!projectId.value) {
-    workflows.value = [];
-    selectedWorkflow.value = null;
-    return;
-  }
+function workflowLabel(key: string): string {
+  return workflows.value.find((w) => w.key === key)?.label ?? key;
+}
+
+function persistTargetMode(mode: TargetMode): void {
   try {
-    const r = await fetch(`/api/n8n/workflows?projectId=${encodeURIComponent(projectId.value)}`);
-    const data = (await r.json()) as { items?: WorkflowOption[]; error?: string };
-    if (!r.ok) throw new Error(data.error ?? "Failed to load workflows");
-    workflows.value = data.items ?? [];
-    const currentStillAvailable = workflows.value.some((w) => w.key === selectedWorkflow.value);
-    if (!currentStillAvailable) {
-      const firstConfigured = workflows.value.find((w) => w.configured);
-      selectedWorkflow.value = firstConfigured?.key ?? null;
+    localStorage.setItem(TARGET_MODE_KEY, mode);
+  } catch {
+    /* ignore */
+  }
+}
+
+function restoreTargetMode(): TargetMode {
+  try {
+    const v = localStorage.getItem(TARGET_MODE_KEY);
+    if (v === "contacts" || v === "company" || v === "list") return v;
+  } catch {
+    /* ignore */
+  }
+  return "list";
+}
+
+function mapContactRow(row: Record<string, unknown>, synced = true): ContactRow {
+  const first = typeof row.first_name === "string" ? row.first_name : "";
+  const last = typeof row.last_name === "string" ? row.last_name : "";
+  const nameJoined = `${first} ${last}`.trim();
+  return {
+    uuid: typeof row.uuid === "string" ? row.uuid : "",
+    name: nameJoined || (typeof row.name === "string" ? row.name : "") || "(no name)",
+    position: typeof row.position === "string" ? row.position : "",
+    company_name: typeof row.company_name === "string" ? row.company_name : "",
+    company_id: typeof row.company_uuid === "string" ? row.company_uuid : null,
+    linkedin_url: typeof row.linkedin_url === "string" ? row.linkedin_url : null,
+    synced,
+  };
+}
+
+async function markSyncedFlags(rows: ContactRow[]): Promise<ContactRow[]> {
+  if (!projectId.value || rows.length === 0) return rows;
+  const uuids = rows.map((r) => r.uuid).filter(Boolean);
+  const syncedSet = new Set<string>();
+  try {
+    for (let i = 0; i < uuids.length; i += 100) {
+      const batch = uuids.slice(i, i + 100);
+      const q = new URLSearchParams({
+        table: "contacts",
+        filters: encodeURIComponent(JSON.stringify({ project_id: projectId.value, uuid: batch })),
+        limit: "100",
+        offset: "0",
+      });
+      const r = await fetch(`/api/supabase-table-query?${q}`);
+      const j = (await r.json()) as { data?: Record<string, unknown>[] };
+      for (const row of j.data ?? []) syncedSet.add(String(row.uuid ?? ""));
     }
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : "Failed to load workflows");
+    return rows.map((row) => ({ ...row, synced: syncedSet.has(row.uuid) }));
+  } catch {
+    return rows.map((row) => ({ ...row, synced: true }));
   }
 }
 
@@ -169,7 +237,7 @@ async function loadLists(): Promise<void> {
   }
 }
 
-async function loadContacts(): Promise<void> {
+async function loadListContacts(): Promise<void> {
   contacts.value = [];
   checkedContactKeys.value = [];
   contactsError.value = "";
@@ -183,19 +251,8 @@ async function loadContacts(): Promise<void> {
     const r = await fetch(`/api/contacts/gs-by-list?${params.toString()}`);
     const data = (await r.json()) as { data?: Record<string, unknown>[]; error?: string };
     if (!r.ok) throw new Error(data.error ?? "Failed to load contacts");
-    const rows = (data.data ?? []).map((row) => {
-      const first = typeof row.first_name === "string" ? row.first_name : "";
-      const last = typeof row.last_name === "string" ? row.last_name : "";
-      const nameJoined = `${first} ${last}`.trim();
-      return {
-        uuid: typeof row.uuid === "string" ? row.uuid : "",
-        name: nameJoined || (typeof row.name === "string" ? row.name : "") || "(no name)",
-        position: typeof row.position === "string" ? row.position : "",
-        company_name: typeof row.company_name === "string" ? row.company_name : "",
-        linkedin_url: typeof row.linkedin_url === "string" ? row.linkedin_url : null,
-      } satisfies ContactRow;
-    });
-    contacts.value = rows.filter((c) => c.uuid);
+    const rows = (data.data ?? []).map((row) => mapContactRow(row, false)).filter((c) => c.uuid);
+    contacts.value = await markSyncedFlags(rows);
   } catch (e) {
     contactsError.value = e instanceof Error ? e.message : "Failed to load contacts";
   } finally {
@@ -203,66 +260,136 @@ async function loadContacts(): Promise<void> {
   }
 }
 
-async function loadDrafts(): Promise<void> {
-  drafts.value = [];
-  if (!projectId.value || !isVelvetechProject.value) return;
-  draftsLoading.value = true;
+async function loadPickerContacts(): Promise<void> {
+  contacts.value = [];
+  checkedContactKeys.value = [];
+  contactsError.value = "";
+  if (!projectId.value || targetMode.value !== "contacts") return;
+  contactsLoading.value = true;
   try {
-    const r = await fetch(`/api/n8n/velvetech/drafts?projectId=${encodeURIComponent(projectId.value)}`);
-    const data = (await r.json()) as { rows?: DraftRow[]; error?: string };
-    if (!r.ok) throw new Error(data.error ?? "Failed to load drafts");
-    drafts.value = data.rows ?? [];
+    const q = new URLSearchParams({
+      table: "contacts",
+      filters: encodeURIComponent(JSON.stringify({ project_id: projectId.value })),
+      limit: String(contactPickerPageSize.value),
+      offset: String((contactPickerPage.value - 1) * contactPickerPageSize.value),
+      sortBy: "first_name",
+      sortDirection: "asc",
+    });
+    if (contactSearch.value.trim()) q.set("search", contactSearch.value.trim());
+    const r = await fetch(`/api/supabase-table-query?${q}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Failed to load contacts");
+    contactPickerTotal.value = j.total ?? 0;
+    contacts.value = (j.data ?? [])
+      .map((row: Record<string, unknown>) => mapContactRow(row, true))
+      .filter((c: ContactRow) => c.uuid);
   } catch (e) {
-    message.error(e instanceof Error ? e.message : "Failed to load drafts");
+    contactsError.value = e instanceof Error ? e.message : "Failed to load contacts";
   } finally {
-    draftsLoading.value = false;
+    contactsLoading.value = false;
   }
 }
 
+async function searchCompanies(): Promise<void> {
+  if (!projectId.value) return;
+  companyLoading.value = true;
+  try {
+    const q = new URLSearchParams({
+      projectId: projectId.value,
+      limit: "25",
+      offset: "0",
+      sortBy: "name",
+      sortDirection: "asc",
+    });
+    if (companySearch.value.trim()) q.set("search", companySearch.value.trim());
+    const r = await fetch(`/api/project-companies?${q}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Failed to search companies");
+    companyOptions.value = (j.data ?? []).map((row: Record<string, unknown>) => ({
+      company_id: String(row.company_id ?? row.id ?? ""),
+      name: String(row.name ?? "Unknown"),
+      domain: typeof row.domain === "string" ? row.domain : null,
+    })).filter((c: CompanyOption) => c.company_id);
+  } catch (e) {
+    companyOptions.value = [];
+    message.error(e instanceof Error ? e.message : "Company search failed");
+  } finally {
+    companyLoading.value = false;
+  }
+}
+
+async function loadCompanyRoster(companyId: string): Promise<void> {
+  contacts.value = [];
+  checkedContactKeys.value = [];
+  contactsError.value = "";
+  if (!companyId) return;
+  companyCardLoading.value = true;
+  try {
+    const r = await fetch(`/api/cards/company?id=${encodeURIComponent(companyId)}`);
+    const data = (await r.json()) as { contacts?: Record<string, unknown>[]; company?: { name?: string }; error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed to load company");
+    selectedCompanyName.value = String(data.company?.name ?? selectedCompanyName.value);
+    const rows = (data.contacts ?? [])
+      .map((row) =>
+        mapContactRow(
+          {
+            uuid: row.uuid,
+            first_name: row.first_name,
+            last_name: row.last_name,
+            name: row.name,
+            position: row.position,
+            company_name: selectedCompanyName.value,
+            company_uuid: companyId,
+            linkedin_url: row.linkedin,
+          },
+          true
+        )
+      )
+      .filter((c) => c.uuid);
+    contacts.value = rows;
+  } catch (e) {
+    contactsError.value = e instanceof Error ? e.message : "Failed to load company roster";
+  } finally {
+    companyCardLoading.value = false;
+  }
+}
+
+async function reloadContactsForMode(): Promise<void> {
+  if (targetMode.value === "list") await loadListContacts();
+  else if (targetMode.value === "contacts") await loadPickerContacts();
+  else if (targetMode.value === "company" && selectedCompanyId.value) await loadCompanyRoster(selectedCompanyId.value);
+}
 
 async function launch(): Promise<void> {
-  if (!projectId.value) {
-    message.warning("Select a project first");
-    return;
-  }
-  if (!selectedWorkflow.value) {
-    message.warning("Select a workflow");
-    return;
-  }
-  if (!selectedList.value) {
+  if (!projectId.value || !selectedWorkflow.value) return;
+  if (requiresList.value && !selectedList.value) {
     message.warning("Select a GetSales list");
     return;
   }
-  const picked = checkedContactKeys.value.length
-    ? contacts.value.filter((c) => checkedContactKeys.value.includes(c.uuid))
-    : contacts.value;
-  const leadUuids = picked.map((c) => c.uuid).filter(Boolean);
+  const leadUuids = selectedContacts.value.map((c) => c.uuid).filter(Boolean);
   if (leadUuids.length === 0) {
-    message.warning("The selected list has no contacts to launch");
+    message.warning("Select at least one contact");
     return;
   }
-  launching.value = true;
-  try {
-    const r = await fetch("/api/n8n/launch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        projectId: projectId.value,
-        workflowKey: selectedWorkflow.value,
-        sourceListUuid: selectedList.value,
-        leadUuids,
-      }),
-    });
-    const data = (await r.json()) as { launchId?: string; error?: string };
-    if (!r.ok || !data.launchId) throw new Error(data.error ?? "Launch failed");
-    message.success(`Launched ${workflowLabel(selectedWorkflow.value)} for ${leadUuids.length} contact(s)`);
+  if (unsyncedSelectedCount.value > 0) {
+    message.warning(`${unsyncedSelectedCount.value} selected contact(s) are not synced in Contacts`);
+    return;
+  }
+
+  const adapter = selectedWorkflowOption.value?.adapter;
+  const successMessage =
+    adapter === "velvetech_reply"
+      ? `Draft reply started for ${leadUuids.length} contact${leadUuids.length === 1 ? "" : "s"}. Review in Email Studio → LinkedIn.`
+      : undefined;
+
+  const launchId = await launchWorkflow(selectedWorkflow.value, leadUuids, {
+    sourceListUuid: targetMode.value === "list" ? selectedList.value : null,
+    successMessage,
+  });
+  if (launchId) {
     checkedContactKeys.value = [];
-    startPolling(data.launchId);
-    void Promise.all([loadHistory(), loadDrafts()]);
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : "Launch failed");
-  } finally {
-    launching.value = false;
+    startPolling(launchId);
+    void loadHistory();
   }
 }
 
@@ -278,7 +405,7 @@ async function pollStatus(launchId: string): Promise<void> {
       }
     }
   } catch {
-    /* keep polling; transient */
+    /* keep polling */
   }
 }
 
@@ -287,6 +414,7 @@ function startPolling(launchId: string): void {
   void pollStatus(launchId);
   pollTimer = setInterval(() => void pollStatus(launchId), 5000);
 }
+
 function stopPolling(): void {
   if (pollTimer) {
     clearInterval(pollTimer);
@@ -309,136 +437,56 @@ async function loadHistory(): Promise<void> {
   }
 }
 
-async function approveDraft(row: DraftRow, editedSends?: string[]): Promise<void> {
-  if (!projectId.value) return;
-  approvingDraftId.value = row.id;
-  try {
-    const body: Record<string, unknown> = { projectId: projectId.value, draftId: row.id };
-    if (editedSends && editedSends.length > 0) body.sends = editedSends;
-    const r = await fetch("/api/n8n/velvetech/drafts/approve", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const data = (await r.json()) as { ok?: boolean; error?: string };
-    if (!r.ok || !data.ok) throw new Error(data.error ?? "Approval failed");
-    message.success("Sent LinkedIn messages");
-    editingDraft.value = null;
-    void loadDrafts();
-  } catch (e) {
-    message.error(e instanceof Error ? e.message : "Approval failed");
-  } finally {
-    approvingDraftId.value = null;
-  }
-}
-
-const editingDraft = ref<DraftRow | null>(null);
-const editText = ref("");
-
-function openDraftEditor(row: DraftRow): void {
-  editingDraft.value = row;
-  editText.value = row.sends.join("\n\n");
-}
-
-/** Blank line separates the individual LinkedIn sends in the editor. */
-function editedSendsFromText(): string[] {
-  return editText.value
-    .split(/\n\s*\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-async function approveEditedDraft(): Promise<void> {
-  const row = editingDraft.value;
-  if (!row) return;
-  const sends = editedSendsFromText();
-  if (sends.length === 0) {
-    message.error("Draft is empty");
-    return;
-  }
-  await approveDraft(row, sends);
-}
-
 function viewLaunchResults(launchId: string): void {
   const filters = encodeURIComponent(
-    JSON.stringify([{ field: "result_text", op: "like", value: launchId }])
+    JSON.stringify([{ field: "launch_id", op: "eq", value: launchId }])
   );
   router.push({ path: "/n8n/workflow-results", query: { filters } });
 }
 
-function viewExecutionResults(executionId: string): void {
-  router.push({ path: "/n8n/workflow-results", query: { executionId } });
-}
-
 const contactColumns = computed<DataTableColumns<ContactRow>>(() => [
   { type: "selection", width: 42 },
-  { title: "Name", key: "name", minWidth: 160, ellipsis: { tooltip: true } },
+  {
+    title: "Name",
+    key: "name",
+    minWidth: 160,
+    ellipsis: { tooltip: true },
+    render(row) {
+      return h(RouterLink, { to: `/contact/${row.uuid}`, class: "launch-link" }, { default: () => row.name });
+    },
+  },
   { title: "Position", key: "position", minWidth: 180, ellipsis: { tooltip: true } },
-  { title: "Company", key: "company_name", minWidth: 160, ellipsis: { tooltip: true } },
+  {
+    title: "Company",
+    key: "company_name",
+    minWidth: 160,
+    ellipsis: { tooltip: true },
+    render(row) {
+      if (row.company_id) {
+        return h(
+          RouterLink,
+          { to: `/company/${row.company_id}`, class: "launch-link" },
+          { default: () => row.company_name || row.company_id }
+        );
+      }
+      return row.company_name || "—";
+    },
+  },
+  {
+    title: "Synced",
+    key: "synced",
+    width: 88,
+    render: (row) =>
+      h(NTag, { size: "small", type: row.synced ? "success" : "warning" }, { default: () => (row.synced ? "Yes" : "No") }),
+  },
   {
     title: "LinkedIn",
     key: "linkedin_url",
     minWidth: 120,
     render(row) {
       if (!row.linkedin_url) return "—";
-      return h(
-        "a",
-        { href: row.linkedin_url, target: "_blank", rel: "noopener" },
-        "profile"
-      );
+      return h("a", { href: row.linkedin_url, target: "_blank", rel: "noopener" }, "profile");
     },
-  },
-]);
-
-const draftColumns = computed<DataTableColumns<DraftRow>>(() => [
-  {
-    title: "When",
-    key: "created_at",
-    width: 160,
-    render: (r) => new Date(r.created_at).toLocaleString(),
-  },
-  { title: "Contact", key: "contact_name", minWidth: 150, ellipsis: { tooltip: true } },
-  { title: "Company", key: "company_name", minWidth: 160, ellipsis: { tooltip: true } },
-  {
-    title: "Status",
-    key: "status",
-    width: 128,
-    render: (r) => h(NTag, { size: "small", type: r.status === "sent" ? "success" : r.status === "needs_human" ? "warning" : "info" }, { default: () => r.status }),
-  },
-  {
-    title: "Draft",
-    key: "sends",
-    minWidth: 360,
-    render: (r) => h("div", { style: "white-space:pre-wrap;line-height:1.35" }, r.sends.join("\n\n")),
-  },
-  {
-    title: "Issues",
-    key: "copy_violations",
-    width: 180,
-    render: (r) => r.copy_violations.length ? r.copy_violations.join(", ") : "—",
-  },
-  {
-    title: "Actions",
-    key: "actions",
-    width: 150,
-    fixed: "right",
-    render: (r) => h(NSpace, { size: 4 }, {
-      default: () => [
-        h(NButton, { size: "tiny", quaternary: true, onClick: () => viewExecutionResults(r.execution_id) }, { default: () => "View" }),
-        h(NButton, {
-          size: "tiny",
-          disabled: (r.status !== "pending_approval" && r.status !== "needs_human") || !r.sender_profile_uuid,
-          onClick: () => openDraftEditor(r),
-        }, { default: () => "Edit" }),
-        h(NButton, {
-          size: "tiny",
-          type: "primary",
-          disabled: r.status !== "pending_approval" || !r.sender_profile_uuid,
-          loading: approvingDraftId.value === r.id,
-          onClick: () => approveDraft(r),
-        }, { default: () => "Approve" }),
-      ],
-    }),
   },
 ]);
 
@@ -479,27 +527,103 @@ const historyColumns = computed<DataTableColumns<LaunchRun>>(() => [
     width: 110,
     fixed: "right",
     render: (r) =>
-      h(
-        NButton,
-        { size: "tiny", quaternary: true, onClick: () => viewLaunchResults(r.id) },
-        { default: () => "View" }
-      ),
+      h(NButton, { size: "tiny", quaternary: true, onClick: () => viewLaunchResults(r.id) }, { default: () => "View" }),
   },
 ]);
 
+function applyDeepLinkQuery(): void {
+  const mode = typeof route.query.mode === "string" ? route.query.mode : "";
+  if (mode === "contacts" || mode === "company" || mode === "list") {
+    if (showTargetTabs.value || mode === "list") targetMode.value = mode;
+  }
+  const contactId = typeof route.query.contactId === "string" ? route.query.contactId : "";
+  if (contactId && showTargetTabs.value) {
+    targetMode.value = "contacts";
+    checkedContactKeys.value = [contactId];
+  }
+  const companyId = typeof route.query.companyId === "string" ? route.query.companyId : "";
+  if (companyId && showTargetTabs.value) {
+    targetMode.value = "company";
+    selectedCompanyId.value = companyId;
+  }
+}
+
 onMounted(async () => {
   if (projectStore.projects.length === 0) await projectStore.loadProjects();
-  await Promise.all([loadWorkflows(), loadLists(), loadHistory(), loadDrafts()]);
+  targetMode.value = restoreTargetMode();
+  if (isFeasible.value) targetMode.value = "list";
+  applyDeepLinkQuery();
+  await Promise.all([loadWorkflows(), loadLists(), loadHistory()]);
+  if (selectedWorkflow.value === null && workflows.value.length) {
+    const firstConfigured = workflows.value.find((w) => w.configured);
+    selectedWorkflow.value = firstConfigured?.key ?? null;
+  }
+  if (targetMode.value === "company" && selectedCompanyId.value) {
+    await searchCompanies();
+    await loadCompanyRoster(selectedCompanyId.value);
+  } else if (targetMode.value === "contacts") {
+    await loadPickerContacts();
+  }
 });
+
 onUnmounted(stopPolling);
 
 watch(projectId, async () => {
   selectedWorkflow.value = null;
   selectedList.value = null;
+  selectedCompanyId.value = null;
   contacts.value = [];
   checkedContactKeys.value = [];
   currentRun.value = null;
-  await Promise.all([loadWorkflows(), loadLists(), loadHistory(), loadDrafts()]);
+  if (isFeasible.value) targetMode.value = "list";
+  await Promise.all([loadWorkflows(), loadLists(), loadHistory()]);
+  const firstConfigured = workflows.value.find((w) => w.configured);
+  selectedWorkflow.value = firstConfigured?.key ?? null;
+  await reloadContactsForMode();
+});
+
+watch(targetMode, (mode) => {
+  if (isFeasible.value && mode !== "list") {
+    targetMode.value = "list";
+    return;
+  }
+  persistTargetMode(mode);
+  contacts.value = [];
+  checkedContactKeys.value = [];
+  void reloadContactsForMode();
+});
+
+watch(selectedList, () => {
+  if (targetMode.value === "list") void loadListContacts();
+});
+
+watch(selectedCompanyId, async (id) => {
+  if (targetMode.value !== "company" || !id) return;
+  const match = companyOptions.value.find((c) => c.company_id === id);
+  if (match) selectedCompanyName.value = match.name;
+  await loadCompanyRoster(id);
+});
+
+let contactSearchTimer: ReturnType<typeof setTimeout> | undefined;
+watch(contactSearch, () => {
+  contactPickerPage.value = 1;
+  window.clearTimeout(contactSearchTimer);
+  contactSearchTimer = setTimeout(() => {
+    if (targetMode.value === "contacts") void loadPickerContacts();
+  }, 250);
+});
+
+let companySearchTimer: ReturnType<typeof setTimeout> | undefined;
+watch(companySearch, () => {
+  window.clearTimeout(companySearchTimer);
+  companySearchTimer = setTimeout(() => void searchCompanies(), 250);
+});
+
+watch(workflows, (items) => {
+  if (!selectedWorkflow.value && items.length) {
+    const firstConfigured = items.find((w) => w.configured);
+    selectedWorkflow.value = firstConfigured?.key ?? null;
+  }
 });
 </script>
 
@@ -514,7 +638,7 @@ watch(projectId, async () => {
       </template>
 
       <NAlert v-if="!projectId" type="warning">
-        Select a project in the top bar to choose a GetSales list and launch.
+        Select a project in the top bar to choose targets and launch workflows.
       </NAlert>
 
       <NSpace v-else vertical size="medium" style="width: 100%">
@@ -525,92 +649,147 @@ watch(projectId, async () => {
             placeholder="Workflow"
             style="width: 320px"
           />
-          <NSelect
-            v-model:value="selectedList"
-            :options="listOptions"
-            placeholder="GetSales list"
-            filterable
-            style="width: 320px"
-            @update:value="loadContacts"
-          />
           <NButton
             type="primary"
             :loading="launching"
-            :disabled="contacts.length === 0 || !selectedWorkflow || contactsLoading"
+            :disabled="!canLaunch"
             @click="launch"
           >
             {{ launchButtonText }}
           </NButton>
         </NSpace>
 
-        <NAlert v-if="contactsError" type="error">{{ contactsError }}</NAlert>
-
-        <template v-if="selectedList">
-          <NSpace align="center" size="small">
-          <NText depth="3">{{ contacts.length }} contacts in this list</NText>
-          <NText depth="3">
-            {{ checkedContactKeys.length ? `${checkedContactKeys.length} selected` : "No selection means all contacts" }}
-          </NText>
-        </NSpace>
-          <NDataTable
-            :columns="contactColumns"
-            :data="contacts"
-            :loading="contactsLoading"
-            :row-key="(row: ContactRow) => row.uuid"
-            v-model:checked-row-keys="checkedContactKeys"
-            :max-height="420"
-            size="small"
-            striped
-          />
-        </template>
-        <NEmpty v-else description="Select a GetSales list to preview contacts" />
-      </NSpace>
-    </NCard>
-
-    <NCard v-if="isVelvetechProject" title="Velvetech reply drafts">
-      <NDataTable
-        :columns="draftColumns"
-        :data="drafts"
-        :loading="draftsLoading"
-        :row-key="(row: DraftRow) => row.id"
-        :max-height="420"
-        :scroll-x="1100"
-        size="small"
-        striped
-      />
-      <NEmpty v-if="!draftsLoading && drafts.length === 0" description="No Velvetech reply drafts yet" />
-    </NCard>
-
-    <NModal
-      :show="editingDraft !== null"
-      preset="card"
-      style="max-width: 640px"
-      :title="editingDraft ? `Edit draft — ${editingDraft.contact_name}` : ''"
-      @update:show="(v: boolean) => { if (!v) editingDraft = null; }"
-    >
-      <NSpace vertical size="medium">
-        <NAlert v-if="editingDraft && editingDraft.copy_violations.length" type="warning">
-          {{ editingDraft.copy_violations.join(", ") }}
+        <NAlert v-if="unsyncedSelectedCount > 0" type="warning">
+          {{ unsyncedSelectedCount }} selected contact(s) are not synced in Supabase Contacts. Sync them before launching.
         </NAlert>
-        <NText depth="3">One LinkedIn message per block; separate messages with a blank line.</NText>
-        <NInput
-          v-model:value="editText"
-          type="textarea"
-          :autosize="{ minRows: 8, maxRows: 18 }"
-          placeholder="Message 1&#10;&#10;Message 2"
-        />
-        <NSpace justify="end">
-          <NButton @click="editingDraft = null">Cancel</NButton>
-          <NButton
-            type="primary"
-            :loading="editingDraft !== null && approvingDraftId === editingDraft.id"
-            @click="approveEditedDraft"
-          >
-            Approve &amp; send
-          </NButton>
-        </NSpace>
+
+        <NTabs v-if="showTargetTabs" v-model:value="targetMode" type="line" animated>
+          <NTabPane name="list" tab="GetSales list">
+            <NSpace vertical size="medium" style="width: 100%; margin-top: 8px">
+              <NSelect
+                v-model:value="selectedList"
+                :options="listOptions"
+                placeholder="GetSales list (optional for Velvetech)"
+                filterable
+                clearable
+                style="max-width: 420px"
+              />
+              <NAlert v-if="contactsError" type="error">{{ contactsError }}</NAlert>
+              <template v-if="selectedList">
+                <NSpace align="center" size="small">
+                  <NText depth="3">{{ contacts.length }} contacts in this list</NText>
+                  <NText depth="3">
+                    {{ checkedContactKeys.length ? `${checkedContactKeys.length} selected` : "No selection means all contacts" }}
+                  </NText>
+                </NSpace>
+                <NDataTable
+                  :columns="contactColumns"
+                  :data="contacts"
+                  :loading="contactsLoading"
+                  :row-key="(row: ContactRow) => row.uuid"
+                  v-model:checked-row-keys="checkedContactKeys"
+                  :max-height="420"
+                  size="small"
+                  striped
+                />
+              </template>
+              <NEmpty v-else description="Select a GetSales list to preview contacts (optional for Velvetech launch)" />
+            </NSpace>
+          </NTabPane>
+
+          <NTabPane name="contacts" tab="Contacts">
+            <NSpace vertical size="medium" style="width: 100%; margin-top: 8px">
+              <NInput v-model:value="contactSearch" clearable placeholder="Search synced project contacts…" style="max-width: 420px" />
+              <NAlert v-if="contactsError" type="error">{{ contactsError }}</NAlert>
+              <NSpace align="center" size="small">
+                <NText depth="3">{{ contactPickerTotal }} synced contacts</NText>
+                <NText depth="3">
+                  {{ checkedContactKeys.length ? `${checkedContactKeys.length} selected` : "No selection means all on this page" }}
+                </NText>
+              </NSpace>
+              <NDataTable
+                :columns="contactColumns"
+                :data="contacts"
+                :loading="contactsLoading"
+                :row-key="(row: ContactRow) => row.uuid"
+                v-model:checked-row-keys="checkedContactKeys"
+                :max-height="420"
+                size="small"
+                striped
+              />
+            </NSpace>
+          </NTabPane>
+
+          <NTabPane name="company" tab="Company">
+            <NSpace vertical size="medium" style="width: 100%; margin-top: 8px">
+              <NSpace align="center" wrap>
+                <NInput v-model:value="companySearch" clearable placeholder="Search companies…" style="width: 240px" />
+                <NSelect
+                  v-model:value="selectedCompanyId"
+                  :options="companySelectOptions"
+                  :loading="companyLoading"
+                  filterable
+                  placeholder="Select company"
+                  style="width: 320px"
+                  @focus="searchCompanies"
+                />
+              </NSpace>
+              <NAlert v-if="contactsError" type="error">{{ contactsError }}</NAlert>
+              <template v-if="selectedCompanyId">
+                <NSpace align="center" size="small">
+                  <NText depth="3">{{ selectedCompanyName || "Company" }} — {{ contacts.length }} contacts</NText>
+                  <NText depth="3">
+                    {{ checkedContactKeys.length ? `${checkedContactKeys.length} selected` : "No selection means all contacts" }}
+                  </NText>
+                </NSpace>
+                <NDataTable
+                  :columns="contactColumns"
+                  :data="contacts"
+                  :loading="companyCardLoading"
+                  :row-key="(row: ContactRow) => row.uuid"
+                  v-model:checked-row-keys="checkedContactKeys"
+                  :max-height="420"
+                  size="small"
+                  striped
+                />
+              </template>
+              <NEmpty v-else description="Search and select a company to view its contact roster" />
+            </NSpace>
+          </NTabPane>
+        </NTabs>
+
+        <template v-else>
+          <NSelect
+            v-model:value="selectedList"
+            :options="listOptions"
+            placeholder="GetSales list"
+            filterable
+            style="width: 320px"
+            @update:value="loadListContacts"
+          />
+          <NAlert v-if="contactsError" type="error">{{ contactsError }}</NAlert>
+          <template v-if="selectedList">
+            <NSpace align="center" size="small">
+              <NText depth="3">{{ contacts.length }} contacts in this list</NText>
+              <NText depth="3">
+                {{ checkedContactKeys.length ? `${checkedContactKeys.length} selected` : "No selection means all contacts" }}
+              </NText>
+            </NSpace>
+            <NDataTable
+              :columns="contactColumns"
+              :data="contacts"
+              :loading="contactsLoading"
+              :row-key="(row: ContactRow) => row.uuid"
+              v-model:checked-row-keys="checkedContactKeys"
+              :max-height="420"
+              size="small"
+              striped
+            />
+          </template>
+          <NEmpty v-else description="Select a GetSales list to preview contacts" />
+        </template>
       </NSpace>
-    </NModal>
+    </NCard>
 
     <NCard v-if="currentRun" title="Current run">
       <NSpace align="center" wrap size="medium">
@@ -642,3 +821,14 @@ watch(projectId, async () => {
     </NCard>
   </NSpace>
 </template>
+
+<style scoped>
+.launch-link {
+  color: #2080f0;
+  text-decoration: none;
+  font-weight: 500;
+}
+.launch-link:hover {
+  text-decoration: underline;
+}
+</style>

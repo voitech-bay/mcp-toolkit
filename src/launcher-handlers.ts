@@ -193,7 +193,10 @@ async function buildVelvetechResearchPayload(
     };
   }).filter((r) => r.company_domain);
   if (rows.length === 0) return { ok: false, status: 400, error: "Selected leads have no company domain or work email domain" };
-  return { ok: true, payload: { run_id: args.launchId, rows } };
+  return {
+    ok: true,
+    payload: { run_id: args.launchId, launch_id: args.launchId, project_id: args.projectId, rows },
+  };
 }
 
 async function buildVelvetechReplyPayloads(
@@ -378,9 +381,16 @@ interface RunAggregates {
   latest_row_at: string | null;
 }
 
+function rowMatchesLaunchId(result: Json, launchId: string): boolean {
+  if (str(result, "launch_id") === launchId || str(result, "run_id") === launchId) return true;
+  if (findNestedString(result, "launch_id") === launchId) return true;
+  if (findNestedString(result, "run_id") === launchId) return true;
+  return false;
+}
+
 /**
  * Correlate result rows for a launch: rows for the launched contacts created at/after
- * the run started. When some rows carry `result.launch_id`, restrict to exactly those.
+ * the run started. When some rows carry `result.launch_id` or `result.run_id`, restrict to those.
  */
 async function computeAggregates(
   client: NonNullable<ReturnType<typeof getSupabase>>,
@@ -398,20 +408,57 @@ async function computeAggregates(
   };
   if (leadUuids.length === 0) return empty;
 
-  let query = client
+  const projectId = str(run, "project_id");
+  const { contacts: contactRows } = projectId
+    ? await getContactsByUuidsForProject(client, projectId, leadUuids)
+    : { contacts: {} as Record<string, Json> };
+  const launchedCompanyIds = [
+    ...new Set(
+      leadUuids
+        .map((uuid) => str(contactRows[uuid], "company_uuid"))
+        .filter(Boolean)
+    ),
+  ];
+
+  type RowPick = { contact_id: string | null; company_id: string | null; created_at: string | null; result: unknown };
+  const rowKey = (r: RowPick) => `${str(r as Json, "contact_id")}|${str(r as Json, "company_id")}|${str(r as Json, "created_at")}`;
+
+  let byContactQuery = client
     .from(N8N_WORKFLOW_RESULTS_TABLE)
     .select("contact_id,company_id,created_at,result")
     .in("contact_id", leadUuids);
-  if (createdAt) query = query.gte("created_at", createdAt);
-  const { data, error } = await query.limit(2000);
-  if (error) return empty;
+  if (createdAt) byContactQuery = byContactQuery.gte("created_at", createdAt);
+  const { data: byContact, error: contactErr } = await byContactQuery.limit(2000);
 
-  let rows = (data ?? []) as Json[];
-  // If any rows carry the launch_id, trust those exclusively (precise correlation).
-  const tagged = rows.filter((r) => {
-    const result = (r.result as Json) ?? {};
-    return str(result, "launch_id") === launchId || findNestedString(result, "launch_id") === launchId;
-  });
+  let byLaunchQuery = client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("contact_id,company_id,created_at,result")
+    .or(`result->>launch_id.eq.${launchId},result->>run_id.eq.${launchId}`);
+  if (createdAt) byLaunchQuery = byLaunchQuery.gte("created_at", createdAt);
+  const { data: byLaunchTag, error: tagErr } = await byLaunchQuery.limit(2000);
+
+  if (contactErr && tagErr) return empty;
+
+  const merged = new Map<string, RowPick>();
+  for (const r of [...(byContact ?? []), ...(byLaunchTag ?? [])] as RowPick[]) {
+    merged.set(rowKey(r), r);
+  }
+
+  if (launchedCompanyIds.length > 0) {
+    let companyQuery = client
+      .from(N8N_WORKFLOW_RESULTS_TABLE)
+      .select("contact_id,company_id,created_at,result")
+      .in("company_id", launchedCompanyIds)
+      .is("contact_id", null);
+    if (createdAt) companyQuery = companyQuery.gte("created_at", createdAt);
+    const { data: companyGrain } = await companyQuery.limit(500);
+    for (const r of (companyGrain ?? []) as RowPick[]) {
+      merged.set(rowKey(r), r);
+    }
+  }
+
+  let rows = [...merged.values()];
+  const tagged = rows.filter((r) => rowMatchesLaunchId((r.result as Json) ?? {}, launchId));
   if (tagged.length > 0) rows = tagged;
 
   const contacts = new Set<string>();
@@ -419,19 +466,18 @@ async function computeAggregates(
   let failed = 0;
   let latest: string | null = null;
   for (const r of rows) {
-    const cid = str(r, "contact_id");
+    const cid = str(r as Json, "contact_id");
     if (cid) contacts.add(cid);
-    const coid = str(r, "company_id");
+    const coid = str(r as Json, "company_id");
     if (coid) companies.add(coid);
     const result = (r.result as Json) ?? {};
     if (result._error || str(result, "error")) failed += 1;
-    const at = str(r, "created_at");
+    const at = str(r as Json, "created_at");
     if (at && (!latest || at > latest)) latest = at;
   }
   const requested = Number(run.requested_count) || leadUuids.length;
   const seen = contacts.size;
   const succeeded = Math.max(0, seen - failed);
-  // Contacts launched but never seen in results count as failures once the run settles.
   const missing = Math.max(0, requested - seen);
   return {
     contacts_count: seen,

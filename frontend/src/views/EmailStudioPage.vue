@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from "vue";
-import { NAlert, NAvatar, NButton, NCard, NCheckbox, NCollapse, NCollapseItem, NDataTable, NDrawer, NDrawerContent, NEmpty, NFormItem, NInput, NInputNumber, NModal, NPagination, NSelect, NSpace, NSpin, NTag, NText, useDialog, useMessage, type DataTableColumns } from "naive-ui";
+import { NAlert, NAvatar, NButton, NCard, NCheckbox, NCollapse, NCollapseItem, NDataTable, NDrawer, NDrawerContent, NEmpty, NFormItem, NInput, NInputNumber, NModal, NPagination, NSelect, NSpace, NSpin, NTabPane, NTabs, NTag, NText, useDialog, useMessage, type DataTableColumns } from "naive-ui";
 import { useProjectStore } from "../stores/project";
+import VelvetechLinkedInDraftsPanel from "../components/VelvetechLinkedInDraftsPanel.vue";
+import { isVelvetechProjectId } from "../project-ids";
 
 type Json = Record<string, any>;
 interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
@@ -9,6 +11,8 @@ interface Annotation { id:string; text:string; start:number; end:number; purpose
 interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
 
 const store = useProjectStore(); const toast = useMessage(); const dialog = useDialog();
+const studioTab = ref<"email" | "linkedin">("email");
+const isVelvetech = computed(() => isVelvetechProjectId(store.selectedProjectId));
 const rows = ref<EmailRow[]>([]), total = ref(0), page = ref(1), pageSize = ref(25), loading = ref(false), error = ref("");
 const search = ref(""), statusFilter = ref<string|null>(null), campaignFilter = ref(""), batchFilter = ref(""), personaFilter = ref(""), reviewerFilter = ref(""), modelFilter = ref(""), qualityFilter = ref<string|null>(null), dateFrom = ref(""), dateTo = ref(""), openOnly = ref(false), savedView = ref("all");
 const detailOpen = ref(false), detailLoading = ref(false), detail = ref<Json|null>(null), selectedId = ref("");
@@ -186,10 +190,30 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
 </script>
 
 <template>
-  <div class="studio"><NSpace justify="space-between" align="center"><div><h1>Email Studio</h1><NText depth="3">Pick a contact, draft with research, review, and approve before Smartlead sends.</NText></div><NButton type="primary" @click="openCreateModal">Write email</NButton></NSpace>
-    <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; only verified Smartlead events mark records as sent.</NAlert>
-    <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
-    <NAlert v-if="error" type="error" style="margin-top:12px">{{error}}</NAlert><NDataTable :columns="columns" :data="rows" :loading="loading" :row-key="r=>r.id" :row-props="emailRowProps" style="margin-top:12px"/><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="total" show-size-picker :page-sizes="[25,50,100]" style="margin-top:12px"/>
+  <div class="studio">
+    <NSpace justify="space-between" align="center">
+      <div>
+        <h1>Email Studio</h1>
+        <NText depth="3">Email and LinkedIn draft review — draft, approve, and send outreach.</NText>
+      </div>
+      <NButton v-if="studioTab === 'email'" type="primary" @click="openCreateModal">Write email</NButton>
+    </NSpace>
+
+    <NTabs v-model:value="studioTab" type="line" animated style="margin-top: 16px">
+      <NTabPane name="email" tab="Email">
+        <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; only verified Smartlead events mark records as sent.</NAlert>
+        <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
+        <NAlert v-if="error" type="error" style="margin-top:12px">{{error}}</NAlert><NDataTable :columns="columns" :data="rows" :loading="loading" :row-key="r=>r.id" :row-props="emailRowProps" style="margin-top:12px"/><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="total" show-size-picker :page-sizes="[25,50,100]" style="margin-top:12px"/>
+      </NTabPane>
+
+      <NTabPane name="linkedin" tab="LinkedIn">
+        <NAlert v-if="isVelvetech" type="info" :show-icon="false" style="margin:16px 0">
+          Review Velvetech LinkedIn reply drafts from n8n. Edit when flagged <strong>needs_human</strong>, then approve to send via GetSales.
+        </NAlert>
+        <VelvetechLinkedInDraftsPanel v-if="isVelvetech" :project-id="store.selectedProjectId" />
+        <NEmpty v-else description="LinkedIn draft review is available for the Velvetech project only." />
+      </NTabPane>
+    </NTabs>
 
     <NDrawer v-model:show="detailOpen" width="96vw"><NDrawerContent :title="`${detail?.data?.contact_name||'Email'} · step ${detail?.data?.sequence_step||''}`" closable><NSpin :show="detailLoading"><template v-if="detail">
       <NSpace justify="space-between" align="center"><NSpace><NButton size="small" @click="previousRow">Previous</NButton><NButton size="small" @click="nextRow">Next</NButton><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>

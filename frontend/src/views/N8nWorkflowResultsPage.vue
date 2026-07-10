@@ -41,7 +41,8 @@ type FilterField =
   | "company_id"
   | "contact_name"
   | "company_name"
-  | "result_text";
+  | "result_text"
+  | "launch_id";
 
 type FilterOp = "eq" | "neq" | "like" | "not_like" | "gte" | "lte";
 
@@ -62,6 +63,7 @@ const FIELD_OPTIONS: SelectOption[] = [
   { label: "Contact name (contains)", value: "contact_name" },
   { label: "Company name / domain (contains)", value: "company_name" },
   { label: "Result JSON (contains)", value: "result_text" },
+  { label: "Launch / run id", value: "launch_id" },
 ];
 
 function opsForField(field: string): SelectOption[] {
@@ -81,6 +83,7 @@ function opsForField(field: string): SelectOption[] {
       ];
     case "contact_id":
     case "company_id":
+    case "launch_id":
       return [
         { label: "equals", value: "eq" },
         { label: "not equals", value: "neq" },
@@ -99,6 +102,204 @@ function opsForField(field: string): SelectOption[] {
 
 const route = useRoute();
 const router = useRouter();
+
+type ExecutionSummary = {
+  id: string;
+  run_id: string;
+  execution_id: string | null;
+  created_at: string;
+  status: string;
+  duration_sec: number | null;
+  cost_usd: number | null;
+  funnel: Record<string, number>;
+  warnings: string[];
+};
+
+type ExecutionDetail = {
+  summary: ExecutionSummary | null;
+  stages: Array<{ workflow_name: string; row_count: number }>;
+  companies: Array<Record<string, unknown>>;
+  contacts: Array<Record<string, unknown>>;
+  rows: N8nWorkflowResultRow[];
+};
+
+const pageMode = computed(() => {
+  const view = String(route.query.view ?? "");
+  if (view === "rows") return "rows";
+  const execId = String(route.query.executionId ?? route.query.execution_id ?? "").trim();
+  const runId = String(route.query.runId ?? route.query.run_id ?? "").trim();
+  if (execId || runId) return "detail";
+  return "executions";
+});
+
+const detailKey = computed(() => {
+  return (
+    String(route.query.runId ?? route.query.run_id ?? "").trim() ||
+    String(route.query.executionId ?? route.query.execution_id ?? "").trim()
+  );
+});
+
+const execLoading = ref(false);
+const execError = ref("");
+const execRows = ref<ExecutionSummary[]>([]);
+const execTotal = ref(0);
+const execPage = computed({
+  get: () => Math.max(1, parseInt(String(route.query.execPage ?? "1"), 10) || 1),
+  set: (p: number) => {
+    const q = queryToRecord();
+    if (p <= 1) delete q.execPage;
+    else q.execPage = String(p);
+    router.replace({ path: "/n8n/workflow-results", query: q });
+  },
+});
+
+const detailLoading = ref(false);
+const detailError = ref("");
+const detail = ref<ExecutionDetail | null>(null);
+
+async function loadExecutions() {
+  execLoading.value = true;
+  execError.value = "";
+  try {
+    const offset = (execPage.value - 1) * PAGE_SIZE;
+    const r = await fetch(`/api/n8n/workflow-results/executions?limit=${PAGE_SIZE}&offset=${offset}`);
+    const data = (await r.json()) as { rows?: ExecutionSummary[]; total?: number; error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed to load executions");
+    execRows.value = data.rows ?? [];
+    execTotal.value = data.total ?? 0;
+  } catch (e) {
+    execError.value = e instanceof Error ? e.message : "Failed to load executions";
+    execRows.value = [];
+    execTotal.value = 0;
+  } finally {
+    execLoading.value = false;
+  }
+}
+
+async function loadExecutionDetail() {
+  const key = detailKey.value;
+  if (!key) {
+    detail.value = null;
+    return;
+  }
+  detailLoading.value = true;
+  detailError.value = "";
+  try {
+    const r = await fetch(`/api/n8n/workflow-results/executions/${encodeURIComponent(key)}`);
+    const data = (await r.json()) as ExecutionDetail & { error?: string };
+    if (!r.ok) throw new Error(data.error ?? "Failed to load execution detail");
+    detail.value = data;
+  } catch (e) {
+    detailError.value = e instanceof Error ? e.message : "Failed to load execution detail";
+    detail.value = null;
+  } finally {
+    detailLoading.value = false;
+  }
+}
+
+function openExecution(row: ExecutionSummary) {
+  router.push({
+    path: "/n8n/workflow-results",
+    query: { runId: row.run_id || row.execution_id || row.id },
+  });
+}
+
+function backToExecutions() {
+  router.push({ path: "/n8n/workflow-results" });
+}
+
+function openAllRows() {
+  router.push({ path: "/n8n/workflow-results", query: { view: "rows" } });
+}
+
+function formatUsd(v: number | null | undefined): string {
+  if (v == null || Number.isNaN(v)) return "—";
+  return `$${v.toFixed(2)}`;
+}
+
+function formatDuration(sec: number | null | undefined): string {
+  if (sec == null || sec <= 0) return "—";
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+const execColumns: DataTableColumns<ExecutionSummary> = [
+  {
+    title: "Run",
+    key: "run_id",
+    minWidth: 220,
+    ellipsis: { tooltip: true },
+    render(row) {
+      return h(
+        NButton,
+        { text: true, type: "primary", size: "small", onClick: () => openExecution(row) },
+        { default: () => row.run_id || row.execution_id || row.id }
+      );
+    },
+  },
+  {
+    title: "Status",
+    key: "status",
+    width: 100,
+    render(row) {
+      const t = row.status === "success" ? "success" : row.status === "error" ? "error" : "default";
+      return h(NTag, { size: "small", type: t }, { default: () => row.status });
+    },
+  },
+  {
+    title: "Cost",
+    key: "cost_usd",
+    width: 90,
+    render(row) {
+      return formatUsd(row.cost_usd);
+    },
+  },
+  {
+    title: "POV ok",
+    key: "pov",
+    width: 90,
+    render(row) {
+      const ok = row.funnel?.companies_pov_ok ?? 0;
+      const total = row.funnel?.companies_pov ?? 0;
+      return total ? `${ok}/${total}` : "—";
+    },
+  },
+  {
+    title: "Fit HM",
+    key: "hm",
+    width: 90,
+    render(row) {
+      const v = row.funnel?.contacts_high_medium;
+      return v != null ? String(v) : "—";
+    },
+  },
+  {
+    title: "Duration",
+    key: "duration_sec",
+    width: 100,
+    render(row) {
+      return formatDuration(row.duration_sec);
+    },
+  },
+  {
+    title: "Created",
+    key: "created_at",
+    width: 168,
+    render(row) {
+      try {
+        return new Date(row.created_at).toLocaleString();
+      } catch {
+        return row.created_at;
+      }
+    },
+  },
+];
+
+const execPageCount = computed(() => Math.max(1, Math.ceil(execTotal.value / PAGE_SIZE)));
 
 function queryToRecord(): Record<string, string> {
   const out: Record<string, string> = {};
@@ -267,10 +468,16 @@ async function load() {
 }
 
 watch(
-  () => ({ ...route.query }),
+  () => ({ ...route.query, mode: pageMode.value }),
   () => {
-    syncFiltersFromRoute();
-    void load();
+    if (pageMode.value === "rows") {
+      syncFiltersFromRoute();
+      void load();
+    } else if (pageMode.value === "executions") {
+      void loadExecutions();
+    } else if (pageMode.value === "detail") {
+      void loadExecutionDetail();
+    }
   },
   { deep: true, immediate: true }
 );
@@ -459,15 +666,172 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
 
   return [...head, ...agentCols, ...tail];
 });
+
+const stageDetailColumns: DataTableColumns<{ workflow_name: string; row_count: number }> = [
+  { title: "Stage", key: "workflow_name" },
+  { title: "Rows", key: "row_count", width: 80 },
+];
+
+const companyDetailColumns: DataTableColumns<Record<string, unknown>> = [
+  { title: "Domain", key: "company_key" },
+  { title: "Name", key: "company_name" },
+  {
+    title: "POV ok",
+    key: "pov_ok",
+    width: 80,
+    render(row) {
+      return String(row.pov_ok ?? "—");
+    },
+  },
+];
+
+const contactDetailColumns: DataTableColumns<Record<string, unknown>> = [
+  { title: "Key", key: "contact_key" },
+  { title: "Fit", key: "fit", width: 80 },
+  { title: "Verification", key: "verification_status", width: 120 },
+  { title: "Title", key: "title", ellipsis: { tooltip: true } },
+];
+
+const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => [
+  {
+    title: "Stage",
+    key: "workflow",
+    render(row) {
+      return String((row.result?.workflow_name as string) ?? row.workflow ?? "—");
+    },
+  },
+  {
+    title: "Entity",
+    key: "entity",
+    render(row) {
+      return String(row.result?.contact_key ?? row.result?.company_key ?? row.result?.entity_key ?? "—");
+    },
+  },
+  {
+    title: "Created",
+    key: "created_at",
+    width: 168,
+    render(row) {
+      return new Date(row.created_at).toLocaleString();
+    },
+  },
+  {
+    title: "JSON",
+    key: "json",
+    width: 72,
+    render(row) {
+      return h(NButton, { size: "tiny", quaternary: true, onClick: () => openRowDetail(row) }, { default: () => "JSON" });
+    },
+  },
+]);
 </script>
 
 <template>
   <NCard>
     <template #header>
-      <span>n8n workflow results</span>
+      <NSpace align="center" justify="space-between" style="width: 100%">
+        <span>n8n workflow results</span>
+        <NSpace>
+          <NButton
+            v-if="pageMode !== 'executions'"
+            size="small"
+            quaternary
+            @click="backToExecutions"
+          >
+            Executions
+          </NButton>
+          <NButton
+            v-if="pageMode !== 'rows'"
+            size="small"
+            quaternary
+            @click="openAllRows"
+          >
+            All rows
+          </NButton>
+        </NSpace>
+      </NSpace>
     </template>
 
-    <NSpace vertical size="medium" style="width: 100%">
+    <NSpace v-if="pageMode === 'executions'" vertical size="medium" style="width: 100%">
+      <p class="muted">Velvetech batch runs — cost and funnel stats. Select a run for stage + entity detail.</p>
+      <NAlert v-if="execError" type="error">{{ execError }}</NAlert>
+      <NDataTable
+        :columns="execColumns"
+        :data="execRows"
+        :loading="execLoading"
+        :scroll-x="980"
+        size="small"
+        striped
+      />
+      <div class="pager">
+        <NPagination
+          :page="execPage"
+          :page-count="execPageCount"
+          :disabled="execLoading"
+          @update:page="(p: number) => (execPage = p)"
+        />
+        <span class="muted total-line">Total runs: {{ execTotal }}</span>
+      </div>
+    </NSpace>
+
+    <NSpace v-else-if="pageMode === 'detail'" vertical size="medium" style="width: 100%">
+      <NButton size="small" quaternary @click="backToExecutions">← Back to executions</NButton>
+      <NAlert v-if="detailError" type="error">{{ detailError }}</NAlert>
+      <NAlert v-if="detail?.summary?.warnings?.includes('no_billing_row')" type="warning">
+        No billing row yet for this run — showing stage rows only. Re-run with <code>--billing</code> on future batches.
+      </NAlert>
+      <template v-if="detail?.summary">
+        <NSpace wrap>
+          <NTag type="info">{{ detail.summary.run_id }}</NTag>
+          <NTag>exec {{ detail.summary.execution_id ?? "—" }}</NTag>
+          <NTag :type="detail.summary.status === 'success' ? 'success' : 'default'">
+            {{ detail.summary.status }}
+          </NTag>
+          <NTag>{{ formatDuration(detail.summary.duration_sec) }}</NTag>
+          <NTag type="warning">{{ formatUsd(detail.summary.cost_usd) }}</NTag>
+        </NSpace>
+        <div v-if="detail.summary.funnel && Object.keys(detail.summary.funnel).length" class="funnel-grid">
+          <div v-for="(v, k) in detail.summary.funnel" :key="String(k)" class="funnel-cell">
+            <div class="funnel-label">{{ k }}</div>
+            <div class="funnel-value">{{ v }}</div>
+          </div>
+        </div>
+      </template>
+      <template v-if="detail?.stages?.length">
+        <h4 class="section-title">Stages</h4>
+        <NDataTable :columns="stageDetailColumns" :data="detail.stages" size="small" :bordered="false" />
+      </template>
+      <template v-if="detail?.companies?.length">
+        <h4 class="section-title">Companies ({{ detail.companies.length }})</h4>
+        <NDataTable
+          :columns="companyDetailColumns"
+          :data="detail.companies"
+          size="small"
+          :max-height="240"
+        />
+      </template>
+      <template v-if="detail?.contacts?.length">
+        <h4 class="section-title">Contacts ({{ detail.contacts.length }})</h4>
+        <NDataTable
+          :columns="contactDetailColumns"
+          :data="detail.contacts"
+          size="small"
+          :max-height="320"
+        />
+      </template>
+      <template v-if="detail?.rows?.length">
+        <h4 class="section-title">All stage rows ({{ detail.rows.length }})</h4>
+        <NDataTable
+          :columns="detailRowColumns"
+          :data="detail.rows"
+          :loading="detailLoading"
+          size="small"
+          :max-height="400"
+        />
+      </template>
+    </NSpace>
+
+    <NSpace v-else vertical size="medium" style="width: 100%">
       <NSpace vertical size="small" style="width: 100%">
         <NSpace align="center" wrap>
           <NButton size="small" @click="addFilterRow">Add filter</NButton>
@@ -583,5 +947,27 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
   align-items: center;
   gap: 0.5rem;
   width: 100%;
+}
+.funnel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 0.5rem;
+}
+.funnel-cell {
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+.funnel-label {
+  font-size: 0.75rem;
+  opacity: 0.7;
+}
+.funnel-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+.section-title {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.95rem;
 }
 </style>

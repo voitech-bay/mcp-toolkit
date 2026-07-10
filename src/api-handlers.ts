@@ -110,6 +110,8 @@ import {
   N8N_WORKFLOW_RESULTS_TABLE,
   listN8nWorkflowResultsPage,
   listN8nWorkflowResultsFilteredPageRpc,
+  listVelvetechExecutionSummaries,
+  getVelvetechExecutionDetail,
 } from "./services/supabase.js";
 import { parseN8nWorkflowResultsQueryBody } from "./services/n8n-workflow-result-filters.js";
 import {
@@ -119,6 +121,7 @@ import {
   isVelvetechCompanyGrainItem,
   loadCompanyIdsByDomains,
   loadContactUuidsByLinkedinSlugs,
+  normalizeLaunchIdInItem,
   resolveVelvetechLinksFromItem,
 } from "./services/n8n-entity-link.js";
 import {
@@ -4201,6 +4204,75 @@ export async function handlePostN8nWorkflowResultsQuery(
 }
 
 /**
+ * GET /api/n8n/workflow-results/executions?limit=&offset=
+ * Velvetech batch runs (velvetech-run-billing rows), newest first.
+ */
+export async function handleGetN8nWorkflowResultsExecutions(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const { rows, total, error } = await listVelvetechExecutionSummaries(client, { limit, offset });
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ rows, total, limit, offset }));
+}
+
+/**
+ * GET /api/n8n/workflow-results/executions/:id
+ * `id` = run_id or parent execution_id.
+ */
+export async function handleGetN8nWorkflowResultsExecutionDetail(
+  req: IncomingMessage,
+  res: ServerResponse,
+  id: string
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const { data, error } = await getVelvetechExecutionDetail(client, id);
+  if (error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error }));
+    return;
+  }
+  if (!data) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Execution not found" }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify(data));
+}
+
+/**
  * POST /api/n8n/workflow-results
  *
  * n8n contract:
@@ -4515,7 +4587,7 @@ export async function handlePostN8nWorkflowResults(
       });
       continue;
     }
-    const item = p.item;
+    const item = normalizeLaunchIdInItem(p.item);
     const lead = p.leadUuid;
     const workflowName = deriveWorkflowNameFromResult(item);
     const wfItem = { ...item, workflow_name: workflowName };

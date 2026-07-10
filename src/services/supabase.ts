@@ -5415,6 +5415,213 @@ export async function listN8nWorkflowResultsFilteredPageRpc(
   return hydrateN8nWorkflowResultListRows(client, rawRows, total);
 }
 
+export type VelvetechExecutionSummaryRow = {
+  id: string;
+  run_id: string;
+  execution_id: string | null;
+  created_at: string;
+  status: string;
+  duration_sec: number | null;
+  cost_usd: number | null;
+  funnel: Record<string, number>;
+  warnings: string[];
+  billing: Record<string, unknown> | null;
+  row_count: number | null;
+};
+
+function numFromResult(j: Record<string, unknown>, key: string): number | null {
+  const v = j[key];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() && !Number.isNaN(Number(v))) return Number(v);
+  return null;
+}
+
+function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSummaryRow {
+  const j = (raw.result as Record<string, unknown>) ?? {};
+  const funnelRaw = j.funnel;
+  const funnel =
+    funnelRaw && typeof funnelRaw === "object" && !Array.isArray(funnelRaw)
+      ? (funnelRaw as Record<string, number>)
+      : {};
+  const warningsRaw = j.warnings;
+  const warnings = Array.isArray(warningsRaw)
+    ? warningsRaw.filter((w): w is string => typeof w === "string")
+    : [];
+  const billingRaw = j.billing;
+  const billing =
+    billingRaw && typeof billingRaw === "object" && !Array.isArray(billingRaw)
+      ? (billingRaw as Record<string, unknown>)
+      : null;
+  return {
+    id: String(raw.id ?? ""),
+    run_id: String(j.run_id ?? j.entity_key ?? ""),
+    execution_id: (raw.execution_id as string | null) ?? null,
+    created_at: String(raw.created_at ?? ""),
+    status: String(j.status ?? "unknown"),
+    duration_sec: numFromResult(j, "duration_sec"),
+    cost_usd: numFromResult(j, "cost_usd_total"),
+    funnel,
+    warnings,
+    billing,
+    row_count: null,
+  };
+}
+
+/** Paginated Velvetech batch runs from `velvetech-run-billing` rows (newest first). */
+export async function listVelvetechExecutionSummaries(
+  client: SupabaseClient,
+  params: { limit: number; offset: number }
+): Promise<{ rows: VelvetechExecutionSummaryRow[]; total: number; error: string | null }> {
+  const limit = Math.min(Math.max(params.limit, 1), 100);
+  const offset = Math.max(params.offset, 0);
+  const { data, error, count } = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("*", { count: "exact" })
+    .eq("workflow_name", "velvetech-run-billing")
+    .order("created_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (error) {
+    return { rows: [], total: 0, error: error.message };
+  }
+  const rows = (data ?? []).map((raw) => mapBillingResultRow(raw as Record<string, unknown>));
+  return { rows, total: count ?? rows.length, error: null };
+}
+
+export type VelvetechExecutionDetail = {
+  summary: VelvetechExecutionSummaryRow | null;
+  stages: Array<{ workflow_name: string; row_count: number }>;
+  companies: Array<Record<string, unknown>>;
+  contacts: Array<Record<string, unknown>>;
+  rows: N8nWorkflowResultListRow[];
+};
+
+/** Load one Velvetech run by `run_id` or parent `execution_id`. */
+export async function getVelvetechExecutionDetail(
+  client: SupabaseClient,
+  id: string
+): Promise<{ data: VelvetechExecutionDetail | null; error: string | null }> {
+  const key = id.trim();
+  if (!key) return { data: null, error: "id required" };
+
+  let summary: VelvetechExecutionSummaryRow | null = null;
+  let runId = key;
+  let executionId: string | null = null;
+
+  const billingByRun = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("*")
+    .eq("workflow_name", "velvetech-run-billing")
+    .filter("result->>run_id", "eq", key)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (billingByRun.data) {
+    summary = mapBillingResultRow(billingByRun.data as Record<string, unknown>);
+    runId = summary.run_id;
+    executionId = summary.execution_id;
+  } else {
+    const billingByExec = await client
+      .from(N8N_WORKFLOW_RESULTS_TABLE)
+      .select("*")
+      .eq("workflow_name", "velvetech-run-billing")
+      .eq("execution_id", key)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (billingByExec.data) {
+      summary = mapBillingResultRow(billingByExec.data as Record<string, unknown>);
+      runId = summary.run_id;
+      executionId = summary.execution_id;
+    } else {
+      executionId = key;
+    }
+  }
+
+  const filters: Array<{ field: string; op: string; value: string }> = [];
+  if (runId && summary) {
+    filters.push({ field: "launch_id", op: "eq", value: runId });
+  } else if (executionId) {
+    filters.push({ field: "execution_id", op: "eq", value: executionId });
+  }
+
+  const { rows, error } = await listN8nWorkflowResultsFilteredPageRpc(client, {
+    filters,
+    limit: 500,
+    offset: 0,
+  });
+  if (error) {
+    return { data: null, error };
+  }
+
+  const stageCounts = new Map<string, number>();
+  const companies = new Map<string, Record<string, unknown>>();
+  const contacts = new Map<string, Record<string, unknown>>();
+
+  for (const row of rows) {
+    const j = row.result ?? {};
+    const wf = String(j.workflow_name ?? row.workflow ?? "").trim();
+    if (wf && wf !== "velvetech-run-billing") {
+      stageCounts.set(wf, (stageCounts.get(wf) ?? 0) + 1);
+    }
+    const ck = String(j.company_key ?? "").trim().toLowerCase();
+    if (ck && !companies.has(ck)) {
+      companies.set(ck, {
+        company_key: ck,
+        company_name: j.company_name ?? ck,
+        fit_score: j.fit_score ?? null,
+        pov_ok: j.pov_ok ?? null,
+      });
+    }
+    const ctk = String(j.contact_key ?? "").trim().toLowerCase();
+    if (ctk && !contacts.has(ctk)) {
+      contacts.set(ctk, {
+        contact_key: ctk,
+        company_key: ck || null,
+        fit: j.fit ?? null,
+        verification_status: j.verification_status ?? null,
+        title: j.effective_title ?? j.current_title ?? j.title ?? null,
+      });
+    }
+  }
+
+  const stages = [...stageCounts.entries()]
+    .map(([workflow_name, row_count]) => ({ workflow_name, row_count }))
+    .sort((a, b) => a.workflow_name.localeCompare(b.workflow_name));
+
+  if (!summary && rows.length > 0) {
+    const first = rows[0];
+    const j = first.result ?? {};
+    runId = String(j.run_id ?? runId);
+    summary = {
+      id: first.id,
+      run_id: runId,
+      execution_id: first.execution_id,
+      created_at: first.created_at,
+      status: "legacy",
+      duration_sec: null,
+      cost_usd: null,
+      funnel: {
+        companies_pov: companies.size,
+        contacts_fit_scored: contacts.size,
+      },
+      warnings: ["no_billing_row"],
+      billing: null,
+      row_count: rows.length,
+    };
+  }
+
+  return {
+    data: {
+      summary,
+      stages,
+      companies: [...companies.values()],
+      contacts: [...contacts.values()],
+      rows,
+    },
+    error: null,
+  };
+}
+
 export type EnrichmentEntityType = "company" | "contact";
 
 export type EnrichmentAgentCellStatus =

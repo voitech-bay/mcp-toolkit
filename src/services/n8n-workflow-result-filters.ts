@@ -12,6 +12,7 @@ export const N8N_WORKFLOW_FILTER_FIELDS = [
   "contact_name",
   "company_name",
   "result_text",
+  "launch_id",
 ] as const;
 
 export type N8nWorkflowResultFilterField = (typeof N8N_WORKFLOW_FILTER_FIELDS)[number];
@@ -44,6 +45,7 @@ function allowedOpsForField(field: N8nWorkflowResultFilterField): ReadonlySet<N8
       return new Set(["gte", "lte"]);
     case "contact_id":
     case "company_id":
+    case "launch_id":
       return new Set(["eq", "neq"]);
     case "contact_name":
     case "company_name":
@@ -109,6 +111,7 @@ export function parseN8nWorkflowResultsQueryBody(input: unknown): {
     ) {
       return { ok: false, error: `filters[${i}].value must be non-empty for this operator` };
     }
+    // launch_id matches result.launch_id OR result.run_id (Velvetech CLI uses non-UUID run_id strings).
     if ((f === "contact_id" || f === "company_id") && (o === "eq" || o === "neq") && trimmed.length > 0) {
       if (!UUID_RE.test(trimmed)) {
         return { ok: false, error: `filters[${i}].value must be a UUID` };

@@ -101,7 +101,7 @@ export function useWorkflowLaunch() {
 
   async function launchVelvetechReply(leadUuids: string[]): Promise<string | null> {
     return launch(VELVETECH_REPLY, leadUuids, {
-      successMessage: `Draft reply started for ${leadUuids.length} contact${leadUuids.length === 1 ? "" : "s"}. Check Pipeline → Launch for drafts.`,
+      successMessage: `Draft reply started for ${leadUuids.length} contact${leadUuids.length === 1 ? "" : "s"}. Review in Email Studio → LinkedIn.`,
     });
   }
 

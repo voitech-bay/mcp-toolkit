@@ -88,6 +88,41 @@ export function isVelvetechWorkflowName(workflowName: string): boolean {
   return workflowName.toLowerCase().startsWith("velvetech");
 }
 
+function nestedLaunchOrRunId(value: unknown, depth = 0): string | null {
+  if (depth > 6 || value == null) return null;
+  if (typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const el of value) {
+      const found = nestedLaunchOrRunId(el, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  for (const key of ["launch_id", "run_id"] as const) {
+    const raw = obj[key];
+    if (typeof raw === "string" && raw.trim()) return raw.trim();
+  }
+  for (const v of Object.values(obj)) {
+    const found = nestedLaunchOrRunId(v, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
+
+/** Ensure ingest rows carry both launch_id and run_id when either is present in the payload. */
+export function normalizeLaunchIdInItem(item: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...item };
+  const topLaunch = stringField(out.launch_id);
+  const topRun = stringField(out.run_id);
+  const nested = nestedLaunchOrRunId(out);
+  const launchId = topLaunch || topRun || nested;
+  if (!launchId) return out;
+  if (!out.launch_id) out.launch_id = launchId;
+  if (!out.run_id) out.run_id = launchId;
+  return out;
+}
+
 /** Company-grain Velvetech stages (no contact_id on the row). */
 export function isVelvetechCompanyGrainItem(item: Record<string, unknown>): boolean {
   const wf = stringField(item.workflow_name) ?? "";

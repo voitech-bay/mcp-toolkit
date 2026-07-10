@@ -106,6 +106,8 @@ import {
   handlePostFindContactByUuid,
   handlePostContactsListSyncResyncMissing,
   handleGetN8nWorkflowResults,
+  handleGetN8nWorkflowResultsExecutions,
+  handleGetN8nWorkflowResultsExecutionDetail,
   handlePostN8nWorkflowResultsQuery,
   handlePostN8nWorkflowResults,
   handlePostN8nWorkflowResultsBackfillVelvetech,
@@ -358,6 +360,12 @@ const server = createServer(async (req, res) => {
     /^\/api\/dify\/workflows\/([^/]+)\/runs\/batch-detail$/
   );
   const difyWorkflowRunsMatch = pathname.match(/^\/api\/dify\/workflows\/([^/]+)\/runs$/);
+  const n8nWorkflowResultsExecutionsMatch = pathname.match(
+    /^\/api\/n8n\/workflow-results\/executions$/
+  );
+  const n8nWorkflowResultsExecutionDetailMatch = pathname.match(
+    /^\/api\/n8n\/workflow-results\/executions\/([^/]+)$/
+  );
   const n8nLaunchStatusMatch = pathname.match(/^\/api\/n8n\/launch\/([^/]+)\/status$/);
   const getSalesWebhookMatch = pathname.match(/^\/api\/webhooks\/getsales\/([^/]+)$/);
   const outreachRunPovMatch = pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)\/pov$/);
@@ -583,6 +591,17 @@ const server = createServer(async (req, res) => {
         res.writeHead(405, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "Method not allowed" }));
       }
+      return;
+    }
+
+    if (n8nWorkflowResultsExecutionDetailMatch) {
+      const execKey = decodeURIComponent(n8nWorkflowResultsExecutionDetailMatch[1]);
+      await handleGetN8nWorkflowResultsExecutionDetail(req, res, execKey);
+      return;
+    }
+
+    if (n8nWorkflowResultsExecutionsMatch) {
+      await handleGetN8nWorkflowResultsExecutions(req, res);
       return;
     }
 
