@@ -244,10 +244,18 @@ export async function handlePostCompanySummary(req: IncomingMessage, res: Server
   sendJson(res, 200, { account_summary: entry, account_summary_stale: false });
 }
 
-// --- PUT /api/contacts/meta?uuid= { lead_category?, priority? } ----------------
-// Editable fields for the contact card: lead_category and priority.
+// --- PUT /api/contacts/meta?uuid= { lead_category?, priority?, call_messenger_status? } ---
+// Editable fields for contact cards and list workflows.
 const VALID_CATEGORIES = ["Founder/CEO", "Business Leader", "Technical Leader", "Engineer", "Sales", "Other"] as const;
 const VALID_PRIORITIES = ["Top", "High", "Medium", "Low"] as const;
+const VALID_CALL_MESSENGER_STATUSES = [
+  "No phone",
+  "Whatsapp - Replied",
+  "Whatsapp - No reply",
+  "Called - No reply",
+  "Called - Positive",
+  "Called - Neutral",
+] as const;
 
 export async function handlePutContactMeta(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "PUT") return sendJson(res, 405, { error: "Method not allowed" });
@@ -256,20 +264,29 @@ export async function handlePutContactMeta(req: IncomingMessage, res: ServerResp
   const uuid = queryParam(req, "uuid");
   if (!UUID_RE.test(uuid)) return sendJson(res, 400, { error: "uuid must be a UUID" });
   const body = await readJsonBody(req);
-  const patch: Record<string, string> = {};
+  const patch: Record<string, string | null> = {};
   if (body.lead_category !== undefined) {
     const cat = typeof body.lead_category === "string" ? body.lead_category.trim() : "";
-    if (!VALID_CATEGORIES.includes(cat as typeof VALID_CATEGORIES[number])) {
+    if (cat && !VALID_CATEGORIES.includes(cat as typeof VALID_CATEGORIES[number])) {
       return sendJson(res, 400, { error: `lead_category must be one of: ${VALID_CATEGORIES.join(", ")}` });
     }
-    patch.lead_category = cat;
+    patch.lead_category = cat || null;
   }
   if (body.priority !== undefined) {
     const pri = typeof body.priority === "string" ? body.priority.trim() : "";
-    if (!VALID_PRIORITIES.includes(pri as typeof VALID_PRIORITIES[number])) {
+    if (pri && !VALID_PRIORITIES.includes(pri as typeof VALID_PRIORITIES[number])) {
       return sendJson(res, 400, { error: `priority must be one of: ${VALID_PRIORITIES.join(", ")}` });
     }
-    patch.priority = pri;
+    patch.priority = pri || null;
+  }
+  if (body.call_messenger_status !== undefined) {
+    const status = typeof body.call_messenger_status === "string" ? body.call_messenger_status.trim() : "";
+    if (status && !VALID_CALL_MESSENGER_STATUSES.includes(status as typeof VALID_CALL_MESSENGER_STATUSES[number])) {
+      return sendJson(res, 400, {
+        error: `call_messenger_status must be one of: ${VALID_CALL_MESSENGER_STATUSES.join(", ")}`,
+      });
+    }
+    patch.call_messenger_status = status || null;
   }
   if (!Object.keys(patch).length) return sendJson(res, 400, { error: "No valid fields to update" });
   const { error } = await client.from("Contacts").update(patch).eq("uuid", uuid);

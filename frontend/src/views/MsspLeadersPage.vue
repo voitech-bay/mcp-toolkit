@@ -40,6 +40,7 @@ interface LeaderRecord {
   location: string | null;
   email: string | null;
   email_status: string | null;
+  call_messenger_status: string | null;
   company_id: string | null;
   company_name: string | null;
   company_hq: string | null;
@@ -62,11 +63,13 @@ const data = ref<LeaderRecord[]>([]);
 const loading = ref(false);
 const syncing = ref(false);
 const removing = ref(false);
+const updatingCallMessenger = ref<Record<string, boolean>>({});
 const error = ref("");
 const search = ref("");
 const statusFilter = ref<string | null>(null);
 const connFilter = ref<string | null>(null);
 const typeFilter = ref<string | null>(null);
+const callMessengerFilter = ref<string | null>(null);
 const lastOutboundDaysFilter = ref<number | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const view = ref<"contacts" | "companies">("contacts");
@@ -150,6 +153,29 @@ async function removeFromList(uuids: string[]) {
   }
 }
 
+async function updateCallMessengerStatus(row: LeaderRecord, value: string | null) {
+  const previous = row.call_messenger_status;
+  row.call_messenger_status = value;
+  updatingCallMessenger.value = { ...updatingCallMessenger.value, [row.uuid]: true };
+  error.value = "";
+  try {
+    const r = await fetch(`/api/contacts/meta?uuid=${encodeURIComponent(row.uuid)}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ call_messenger_status: value }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Update failed");
+  } catch (e) {
+    row.call_messenger_status = previous;
+    error.value = e instanceof Error ? e.message : "Update failed";
+  } finally {
+    const next = { ...updatingCallMessenger.value };
+    delete next[row.uuid];
+    updatingCallMessenger.value = next;
+  }
+}
+
 function selectRegion(r: Region) {
   if (region.value === r) return;
   region.value = r;
@@ -158,6 +184,7 @@ function selectRegion(r: Region) {
   statusFilter.value = null;
   connFilter.value = null;
   typeFilter.value = null;
+  callMessengerFilter.value = null;
   lastOutboundDaysFilter.value = null;
   checkedKeys.value = [];
   fetchList();
@@ -216,6 +243,14 @@ const connOptions = [
   { label: "Withdrawn", value: "withdrawn" },
   { label: "None", value: "none" },
 ];
+const callMessengerOptions = [
+  { label: "No phone", value: "No phone" },
+  { label: "Whatsapp - Replied", value: "Whatsapp - Replied" },
+  { label: "Whatsapp - No reply", value: "Whatsapp - No reply" },
+  { label: "Called - No reply", value: "Called - No reply" },
+  { label: "Called - Positive", value: "Called - Positive" },
+  { label: "Called - Neutral", value: "Called - Neutral" },
+];
 const lastOutboundDaysOptions = [1, 2, 7, 10].map((days) => ({
   label: `Last sent > ${days}d`,
   value: days,
@@ -234,6 +269,7 @@ const filtered = computed(() => {
     if (statusFilter.value && d.status !== statusFilter.value) return false;
     if (connFilter.value && d.connection_status !== connFilter.value) return false;
     if (typeFilter.value && d.company_type !== typeFilter.value) return false;
+    if (callMessengerFilter.value && d.call_messenger_status !== callMessengerFilter.value) return false;
     if (lastOutboundDaysFilter.value != null) {
       const ageDays = daysSince(d.last_outbound_at);
       if (ageDays == null || ageDays <= lastOutboundDaysFilter.value) return false;
@@ -439,6 +475,21 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
     sorter: (a, b) => a.connection_status.localeCompare(b.connection_status),
     render: (r) => h(NTag, { size: "small", bordered: false, type: connType(r.connection_status) }, { default: () => r.connection_status }),
   },
+  {
+    title: "Call / Messenger", key: "call_messenger_status", width: 180,
+    sorter: (a, b) => (a.call_messenger_status ?? "").localeCompare(b.call_messenger_status ?? ""),
+    render: (row) =>
+      h(NSelect, {
+        value: row.call_messenger_status,
+        options: callMessengerOptions,
+        clearable: true,
+        size: "small",
+        placeholder: "Set status",
+        loading: Boolean(updatingCallMessenger.value[row.uuid]),
+        disabled: Boolean(updatingCallMessenger.value[row.uuid]),
+        "onUpdate:value": (value: string | null) => updateCallMessengerStatus(row, value),
+      }),
+  },
   { title: "Accepted", key: "connection_accepted_at", width: 96, render: (r) => fmtDate(r.connection_accepted_at) },
   {
     title: "Automations", key: "automations", width: 160, ellipsis: { tooltip: true },
@@ -533,6 +584,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
           <NInput v-model:value="search" :placeholder="view === 'companies' ? 'Search company, HQ, vendor…' : 'Search name, company, title…'" clearable size="small" style="width: 220px" />
           <NSelect v-if="view === 'contacts'" v-model:value="statusFilter" :options="statusOptions" placeholder="Status" clearable size="small" style="width: 150px" />
           <NSelect v-if="view === 'contacts'" v-model:value="connFilter" :options="connOptions" placeholder="Connection" clearable size="small" style="width: 120px" />
+          <NSelect v-if="view === 'contacts'" v-model:value="callMessengerFilter" :options="callMessengerOptions" placeholder="Call / Messenger" clearable size="small" style="width: 170px" />
           <NSelect v-if="view === 'contacts'" v-model:value="lastOutboundDaysFilter" :options="lastOutboundDaysOptions" placeholder="Last sent" clearable size="small" style="width: 132px" />
           <NSelect v-model:value="typeFilter" :options="typeOptions" placeholder="Company type" clearable size="small" style="width: 140px" />
           <NTooltip v-if="view === 'contacts' && selectedUuids.length > 0">
@@ -574,7 +626,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       v-else-if="view === 'contacts'"
       :columns="columns"
       :data="filtered"
-      :scroll-x="2000"
+      :scroll-x="2180"
       :row-key="(r: LeaderRecord) => r.uuid"
       v-model:checked-row-keys="checkedKeys"
       :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"

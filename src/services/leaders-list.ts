@@ -45,6 +45,7 @@ export interface LeaderListRecord {
   location: string | null;
   email: string | null;
   email_status: string | null;
+  call_messenger_status: string | null;
   company_id: string | null;
   company_name: string | null;
   company_hq: string | null;
@@ -230,7 +231,7 @@ export async function buildLeadersList(
   const { data: contacts, error: cErr } = await client
     .from(CONTACTS_TABLE)
     .select(
-      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, email_inbox_count, gs_connection_sent_at, gs_connection_lost_at, gs_connection_accepted_at, markers_synced_at"
+      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, work_phone_number, personal_phone_number, call_messenger_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, email_inbox_count, gs_connection_sent_at, gs_connection_lost_at, gs_connection_accepted_at, markers_synced_at"
     )
     // tags is a jsonb array of GetSalesTags uuids → containment needs a JSON string,
     // not a JS array (which supabase-js would serialize as a PostgREST array literal).
@@ -423,6 +424,9 @@ export async function buildLeadersList(
       location: parseCityCountry(r.location),
       email: str(r.work_email) ?? str(r.email) ?? str(r.personal_email),
       email_status: str(r.email_status),
+      call_messenger_status:
+        str(r.call_messenger_status) ??
+        (!str(r.work_phone_number) && !str(r.personal_phone_number) ? "No phone" : null),
       company_id: cid,
       company_name: co?.name ?? str(r.company_name),
       company_hq: co?.hq ?? null,
