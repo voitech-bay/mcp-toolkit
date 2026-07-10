@@ -1026,7 +1026,7 @@ const detailVendorMetrics = computed(() => {
       hint: "LLM API usage (see token estimate above)",
     },
     {
-      label: "Parallel (Exa)",
+      label: "Parallel",
       value:
         parallelUsd == null && !parallelCalls
           ? "—"
@@ -1036,7 +1036,7 @@ const detailVendorMetrics = computed(() => {
             ]
               .filter(Boolean)
               .join(" · "),
-      hint: "$5/1k search · $1/1k extract",
+      hint: "Web search + extract (api.parallel.ai)",
     },
     {
       label: "Prospeo",
