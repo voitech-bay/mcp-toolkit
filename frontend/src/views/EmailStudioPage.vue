@@ -32,6 +32,8 @@ const statusType = (s:string) => s === "sent" ? "success" : s === "approved" ? "
 const currentVersion = computed(() => detail.value?.currentVersion ?? null); const comments = computed<Json[]>(() => detail.value?.comments ?? []); const openComments = computed(() => comments.value.filter((c) => c.status === "open"));
 const annotations = computed<Annotation[]>(() => (currentVersion.value?.annotations ?? []).slice().sort((a:Annotation,b:Annotation) => a.start-b.start));
 const researchPoints = computed<Json[]>(() => detail.value?.researchPoints ?? []);
+const rawN8nResearch = computed<Json[]>(() => detail.value?.rawN8nResearch ?? []);
+const povResearch = computed<Json|null>(() => rawN8nResearch.value.find((r) => r.workflow_name === "velvetech-pov")?.result ?? null);
 const canApprove = computed(() => detail.value?.data?.status === "final_check" && openComments.value.length === 0);
 const lastGenerationFailure = computed(() => {
   if (detail.value?.data?.status !== "generation_failed") return null;
@@ -266,7 +268,21 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
     <NDrawer v-model:show="detailOpen" width="96vw"><NDrawerContent :title="`${detail?.data?.contact_name||'Email'} · step ${detail?.data?.sequence_step||''}`" closable><NSpin :show="detailLoading"><template v-if="detail">
       <NSpace justify="space-between" align="center"><NSpace><NButton size="small" @click="previousRow">Previous</NButton><NButton size="small" @click="nextRow">Next</NButton><div class="status-cell"><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NButton v-if="detail.data.status==='research_missing'" size="tiny" secondary type="primary" :loading="launchingN8n" :disabled="!emailResearchWorkflow?.configured" @click="launchEmailResearch(detail.data)">Launch n8n</NButton></div><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>
       <div class="workspace">
-        <section class="panel research"><h3>Research & instructions</h3><template v-if="researchPoints.length"><div v-for="p in researchPoints" :key="p.id" class="research-point"><NCheckbox :checked="selectedResearch.includes(p.id)" @update:checked="v=>selectedResearch=v?[...selectedResearch,p.id]:selectedResearch.filter(x=>x!==p.id)">{{p.statement}}</NCheckbox><NTag size="tiny" :type="p.kind==='verified'?'info':'warning'">{{p.kind}}</NTag></div></template><NEmpty v-else description="No structured research attached"/><h4>Active instructions</h4><div v-for="i in detail.instructions" :key="i.id" class="instruction"><NTag size="small" type="info">{{i.kind}}</NTag> {{i.title}} v{{i.version}}</div><details v-if="detail.research"><summary>Citations and raw research</summary><pre>{{JSON.stringify(detail.research,null,2)}}</pre></details></section>
+        <section class="panel research"><h3>Research & instructions</h3>
+          <template v-if="researchPoints.length"><div v-for="p in researchPoints" :key="p.id" class="research-point"><NCheckbox :checked="selectedResearch.includes(p.id)" @update:checked="v=>selectedResearch=v?[...selectedResearch,p.id]:selectedResearch.filter(x=>x!==p.id)">{{p.statement}}</NCheckbox><NTag size="tiny" :type="p.kind==='verified'?'info':'warning'">{{p.kind}}</NTag></div></template>
+          <template v-else-if="povResearch">
+            <NAlert type="info" :show-icon="false" style="margin-bottom:10px">From the n8n research pipeline — not yet used to draft this email. Click "Research and create AI draft" to generate a draft grounded in this.</NAlert>
+            <NSpace style="margin-bottom:8px"><NTag v-if="povResearch.fit_score!=null" type="success">Fit score {{povResearch.fit_score}}</NTag><NTag v-if="povResearch.vertical">{{povResearch.vertical}}</NTag></NSpace>
+            <div v-if="povResearch.pressure_points?.length"><h4>Pressure points</h4><ul><li v-for="(pt,i) in povResearch.pressure_points" :key="i">{{pt}}</li></ul></div>
+            <div v-if="povResearch.velvetech_angle"><h4>Velvetech angle</h4><p>{{povResearch.velvetech_angle}}</p></div>
+            <div v-if="povResearch.discovery_questions?.length"><h4>Discovery questions</h4><ul><li v-for="(q,i) in povResearch.discovery_questions" :key="i">{{q}}</li></ul></div>
+            <details v-if="povResearch.brief_markdown"><summary>Full research brief</summary><pre style="white-space:pre-wrap">{{povResearch.brief_markdown}}</pre></details>
+          </template>
+          <NEmpty v-else description="No structured research attached"/>
+          <h4>Active instructions</h4><div v-for="i in detail.instructions" :key="i.id" class="instruction"><NTag size="small" type="info">{{i.kind}}</NTag> {{i.title}} v{{i.version}}</div>
+          <details v-if="detail.research"><summary>Citations and raw research</summary><pre>{{JSON.stringify(detail.research,null,2)}}</pre></details>
+          <details v-else-if="rawN8nResearch.length"><summary>All raw n8n research ({{rawN8nResearch.length}})</summary><pre>{{JSON.stringify(rawN8nResearch,null,2)}}</pre></details>
+        </section>
         <section class="panel editor"><h3>Email</h3>
           <NAlert v-if="lastGenerationFailure" type="error" style="margin-bottom:12px" :show-icon="false">
             <strong>Last attempt failed:</strong> {{lastGenerationFailure.reason || "Unknown error"}}

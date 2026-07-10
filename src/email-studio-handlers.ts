@@ -1,5 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { CONTACTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
+import { CONTACTS_TABLE, N8N_WORKFLOW_RESULTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
 import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
 import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, reanchorQuote, stableResearchPoints, validateDraft, type EmailStatus } from "./services/email-studio.js";
 
@@ -223,7 +223,17 @@ export async function handleEmailStudioGet(req: IncomingMessage, res: ServerResp
     client.from("project_knowledge_documents").select("id,kind,title,version,priority").eq("project_id", projectId).eq("status", "active").order("priority"),
   ]);
   const current = (versions.data ?? []).find((x: Json) => x.id === email.current_version_id) ?? null;
-  return send(res, 200, { data: email, currentVersion: current, versions: versions.data ?? [], comments: comments.data ?? [], statusEvents: events.data ?? [], research: research.data ?? null, researchPoints: stableResearchPoints((research.data ?? {}) as Json), instructions: knowledge.data ?? [] });
+  // No synthesized snapshot yet (e.g. imported/sent history that never ran generation):
+  // surface whatever raw n8n research pipeline output already exists for this contact/company
+  // so the panel isn't empty even though nothing has been synthesized into a snapshot.
+  let rawN8nResearch: Json[] = [];
+  if (!research.data) {
+    const filters: string[] = [`contact_id.eq.${email.contact_id}`];
+    if (email.company_id) filters.push(`company_id.eq.${email.company_id}`);
+    const raw = await client.from(N8N_WORKFLOW_RESULTS_TABLE).select("id,workflow_name,result,created_at").or(filters.join(",")).order("created_at", { ascending: false }).limit(20);
+    rawN8nResearch = (raw.data ?? []) as Json[];
+  }
+  return send(res, 200, { data: email, currentVersion: current, versions: versions.data ?? [], comments: comments.data ?? [], statusEvents: events.data ?? [], research: research.data ?? null, researchPoints: stableResearchPoints((research.data ?? {}) as Json), rawN8nResearch, instructions: knowledge.data ?? [] });
 }
 
 export async function handleEmailStudioStatus(req: IncomingMessage, res: ServerResponse, id: string) {
