@@ -18,10 +18,11 @@ import {
   NSpin,
   NDrawer,
   NDrawerContent,
+  NTooltip,
   useMessage,
 } from "naive-ui";
-import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { UsersIcon, FileTextIcon, BuildingIcon, Pencil, Plus, Trash2 } from "lucide-vue-next";
+import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
+import { UsersIcon, FileTextIcon, BuildingIcon, Pencil, Plus, Trash2, RotateCcwIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
@@ -74,6 +75,47 @@ const PAGE_SIZES = [10, 25, 50, 100];
 const searchInput = ref("");
 const appliedSearch = ref("");
 const checkedKeys = ref<DataTableRowKey[]>([]);
+
+const COLUMN_STORAGE_KEY = "voitech/contacts/visible-columns";
+const DEFAULT_VISIBLE_COLUMN_KEYS = [
+  "avatar",
+  "name",
+  "position",
+  "company_id",
+  "company_name",
+  "email",
+  "personal_email",
+  "context",
+] as const;
+
+const visibleColumnKeys = ref<string[]>(loadVisibleColumnKeys());
+
+function loadVisibleColumnKeys(): string[] {
+  if (typeof localStorage === "undefined") return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  try {
+    const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
+      ? parsed
+      : [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  } catch {
+    return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  }
+}
+
+watch(visibleColumnKeys, (keys) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(keys));
+});
+
+function showAllColumns() {
+  visibleColumnKeys.value = columnOptions.value.map((option) => String(option.value));
+}
+
+function resetColumns() {
+  visibleColumnKeys.value = [...DEFAULT_VISIBLE_COLUMN_KEYS];
+}
+
 const roleFilter = ref("");
 const emailFilter = ref("");
 const listFilter = ref<string | null>(null);
@@ -372,8 +414,7 @@ const pagination = computed(() => ({
   onUpdatePageSize,
 }));
 
-const baseColumns = computed((): DataTableColumns<ContactRow> => [
-  { type: "selection" },
+const dataColumns = computed((): DataTableColumns<ContactRow> => [
   {
     key: "avatar",
     title: "",
@@ -489,20 +530,41 @@ const baseColumns = computed((): DataTableColumns<ContactRow> => [
       );
     },
   },
-  {
-    key: "actions",
-    title: "",
-    width: 90,
-    fixed: "right",
-    render: (row) => h(NSpace, { size: 2 }, () => [
-      h(NButton, { quaternary: true, size: "tiny", onClick: () => openContactEditor(row) }, () => h(Pencil, { size: 13 })),
-      h(NButton, { quaternary: true, size: "tiny", type: "error", onClick: () => { const id = contactRowId(row); if (id) void deleteContacts([id]); } }, () => h(Trash2, { size: 13 })),
-    ]),
-  },
 ]);
 
+const columnOptions = computed<SelectOption[]>(() =>
+  dataColumns.value
+    .filter((column) => "key" in column && column.key != null)
+    .map((column) => {
+      const col = column as { key: string; title?: unknown };
+      return {
+        label: typeof col.title === "string" && col.title ? col.title : (String(col.key) === "avatar" ? "Avatar" : String(col.key)),
+        value: String(col.key),
+      };
+    })
+);
+
+const visibleDataColumns = computed(() => {
+  const visibleKeys = new Set(visibleColumnKeys.value);
+  return dataColumns.value.filter((column) => "key" in column && visibleKeys.has(String(column.key)));
+});
+
+const actionColumn: DataTableColumns<ContactRow> = [{
+  key: "actions",
+  title: "",
+  width: 90,
+  fixed: "right",
+  render: (row) => h(NSpace, { size: 2 }, () => [
+    h(NButton, { quaternary: true, size: "tiny", onClick: () => openContactEditor(row) }, () => h(Pencil, { size: 13 })),
+    h(NButton, { quaternary: true, size: "tiny", type: "error", onClick: () => { const id = contactRowId(row); if (id) void deleteContacts([id]); } }, () => h(Trash2, { size: 13 })),
+  ]),
+}];
+
 const columns = computed((): DataTableColumns<ContactRow> =>
-  applyResizable(baseColumns.value, CONTACT_COLUMN_WIDTHS)
+  applyResizable(
+    [{ type: "selection" }, ...visibleDataColumns.value, ...actionColumn],
+    CONTACT_COLUMN_WIDTHS
+  )
 );
 
 const tableScrollX = computed(() =>
@@ -519,9 +581,29 @@ const tableScrollX = computed(() =>
           <span>Contacts</span>
           <span v-if="loading" style="opacity:0.6;font-size:0.82rem">Loading…</span>
         </div>
-        <NSpace>
+        <NSpace size="small" align="center" wrap>
           <NButton size="small" type="primary" @click="openContactEditor()"><template #icon><Plus :size="13" /></template>New</NButton>
           <NInput v-model:value="searchInput" placeholder="Search name or role…" clearable size="small" style="width: 220px" />
+          <NSelect
+            v-model:value="visibleColumnKeys"
+            :options="columnOptions"
+            multiple
+            filterable
+            clearable
+            max-tag-count="responsive"
+            placeholder="Columns"
+            size="small"
+            style="width: 220px"
+          />
+          <NTooltip>
+            <template #trigger>
+              <NButton size="small" quaternary circle @click="resetColumns">
+                <template #icon><RotateCcwIcon :size="14" /></template>
+              </NButton>
+            </template>
+            Reset columns
+          </NTooltip>
+          <NButton size="small" quaternary @click="showAllColumns">Show all</NButton>
         </NSpace>
       </div>
       <div class="filters">

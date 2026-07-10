@@ -43,6 +43,11 @@ test("buildFeasibleSystemPrompt: defaults to universal conversation logic rather
   const prompt = buildFeasibleSystemPrompt({ channel: "inmail", sender: FEASIBLE_SENDERS[2] });
   assert.match(prompt, /universal messaging agent, not a pitch generator/i);
   assert.match(prompt, /cold opener, warm follow up, reply, re engagement note/i);
+  assert.match(prompt, /LIVED PRACTITIONER LAYER/i);
+  assert.match(prompt, /seen pattern -> uncomfortable consequence -> Feasible mechanism -> small ask/i);
+  assert.match(prompt, /Do not start with Feasible, the product, or a recap of the recipient's portfolio/i);
+  assert.match(prompt, /too many tools, scanner noise, one-finding requests/i);
+  assert.match(prompt, /If the message reads like "we saw you sell X, we sell Y, want to talk", rewrite it/i);
   assert.match(prompt, /do not force an MSSP angle, product pitch, trial, revenue claim, or sales CTA/i);
   assert.match(prompt, /CEO needs the business reason for spending time/i);
   assert.match(prompt, /mention colleagues by name/i);

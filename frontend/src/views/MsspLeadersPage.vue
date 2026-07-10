@@ -4,8 +4,8 @@ import {
   NCard, NDataTable, NInput, NButton, NButtonGroup, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
   NDrawer, NDrawerContent, NTabs, NTabPane,
 } from "naive-ui";
-import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { UsersIcon, Building2Icon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon, MailIcon } from "lucide-vue-next";
+import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
+import { UsersIcon, Building2Icon, LinkedinIcon, MessageCircleIcon, IdCardIcon, TrashIcon, RefreshCwIcon, MailIcon, RotateCcwIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
 import { useProjectStore } from "../stores/project";
@@ -74,6 +74,56 @@ const lastOutboundDaysFilter = ref<number | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const view = ref<"contacts" | "companies">("contacts");
 const projectStore = useProjectStore();
+
+const CONTACTS_COLUMN_STORAGE_KEY = "voitech/mssp-leaders/visible-columns";
+const DEFAULT_VISIBLE_CONTACT_COLUMN_KEYS = [
+  "linkedin",
+  "name",
+  "position",
+  "company_name",
+  "location",
+  "company_hq",
+  "employee_count",
+  "company_type",
+  "connection_status",
+  "call_messenger_status",
+  "connection_accepted_at",
+  "automations",
+  "outgoing_count",
+  "last_outbound_at",
+  "reply_count",
+  "email_count",
+  "status",
+] as const;
+
+const visibleContactColumnKeys = ref<string[]>(loadVisibleContactColumnKeys());
+
+function loadVisibleContactColumnKeys(): string[] {
+  if (typeof localStorage === "undefined") return [...DEFAULT_VISIBLE_CONTACT_COLUMN_KEYS];
+  try {
+    const raw = localStorage.getItem(CONTACTS_COLUMN_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
+      ? parsed
+      : [...DEFAULT_VISIBLE_CONTACT_COLUMN_KEYS];
+  } catch {
+    return [...DEFAULT_VISIBLE_CONTACT_COLUMN_KEYS];
+  }
+}
+
+watch(visibleContactColumnKeys, (keys) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(CONTACTS_COLUMN_STORAGE_KEY, JSON.stringify(keys));
+});
+
+function showAllContactColumns() {
+  visibleContactColumnKeys.value = contactColumnOptions.value.map((option) => String(option.value));
+}
+
+function resetContactColumns() {
+  visibleContactColumnKeys.value = [...DEFAULT_VISIBLE_CONTACT_COLUMN_KEYS];
+}
+
 const isFeasibleProject = computed(() => isFeasibleProjectId(projectStore.selectedProjectId));
 const outreachOpen = ref(false);
 const outreachContact = ref<LeaderRecord | null>(null);
@@ -435,8 +485,7 @@ const companyColumns = computed<DataTableColumns<CompanyRow>>(() => [
   },
 ]);
 
-const columns = computed<DataTableColumns<LeaderRecord>>(() => [
-  { type: "selection", width: 36, fixed: "left" },
+const contactDataColumns = computed<DataTableColumns<LeaderRecord>>(() => [
   {
     title: "", key: "linkedin", width: 36,
     render: (row) =>
@@ -541,6 +590,32 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       }),
   },
 ]);
+
+const contactColumnOptions = computed<SelectOption[]>(() =>
+  contactDataColumns.value
+    .filter((column) => "key" in column && column.key != null)
+    .map((column) => {
+      const col = column as { key: string; title?: unknown };
+      return {
+        label: typeof col.title === "string" && col.title ? col.title : "LinkedIn",
+        value: String(col.key),
+      };
+    })
+);
+
+const visibleContactDataColumns = computed(() => {
+  const visibleKeys = new Set(visibleContactColumnKeys.value);
+  return contactDataColumns.value.filter((column) => "key" in column && visibleKeys.has(String(column.key)));
+});
+
+const columns = computed<DataTableColumns<LeaderRecord>>(() => [
+  { type: "selection", width: 36, fixed: "left" },
+  ...visibleContactDataColumns.value,
+]);
+
+const contactTableScrollX = computed(() =>
+  columns.value.reduce((total, column) => total + (Number((column as { width?: number }).width) || 160), 0)
+);
 </script>
 
 <template>
@@ -587,6 +662,28 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
           <NSelect v-if="view === 'contacts'" v-model:value="callMessengerFilter" :options="callMessengerOptions" placeholder="Call / Messenger" clearable size="small" style="width: 170px" />
           <NSelect v-if="view === 'contacts'" v-model:value="lastOutboundDaysFilter" :options="lastOutboundDaysOptions" placeholder="Last sent" clearable size="small" style="width: 132px" />
           <NSelect v-model:value="typeFilter" :options="typeOptions" placeholder="Company type" clearable size="small" style="width: 140px" />
+          <template v-if="view === 'contacts'">
+            <NSelect
+              v-model:value="visibleContactColumnKeys"
+              :options="contactColumnOptions"
+              multiple
+              filterable
+              clearable
+              max-tag-count="responsive"
+              placeholder="Columns"
+              size="small"
+              style="width: 220px"
+            />
+            <NTooltip>
+              <template #trigger>
+                <NButton size="small" quaternary circle @click="resetContactColumns">
+                  <template #icon><RotateCcwIcon :size="14" /></template>
+                </NButton>
+              </template>
+              Reset columns
+            </NTooltip>
+            <NButton size="small" quaternary @click="showAllContactColumns">Show all</NButton>
+          </template>
           <NTooltip v-if="view === 'contacts' && selectedUuids.length > 0">
             <template #trigger>
               <NPopconfirm @positive-click="removeFromList(selectedUuids)">
@@ -626,7 +723,7 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
       v-else-if="view === 'contacts'"
       :columns="columns"
       :data="filtered"
-      :scroll-x="2180"
+      :scroll-x="contactTableScrollX"
       :row-key="(r: LeaderRecord) => r.uuid"
       v-model:checked-row-keys="checkedKeys"
       :pagination="{ pageSize: 25, showSizePicker: true, pageSizes: [25, 50, 100] }"

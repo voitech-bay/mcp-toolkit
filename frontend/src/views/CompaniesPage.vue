@@ -20,10 +20,11 @@ import {
   NSpin,
   NDrawer,
   NDrawerContent,
+  NTooltip,
   useMessage,
 } from "naive-ui";
-import type { DataTableColumns, DataTableRowKey } from "naive-ui";
-import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon, Pencil, Plus, Trash2 } from "lucide-vue-next";
+import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
+import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon, Pencil, Plus, Trash2, RotateCcwIcon } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import { useResizableTableColumns, type ResizableColumn } from "../composables/useResizableTableColumns";
@@ -115,6 +116,47 @@ const searchInput = ref("");
 const appliedSearch = ref("");
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const showAll = ref(false);
+
+const COLUMN_STORAGE_KEY = "voitech/companies/visible-columns";
+const DEFAULT_VISIBLE_COLUMN_KEYS = [
+  "name",
+  "website",
+  "industry",
+  "status",
+  "linkedin",
+  "hypotheses",
+  "contacts",
+  "context",
+  "created_at",
+] as const;
+
+const visibleColumnKeys = ref<string[]>(loadVisibleColumnKeys());
+
+function loadVisibleColumnKeys(): string[] {
+  if (typeof localStorage === "undefined") return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  try {
+    const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
+      ? parsed
+      : [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  } catch {
+    return [...DEFAULT_VISIBLE_COLUMN_KEYS];
+  }
+}
+
+watch(visibleColumnKeys, (keys) => {
+  if (typeof localStorage === "undefined") return;
+  localStorage.setItem(COLUMN_STORAGE_KEY, JSON.stringify(keys));
+});
+
+function showAllColumns() {
+  visibleColumnKeys.value = columnOptions.value.map((option) => String(option.value));
+}
+
+function resetColumns() {
+  visibleColumnKeys.value = [...DEFAULT_VISIBLE_COLUMN_KEYS];
+}
 const statusFilter = ref<string | null>(null);
 const industryFilter = ref("");
 const employeesFilter = ref("");
@@ -392,8 +434,7 @@ watch(showAll, () => {
 });
 
 // --- Columns ---
-const baseColumns = computed((): DataTableColumns<CompanyRow> => [
-  { type: "selection", fixed: "left" },
+const dataColumns = computed((): DataTableColumns<CompanyRow> => [
   {
     key: "name",
     title: "Name",
@@ -562,20 +603,45 @@ const baseColumns = computed((): DataTableColumns<CompanyRow> => [
     width: COMPANY_COLUMN_WIDTHS.created_at,
     render: (row) => new Date(row.created_at).toLocaleDateString(),
   },
-  ...(!showAll.value ? [{
-    key: "actions",
-    title: "",
-    width: COMPANY_COLUMN_WIDTHS.actions,
-    fixed: "right" as const,
-    render: (row: CompanyRow) => h(NSpace, { size: 2 }, () => [
-      h(NButton, { quaternary: true, size: "tiny", onClick: () => openCompanyEditor(row) }, () => h(Pencil, { size: 13 })),
-      h(NButton, { quaternary: true, size: "tiny", type: "error", onClick: () => void deleteCompanies([row.company_id]) }, () => h(Trash2, { size: 13 })),
-    ]),
-  }] : []),
 ]);
 
+const columnOptions = computed<SelectOption[]>(() =>
+  dataColumns.value
+    .filter((column) => "key" in column && column.key != null)
+    .map((column) => {
+      const col = column as { key: string; title?: unknown };
+      return {
+        label: typeof col.title === "string" && col.title ? col.title : String(col.key),
+        value: String(col.key),
+      };
+    })
+);
+
+const visibleDataColumns = computed(() => {
+  const visibleKeys = new Set(visibleColumnKeys.value);
+  return dataColumns.value.filter((column) => "key" in column && visibleKeys.has(String(column.key)));
+});
+
+const actionColumn = computed((): DataTableColumns<CompanyRow> =>
+  !showAll.value
+    ? [{
+        key: "actions",
+        title: "",
+        width: COMPANY_COLUMN_WIDTHS.actions,
+        fixed: "right" as const,
+        render: (row: CompanyRow) => h(NSpace, { size: 2 }, () => [
+          h(NButton, { quaternary: true, size: "tiny", onClick: () => openCompanyEditor(row) }, () => h(Pencil, { size: 13 })),
+          h(NButton, { quaternary: true, size: "tiny", type: "error", onClick: () => void deleteCompanies([row.company_id]) }, () => h(Trash2, { size: 13 })),
+        ]),
+      }]
+    : []
+);
+
 const columns = computed((): DataTableColumns<CompanyRow> =>
-  applyResizable(baseColumns.value, COMPANY_COLUMN_WIDTHS)
+  applyResizable(
+    [{ type: "selection", fixed: "left" }, ...visibleDataColumns.value, ...actionColumn.value],
+    COMPANY_COLUMN_WIDTHS
+  )
 );
 
 const tableScrollX = computed(() =>
@@ -699,6 +765,26 @@ async function submitAddToHypothesis() {
             size="small"
             style="width: 220px"
           />
+          <NSelect
+            v-model:value="visibleColumnKeys"
+            :options="columnOptions"
+            multiple
+            filterable
+            clearable
+            max-tag-count="responsive"
+            placeholder="Columns"
+            size="small"
+            style="width: 220px"
+          />
+          <NTooltip>
+            <template #trigger>
+              <NButton size="small" quaternary circle @click="resetColumns">
+                <template #icon><RotateCcwIcon :size="14" /></template>
+              </NButton>
+            </template>
+            Reset columns
+          </NTooltip>
+          <NButton size="small" quaternary @click="showAllColumns">Show all</NButton>
         </div>
       </div>
       <div v-if="!showAll" class="company-filters">
