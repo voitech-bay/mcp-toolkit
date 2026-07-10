@@ -22,6 +22,9 @@ import {
 import type { DataTableColumns } from "naive-ui";
 import { h } from "vue";
 import { RouterLink } from "vue-router";
+import { useProjectStore } from "../stores/project";
+import { useWorkflowLaunch } from "../composables/useWorkflowLaunch";
+import { isFeasibleProjectId, isVelvetechProjectId } from "../project-ids";
 
 type Json = Record<string, unknown>;
 
@@ -92,6 +95,16 @@ interface ListRecord extends Json {
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
+const projectStore = useProjectStore();
+const { launching: launchingWorkflow, loadWorkflows, launchVelvetechResearch, isConfigured } = useWorkflowLaunch();
+
+const isVelvetechProject = computed(() => isVelvetechProjectId(projectStore.selectedProjectId));
+const isFeasibleProject = computed(() => isFeasibleProjectId(projectStore.selectedProjectId));
+const canLaunchResearch = computed(() => {
+  if (isVelvetechProject.value) return isConfigured("velvetech_research") && roster.value.length > 0;
+  return isFeasibleProject.value;
+});
+const researchTargetCount = computed(() => (filtersActive.value ? filteredRoster.value.length : roster.value.length));
 
 const REPLY_FILTER_OPTIONS = [
   { label: "All responses", value: "all" },
@@ -467,6 +480,16 @@ async function addNote() {
 }
 
 async function runN8nResearch() {
+  if (isVelvetechProject.value) {
+    const rows = filtersActive.value ? filteredRoster.value : roster.value;
+    const leadUuids = rows.map((r) => r.uuid).filter(Boolean);
+    if (leadUuids.length === 0) {
+      message.warning("No contacts at this account to launch");
+      return;
+    }
+    await launchVelvetechResearch(leadUuids);
+    return;
+  }
   runningResearch.value = true;
   try {
     const r = await fetch("/api/feasible/run-phase-b-company", {
@@ -484,7 +507,11 @@ async function runN8nResearch() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  void loadWorkflows();
+  load();
+});
+watch(() => projectStore.selectedProjectId, () => void loadWorkflows());
 watch(companyId, load);
 watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
 </script>
@@ -646,9 +673,25 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
       <!-- Company research -->
       <NCard title="Company research (n8n)" size="small">
         <template #header-extra>
-          <NButton size="small" type="primary" :loading="runningResearch" @click="runN8nResearch">
-            Run n8n research
-          </NButton>
+          <NSpace align="center" size="small">
+            <NButton
+              v-if="companyId"
+              size="tiny"
+              quaternary
+              @click="router.push({ path: '/n8n/workflow-results', query: { companyId } })"
+            >
+              All n8n results
+            </NButton>
+            <NButton
+              size="small"
+              type="primary"
+              :loading="isVelvetechProject ? launchingWorkflow : runningResearch"
+              :disabled="!canLaunchResearch"
+              @click="runN8nResearch"
+            >
+              {{ isVelvetechProject ? `Run research (${researchTargetCount})` : "Run n8n research" }}
+            </NButton>
+          </NSpace>
         </template>
         <NText v-if="!latestResults.length" depth="3">no company research yet — use Run n8n research above</NText>
         <NCollapse v-else>

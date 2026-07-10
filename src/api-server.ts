@@ -108,6 +108,7 @@ import {
   handleGetN8nWorkflowResults,
   handlePostN8nWorkflowResultsQuery,
   handlePostN8nWorkflowResults,
+  handlePostN8nWorkflowResultsBackfillVelvetech,
   handleFirefliesWebhook,
   handleGetDifyWorkflows,
   handleGetDifyWorkflowRuns,
@@ -768,6 +769,14 @@ const server = createServer(async (req, res) => {
       case "/api/contacts/find-by-uuid":
         if (req.method === "POST") {
           await handlePostFindContactByUuid(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/n8n/workflow-results/backfill-velvetech-links":
+        if (req.method === "POST") {
+          await handlePostN8nWorkflowResultsBackfillVelvetech(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

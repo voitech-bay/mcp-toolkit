@@ -22,6 +22,9 @@ import {
 } from "naive-ui";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
 import OutreachAgentDrawer from "../components/OutreachAgentDrawer.vue";
+import { useProjectStore } from "../stores/project";
+import { useWorkflowLaunch } from "../composables/useWorkflowLaunch";
+import { isVelvetechProjectId } from "../project-ids";
 
 type Json = Record<string, unknown>;
 
@@ -71,6 +74,12 @@ const PRIORITY_OPTIONS = [
 const route = useRoute();
 const router = useRouter();
 const message = useMessage();
+const projectStore = useProjectStore();
+const { launching: launchingWorkflow, loadWorkflows, launchVelvetechResearch, launchVelvetechReply, isConfigured, velvetechReplyKey } = useWorkflowLaunch();
+
+const isVelvetechProject = computed(() => isVelvetechProjectId(projectStore.selectedProjectId));
+const canLaunchResearch = computed(() => !isVelvetechProject.value || isConfigured("velvetech_research"));
+const canLaunchReply = computed(() => isVelvetechProject.value && isConfigured(velvetechReplyKey) && threads.value.length > 0);
 
 const loading = ref(false);
 const loadError = ref("");
@@ -275,6 +284,10 @@ async function addNote() {
 }
 
 async function runResearch() {
+  if (isVelvetechProject.value) {
+    await launchVelvetechResearch([contactUuid.value]);
+    return;
+  }
   runningResearch.value = true;
   try {
     const r = await fetch("/api/inmail-review/run-new", {
@@ -292,7 +305,15 @@ async function runResearch() {
   }
 }
 
-onMounted(load);
+async function runDraftReply() {
+  await launchVelvetechReply([contactUuid.value]);
+}
+
+onMounted(() => {
+  void loadWorkflows();
+  void load();
+});
+watch(() => projectStore.selectedProjectId, () => void loadWorkflows());
 watch(contactUuid, load);
 </script>
 
@@ -336,8 +357,23 @@ watch(contactUuid, load);
           </NSpace>
           <NSpace>
             <NButton size="small" type="primary" @click="outreachOpen = true">Create outreach</NButton>
-            <NButton size="small" :loading="runningResearch" @click="runResearch">Run research</NButton>
-            <NButton size="small" @click="router.push('/inmail-review')">InMail review</NButton>
+            <NButton
+              size="small"
+              :loading="isVelvetechProject ? launchingWorkflow : runningResearch"
+              :disabled="!canLaunchResearch"
+              @click="runResearch"
+            >
+              Run research
+            </NButton>
+            <NButton
+              v-if="canLaunchReply"
+              size="small"
+              :loading="launchingWorkflow"
+              @click="runDraftReply"
+            >
+              Draft reply
+            </NButton>
+            <NButton v-if="!isVelvetechProject" size="small" @click="router.push('/inmail-review')">InMail review</NButton>
           </NSpace>
         </NSpace>
         <NDivider style="margin: 12px 0" />
@@ -423,7 +459,17 @@ watch(contactUuid, load);
       <!-- Research -->
       <NCard title="Research (n8n)" size="small">
         <template #header-extra>
-          <NText depth="3" style="font-size: 0.8rem">{{ executions.length }} executions total</NText>
+          <NSpace align="center" size="small">
+            <NButton
+              v-if="contactUuid"
+              size="tiny"
+              quaternary
+              @click="router.push({ path: '/n8n/workflow-results', query: { contactId: contactUuid } })"
+            >
+              All n8n results
+            </NButton>
+            <NText depth="3" style="font-size: 0.8rem">{{ executions.length }} executions total</NText>
+          </NSpace>
         </template>
         <NText v-if="!latestResults.length" depth="3">no research yet — use Run research above</NText>
         <NCollapse v-else>

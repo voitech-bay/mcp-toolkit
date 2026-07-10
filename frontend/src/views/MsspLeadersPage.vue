@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, h, onMounted } from "vue";
+import { ref, computed, h, onMounted, watch } from "vue";
 import {
   NCard, NDataTable, NInput, NButton, NButtonGroup, NTag, NAlert, NEmpty, NSpace, NSelect, NTooltip, NPopconfirm,
   NDrawer, NDrawerContent, NTabs, NTabPane,
@@ -9,6 +9,7 @@ import { UsersIcon, Building2Icon, LinkedinIcon, MessageCircleIcon, IdCardIcon, 
 import { RouterLink } from "vue-router";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
 import { useProjectStore } from "../stores/project";
+import { isFeasibleProjectId } from "../project-ids";
 import OutreachAgentDrawer from "../components/OutreachAgentDrawer.vue";
 
 const composerLead = ref<{ uuid: string; name: string; connected: boolean; email?: string } | null>(null);
@@ -70,11 +71,17 @@ const lastOutboundDaysFilter = ref<number | null>(null);
 const checkedKeys = ref<DataTableRowKey[]>([]);
 const view = ref<"contacts" | "companies">("contacts");
 const projectStore = useProjectStore();
+const isFeasibleProject = computed(() => isFeasibleProjectId(projectStore.selectedProjectId));
 const outreachOpen = ref(false);
 const outreachContact = ref<LeaderRecord | null>(null);
 function createOutreach(row: LeaderRecord) { outreachContact.value = row; outreachOpen.value = true; }
 
 async function fetchList() {
+  if (!isFeasibleProject.value) {
+    data.value = [];
+    error.value = "";
+    return;
+  }
   loading.value = true;
   error.value = "";
   try {
@@ -92,6 +99,10 @@ async function fetchList() {
 }
 
 async function syncEmails() {
+  if (!isFeasibleProject.value) {
+    error.value = "MSSP Leaders in MENA is available only for the Feasible project.";
+    return;
+  }
   if (!projectStore.selectedProjectId) {
     error.value = "Select the Feasible project before syncing GetSales markers.";
     return;
@@ -153,6 +164,19 @@ function selectRegion(r: Region) {
 }
 
 onMounted(fetchList);
+
+watch(
+  () => projectStore.selectedProjectId,
+  (projectId) => {
+    if (!isFeasibleProjectId(projectId)) {
+      data.value = [];
+      checkedKeys.value = [];
+      error.value = "";
+      return;
+    }
+    void fetchList();
+  }
+);
 
 const STATUS_FILTER_ORDER = [
   "Not Contacted",
@@ -469,7 +493,12 @@ const columns = computed<DataTableColumns<LeaderRecord>>(() => [
 </script>
 
 <template>
-  <NCard>
+  <NCard v-if="!isFeasibleProject">
+    <NAlert type="info" title="Feasible project only">
+      MSSP Leaders in MENA is part of the Feasible project. Select Feasible in the project picker to use this view.
+    </NAlert>
+  </NCard>
+  <NCard v-else>
     <template #header>
       <div style="display:flex;justify-content:center;margin-bottom:14px">
         <NButtonGroup>

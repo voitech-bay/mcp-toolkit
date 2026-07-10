@@ -296,7 +296,9 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
   }
   const projectId = wf.project;
   const sourceListUuid = str(body, "sourceListUuid") || null;
-  if (wf.adapter !== "velvetech_reply" && !sourceListUuid) return sendJson(res, 400, { error: "sourceListUuid is required" });
+  if (wf.adapter === "feasible_list" && !sourceListUuid) {
+    return sendJson(res, 400, { error: "sourceListUuid is required" });
+  }
   const leadUuids = Array.isArray(body.leadUuids)
     ? [...new Set(body.leadUuids.map((u) => String(u).trim()).filter(Boolean))]
     : [];

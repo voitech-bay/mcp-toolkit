@@ -44,6 +44,7 @@ import {
   LayersIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
+import { isFeasibleProjectId } from "./project-ids";
 
 const isDark = useDark();
 isDark.value = true;
@@ -116,6 +117,11 @@ const dataMenuOptions: DropdownOption[] = [
     icon: () => h(MessageCircleIcon, { size: 14 }),
   },
 ];
+
+const visibleDataMenuOptions = computed<DropdownOption[]>(() => {
+  if (isFeasibleProjectId(projectStore.selectedProjectId)) return dataMenuOptions;
+  return dataMenuOptions.filter((option) => option.key !== "/mssp-leaders");
+});
 
 const backlogMenuOptions: DropdownOption[] = [
   {
@@ -365,6 +371,15 @@ async function loadHeaderDashboard() {
 
 watch(
   () => projectStore.selectedProjectId,
+  (projectId) => {
+    if (route.path === "/mssp-leaders" && !isFeasibleProjectId(projectId)) {
+      router.push("/companies");
+    }
+  }
+);
+
+watch(
+  () => projectStore.selectedProjectId,
   () => {
     void loadHeaderDashboard();
   },
@@ -591,7 +606,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   </NButton>
                 </NDropdown>
 
-                <NDropdown trigger="hover" placement="bottom-start" :options="dataMenuOptions" :show-arrow="true"
+                <NDropdown trigger="hover" placement="bottom-start" :options="visibleDataMenuOptions" :show-arrow="true"
                   @select="onNavSelect">
                   <NButton quaternary size="small" :type="isDataGroupActive ? 'primary' : undefined"
                     class="nav-dropdown-trigger">

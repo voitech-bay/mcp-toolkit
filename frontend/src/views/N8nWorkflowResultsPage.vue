@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, h } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRoute, useRouter, RouterLink } from "vue-router";
 import {
   NCard,
   NDataTable,
@@ -287,27 +287,33 @@ function openRowDetail(row: N8nWorkflowResultRow) {
 
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / PAGE_SIZE)));
 
-function filterByContact(id: string | null) {
-  if (!id) {
-    clearFilters();
-    return;
-  }
-  filterRows.value = [{ field: "contact_id", op: "eq", value: id }];
-  applyFiltersToRoute();
-}
-
-function filterByCompany(id: string | null) {
-  if (!id) {
-    clearFilters();
-    return;
-  }
-  filterRows.value = [{ field: "company_id", op: "eq", value: id }];
-  applyFiltersToRoute();
-}
-
 function avatarFallback(label: string | null): string {
   const s = label?.trim() || "?";
   return s.charAt(0).toUpperCase();
+}
+
+function velvetechContactLabel(row: N8nWorkflowResultRow): string | null {
+  const r = row.result ?? {};
+  const contact = r.contact;
+  if (contact && typeof contact === "object" && !Array.isArray(contact)) {
+    const full = (contact as Record<string, unknown>).full_name;
+    if (typeof full === "string" && full.trim()) return full.trim();
+  }
+  const key = r.contact_key ?? r.entity_key;
+  return typeof key === "string" && key.trim() ? key.trim() : null;
+}
+
+function velvetechCompanyLabel(row: N8nWorkflowResultRow): string | null {
+  const r = row.result ?? {};
+  const name = r.company_name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  const key = r.company_key ?? r.entity_key;
+  return typeof key === "string" && key.trim() ? key.trim() : null;
+}
+
+function filterByResultText(value: string) {
+  filterRows.value = [{ field: "result_text", op: "like", value }];
+  applyFiltersToRoute();
 }
 
 const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
@@ -368,37 +374,41 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
       fixed: "left",
       minWidth: 200,
       render(row) {
-        if (!row.contact_id) return "—";
+        const contactId = row.contact_id;
+        if (contactId) {
+          return h(
+            NSpace,
+            { align: "center", size: 8, wrap: false },
+            {
+              default: () => [
+                h(
+                  NAvatar,
+                  {
+                    round: true,
+                    size: 28,
+                    src: row.contact_avatar_url || undefined,
+                    style: { flexShrink: "0" },
+                  },
+                  { default: () => avatarFallback(row.contact_label) }
+                ),
+                h(
+                  RouterLink,
+                  {
+                    to: `/contact/${contactId}`,
+                    style: "color:#2080f0;text-decoration:none;font-size:0.85rem",
+                  },
+                  { default: () => row.contact_label ?? `${contactId.slice(0, 8)}…` }
+                ),
+              ],
+            }
+          );
+        }
+        const fallback = velvetechContactLabel(row);
+        if (!fallback) return "—";
         return h(
-          NSpace,
-          { align: "center", size: 8, wrap: false },
-          {
-            default: () => [
-              h(
-                NAvatar,
-                {
-                  round: true,
-                  size: 28,
-                  src: row.contact_avatar_url || undefined,
-                  style: { flexShrink: "0" },
-                },
-                { default: () => avatarFallback(row.contact_label) }
-              ),
-              h(
-                NButton,
-                {
-                  text: true,
-                  type: "primary",
-                  size: "small",
-                  onClick: () => filterByContact(row.contact_id),
-                },
-                {
-                  default: () =>
-                    row.contact_label ?? `${row.contact_id!.slice(0, 8)}…`,
-                }
-              ),
-            ],
-          }
+          NButton,
+          { text: true, type: "primary", size: "small", onClick: () => filterByResultText(fallback) },
+          { default: () => fallback }
         );
       },
     },
@@ -407,37 +417,41 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
       key: "company",
       minWidth: 200,
       render(row) {
-        if (!row.company_id) return "—";
+        const companyId = row.company_id;
+        if (companyId) {
+          return h(
+            NSpace,
+            { align: "center", size: 8, wrap: false },
+            {
+              default: () => [
+                h(
+                  NAvatar,
+                  {
+                    round: false,
+                    size: 28,
+                    src: row.company_logo_url || undefined,
+                    style: { flexShrink: "0" },
+                  },
+                  { default: () => avatarFallback(row.company_label) }
+                ),
+                h(
+                  RouterLink,
+                  {
+                    to: `/company/${companyId}`,
+                    style: "color:#2080f0;text-decoration:none;font-size:0.85rem",
+                  },
+                  { default: () => row.company_label ?? `${companyId.slice(0, 8)}…` }
+                ),
+              ],
+            }
+          );
+        }
+        const fallback = velvetechCompanyLabel(row);
+        if (!fallback) return "—";
         return h(
-          NSpace,
-          { align: "center", size: 8, wrap: false },
-          {
-            default: () => [
-              h(
-                NAvatar,
-                {
-                  round: false,
-                  size: 28,
-                  src: row.company_logo_url || undefined,
-                  style: { flexShrink: "0" },
-                },
-                { default: () => avatarFallback(row.company_label) }
-              ),
-              h(
-                NButton,
-                {
-                  text: true,
-                  type: "primary",
-                  size: "small",
-                  onClick: () => filterByCompany(row.company_id),
-                },
-                {
-                  default: () =>
-                    row.company_label ?? `${row.company_id!.slice(0, 8)}…`,
-                }
-              ),
-            ],
-          }
+          NButton,
+          { text: true, type: "primary", size: "small", onClick: () => filterByResultText(fallback) },
+          { default: () => fallback }
         );
       },
     },

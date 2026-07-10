@@ -52,7 +52,11 @@ interface CompanyRow {
   company_id: string;
   name: string | null;
   domain: string | null;
+  website: string | null;
   linkedin: string | null;
+  industry: string | null;
+  employees_range: string | null;
+  status: string | null;
   created_at: string;
   /** Tag values from companies.tags (jsonb). */
   tags: string[];
@@ -61,6 +65,16 @@ interface CompanyRow {
   hypotheses: Array<{ id: string; name: string }>;
   contact_count: number;
   contacts_preview: CompanyContact[];
+}
+
+function companyDisplayName(row: Pick<CompanyRow, "name" | "domain">): string {
+  return row.name?.trim() || row.domain?.trim() || "—";
+}
+
+function companyWebsiteHref(row: Pick<CompanyRow, "website" | "domain">): string | null {
+  const raw = row.website?.trim() || row.domain?.trim();
+  if (!raw) return null;
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
 }
 
 type ContextRow = { id: string; created_at: string; rootContext: string | null; company_id: string | null };
@@ -98,8 +112,13 @@ const companyForm = ref({ name: "", domain: "", website: "", linkedin: "", indus
 function openCompanyEditor(row?: CompanyRow) {
   editingCompanyId.value = row?.company_id ?? null;
   companyForm.value = {
-    name: row?.name ?? "", domain: row?.domain ?? "", website: "", linkedin: row?.linkedin ?? "",
-    industry: (row as any)?.industry ?? "", employees_range: (row as any)?.employees_range ?? "", status: (row as any)?.status ?? "",
+    name: row?.name ?? "",
+    domain: row?.domain ?? "",
+    website: row?.website ?? "",
+    linkedin: row?.linkedin ?? "",
+    industry: row?.industry ?? "",
+    employees_range: row?.employees_range ?? "",
+    status: row?.status ?? "",
   };
   editorOpen.value = true;
 }
@@ -296,8 +315,12 @@ async function fetchCompanies() {
         id: row.project_company_id as string,
         company_id: (row.company_id as string) ?? (row.project_company_id as string),
         name: row.name as string | null,
-        domain: row.domain as string,
+        domain: (row.domain as string | null) ?? null,
+        website: (row.website as string | null) ?? null,
         linkedin: row.linkedin as string | null,
+        industry: (row.industry as string | null) ?? null,
+        employees_range: (row.employees_range as string | null) ?? null,
+        status: (row.status as string | null) ?? null,
         created_at: row.created_at as string,
         tags: normalizeCompanyTags(row.tags),
         in_project: true,
@@ -358,10 +381,11 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     sorter: true,
     ellipsis: { tooltip: true },
     render: (row) => {
+      const cardId = row.company_id || row.id;
       const label = h(
         RouterLink,
-        { to: `/company/${row.id}`, style: "color: #2080f0; text-decoration: none" },
-        { default: () => row.name ?? row.domain }
+        { to: `/company/${cardId}`, style: "color: #2080f0; text-decoration: none" },
+        { default: () => companyDisplayName(row) }
       );
       if (!row.in_project) return label;
       return h(NSpace, { align: "center", size: 6, wrap: false }, [
@@ -378,33 +402,47 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     render: (row) => row.domain ?? "—",
   },
   {
-    key: "tags",
-    title: "Tags",
-    width: 120,
-    render: (row: CompanyRow) => {
-      const ids = row.tags ?? [];
-      if (ids.length === 0) return h("span", { style: "opacity:.4" }, "—");
+    key: "website",
+    title: "Website",
+    sorter: true,
+    ellipsis: { tooltip: true },
+    render: (row) => {
+      const href = companyWebsiteHref(row);
+      if (!href) return "—";
+      const label = row.website?.trim() || row.domain?.trim() || href;
       return h(
-        NSpace,
-        { size: 4, wrap: true },
-        {
-          default: () =>
-            ids.map((id) =>
-              h(NTag, { size: "tiny", bordered: false, key: String(id) }, { default: () => String(id) })
-            ),
-        }
+        "a",
+        { href, target: "_blank", rel: "noopener", style: "color: #2080f0" },
+        label.replace(/^https?:\/\//i, "").replace(/\/$/, "")
       );
     },
   },
+  ...(!showAll.value ? [
+    {
+      key: "industry",
+      title: "Industry",
+      sorter: true,
+      ellipsis: { tooltip: true },
+      render: (row: CompanyRow) => row.industry ?? "—",
+    },
+    {
+      key: "status",
+      title: "Status",
+      width: 110,
+      sorter: true,
+      render: (row: CompanyRow) => (row.status ? h(NTag, { size: "small", bordered: false }, { default: () => row.status! }) : "—"),
+    },
+  ] : []),
   {
     key: "linkedin",
     title: "LinkedIn",
     width: 100,
     render: (row) => {
       if (!row.linkedin) return "—";
+      const href = /^https?:\/\//i.test(row.linkedin) ? row.linkedin : `https://www.linkedin.com/company/${row.linkedin}`;
       return h(
         "a",
-        { href: row.linkedin, target: "_blank", rel: "noopener", style: "color: inherit" },
+        { href, target: "_blank", rel: "noopener", style: "color: inherit" },
         [h(LinkIcon, { size: 13 })]
       );
     },
@@ -683,7 +721,7 @@ async function submitAddToHypothesis() {
         :bordered="false"
         size="small"
         :max-height="600"
-        :scroll-x="760"
+        :scroll-x="980"
         remote
         :row-key="(row: CompanyRow) => row.id"
         :pagination="{

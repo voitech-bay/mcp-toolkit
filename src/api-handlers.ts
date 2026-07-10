@@ -113,6 +113,15 @@ import {
 } from "./services/supabase.js";
 import { parseN8nWorkflowResultsQueryBody } from "./services/n8n-workflow-result-filters.js";
 import {
+  backfillVelvetechN8nResultLinks,
+  extractCompanyDomainFromItem,
+  extractLinkedinSlugFromItem,
+  isVelvetechCompanyGrainItem,
+  loadCompanyIdsByDomains,
+  loadContactUuidsByLinkedinSlugs,
+  resolveVelvetechLinksFromItem,
+} from "./services/n8n-entity-link.js";
+import {
   getProjectAnalyticsDashboard,
   getProjectAnalyticsDailySeries,
   type ProjectAnalyticsDashboardTotals,
@@ -3934,12 +3943,17 @@ function deriveWorkflowNameFromResult(item: Record<string, unknown>): string {
   return "other";
 }
 
-/** Phase B company rows carry nested bundle lead_uuids — must not set contact_id on those rows. */
+/** Phase B / Velvetech company rows — must not set contact_id on those rows. */
 function isCompanyGrainN8nResult(item: Record<string, unknown>): boolean {
+  if (isVelvetechCompanyGrainItem(item)) return true;
   const topLead = item.lead_uuid;
   if (typeof topLead === "string" && topLead.trim()) return false;
   const rd = item.row_data;
   if (isPlainObject(rd) && typeof rd.uuid === "string" && rd.uuid.trim()) return false;
+  const contactLead = isPlainObject(item.contact) ? item.contact.lead_uuid : null;
+  if (typeof contactLead === "string" && contactLead.trim()) return false;
+  const leadObj = isPlainObject(item.lead) ? item.lead : null;
+  if (leadObj && typeof leadObj.lead_uuid === "string" && leadObj.lead_uuid.trim()) return false;
   const companyUuid =
     typeof item.company_uuid === "string" && item.company_uuid.trim()
       ? item.company_uuid.trim()
@@ -4421,6 +4435,43 @@ export async function handlePostN8nWorkflowResults(
     errors.push({ index: 0, message: `Company batch lookup failed: ${companyLoadErr}` });
   }
 
+  const domainCandidates = [
+    ...new Set(
+      parsed
+        .map((p) => (p.item ? extractCompanyDomainFromItem(p.item) : null))
+        .filter((d): d is string => typeof d === "string" && d.length > 0)
+    ),
+  ];
+  const linkedinCandidates = [
+    ...new Set(
+      parsed
+        .map((p) => (p.item ? extractLinkedinSlugFromItem(p.item) : null))
+        .filter((s): s is string => typeof s === "string" && s.length > 0)
+    ),
+  ];
+  const [companyByDomain, contactByLinkedin] = await Promise.all([
+    loadCompanyIdsByDomains(client, domainCandidates),
+    loadContactUuidsByLinkedinSlugs(client, linkedinCandidates, projectId || null),
+  ]);
+  const linkedContactUuids = [...new Set(contactByLinkedin.values())].filter(
+    (uuid) => !contactProjByUuid.has(uuid)
+  );
+  if (linkedContactUuids.length > 0) {
+    const { map: linkedProj, error: linkedProjErr } = await n8nLoadContactProjectByUuid(
+      client,
+      linkedContactUuids
+    );
+    if (linkedProjErr) {
+      errors.push({ index: 0, message: `LinkedIn contact lookup failed: ${linkedProjErr}` });
+    }
+    for (const [uuid, proj] of linkedProj) contactProjByUuid.set(uuid, proj);
+    if (projectId) {
+      for (const uuid of linkedContactUuids) {
+        if (!contactProjByUuid.has(uuid)) contactProjByUuid.set(uuid, projectId);
+      }
+    }
+  }
+
   let contactsUpserted = 0;
   let contactsSkipped = 0;
   for (const p of parsed) {
@@ -4467,11 +4518,24 @@ export async function handlePostN8nWorkflowResults(
     const item = p.item;
     const lead = p.leadUuid;
     const workflowName = deriveWorkflowNameFromResult(item);
-    const companyGrain = isCompanyGrainN8nResult(item);
-    const contactIdForRow =
-      companyGrain ? null : lead && contactProjByUuid.has(lead) ? lead : null;
+    const wfItem = { ...item, workflow_name: workflowName };
+    const velvetechLinks = resolveVelvetechLinksFromItem(
+      wfItem,
+      companyByDomain,
+      contactByLinkedin,
+      contactProjByUuid,
+      companyExists,
+      lead,
+      p.companyUuidRaw
+    );
+    const companyGrain = velvetechLinks.companyGrain || isCompanyGrainN8nResult(item);
+    const contactIdForRow = companyGrain
+      ? null
+      : velvetechLinks.contactId ??
+        (lead && contactProjByUuid.has(lead) ? lead : null);
     const companyIdForRow =
-      p.companyUuidRaw && companyExists.has(p.companyUuidRaw) ? p.companyUuidRaw : null;
+      velvetechLinks.companyId ??
+      (p.companyUuidRaw && companyExists.has(p.companyUuidRaw) ? p.companyUuidRaw : null);
     insertRows.push({
       _n8n_index: p.index,
       contact_id: contactIdForRow,
@@ -4497,6 +4561,34 @@ export async function handlePostN8nWorkflowResults(
       errors,
     })
   );
+}
+
+/**
+ * POST /api/n8n/workflow-results/backfill-velvetech-links
+ * Body: { projectId?, limit? } — resolve company_id / contact_id on existing Velvetech rows.
+ */
+export async function handlePostN8nWorkflowResultsBackfillVelvetech(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  res.setHeader("Content-Type", "application/json");
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as { projectId?: string; limit?: number } | null;
+  const projectId = typeof body?.projectId === "string" ? body.projectId.trim() : null;
+  const limit = typeof body?.limit === "number" ? body.limit : undefined;
+  const result = await backfillVelvetechN8nResultLinks(client, { projectId, limit });
+  res.writeHead(result.error ? 500 : 200);
+  res.end(JSON.stringify(result));
 }
 
 /**

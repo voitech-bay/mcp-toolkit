@@ -23,6 +23,10 @@ import {
   listCompanyContextsByCompanyId,
   type CompanyContextRow,
 } from "./supabase.js";
+import {
+  fetchVelvetechResultsForCompanyDomain,
+  fetchVelvetechResultsForContactLinkedin,
+} from "./n8n-entity-link.js";
 
 const CONTACT_WORKFLOW_LATEST_VIEW = "contact_workflow_latest";
 const COMPANY_WORKFLOW_LATEST_VIEW = "company_workflow_latest";
@@ -337,6 +341,44 @@ function companyOneLinerFromLatestResults(rows: Json[]): string | null {
   return null;
 }
 
+function mergeLatestWorkflowResults(
+  primary: Json[],
+  supplemental: Array<Record<string, unknown>>
+): Json[] {
+  const seen = new Set(primary.map((row) => String(row.workflow_name ?? "")));
+  const merged = [...primary];
+  for (const row of supplemental) {
+    const wf = String(row.workflow_name ?? "");
+    if (!wf || seen.has(wf)) continue;
+    seen.add(wf);
+    merged.push(row as Json);
+  }
+  merged.sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+  return merged;
+}
+
+async function supplementVelvetechContactResults(
+  client: SupabaseClient,
+  contact: Json,
+  primary: Json[]
+): Promise<Json[]> {
+  const linkedin = stringField(contact.linkedin) ?? stringField(contact.linkedin_url);
+  if (!linkedin) return primary;
+  const supplemental = await fetchVelvetechResultsForContactLinkedin(client, linkedin);
+  return supplemental.length ? mergeLatestWorkflowResults(primary, supplemental) : primary;
+}
+
+async function supplementVelvetechCompanyResults(
+  client: SupabaseClient,
+  company: Json,
+  primary: Json[]
+): Promise<Json[]> {
+  const domain = stringField(company.domain);
+  if (!domain) return primary;
+  const supplemental = await fetchVelvetechResultsForCompanyDomain(client, domain);
+  return supplemental.length ? mergeLatestWorkflowResults(primary, supplemental) : primary;
+}
+
 export async function buildContactCard(
   client: SupabaseClient,
   contactUuid: string,
@@ -410,12 +452,14 @@ export async function buildContactCard(
     }
   }
 
+  const latestResults = await supplementVelvetechContactResults(client, c, latestRes.data);
+
   return {
     data: {
       contact: c,
       company: (companyRes as { data: Json | null }).data ?? null,
       company_linked: Boolean((companyRes as { data: Json | null }).data),
-      latest_results: latestRes.data,
+      latest_results: latestResults,
       executions: (execsRes.data ?? []) as Json[],
       conversations: threads,
       context_entries: contextRes.data,
@@ -485,15 +529,20 @@ export async function buildCompanyCard(
     else if (!parsed) plainContextEntries.push(row);
   }
   const totalMessages = ((msgsRes.data ?? []) as MessageRow[]).length;
+  const latestResults = await supplementVelvetechCompanyResults(
+    client,
+    company as Json,
+    latestRes.data
+  );
   const companyWithResearch = {
     ...(company as Json),
-    research_company_one_liner: companyOneLinerFromLatestResults(latestRes.data),
+    research_company_one_liner: companyOneLinerFromLatestResults(latestResults),
   };
 
   return {
     data: {
       company: companyWithResearch,
-      latest_results: latestRes.data,
+      latest_results: latestResults,
       contacts: rosterWithActivity,
       conversations: threads,
       context_entries: plainContextEntries,

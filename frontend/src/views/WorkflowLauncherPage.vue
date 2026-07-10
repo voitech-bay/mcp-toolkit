@@ -359,11 +359,15 @@ async function approveEditedDraft(): Promise<void> {
   await approveDraft(row, sends);
 }
 
-function viewResults(launchId: string): void {
+function viewLaunchResults(launchId: string): void {
   const filters = encodeURIComponent(
     JSON.stringify([{ field: "result_text", op: "like", value: launchId }])
   );
   router.push({ path: "/n8n/workflow-results", query: { filters } });
+}
+
+function viewExecutionResults(executionId: string): void {
+  router.push({ path: "/n8n/workflow-results", query: { executionId } });
 }
 
 const contactColumns = computed<DataTableColumns<ContactRow>>(() => [
@@ -420,7 +424,7 @@ const draftColumns = computed<DataTableColumns<DraftRow>>(() => [
     fixed: "right",
     render: (r) => h(NSpace, { size: 4 }, {
       default: () => [
-        h(NButton, { size: "tiny", quaternary: true, onClick: () => viewResults(r.execution_id) }, { default: () => "View" }),
+        h(NButton, { size: "tiny", quaternary: true, onClick: () => viewExecutionResults(r.execution_id) }, { default: () => "View" }),
         h(NButton, {
           size: "tiny",
           disabled: (r.status !== "pending_approval" && r.status !== "needs_human") || !r.sender_profile_uuid,
@@ -477,7 +481,7 @@ const historyColumns = computed<DataTableColumns<LaunchRun>>(() => [
     render: (r) =>
       h(
         NButton,
-        { size: "tiny", quaternary: true, onClick: () => viewResults(r.id) },
+        { size: "tiny", quaternary: true, onClick: () => viewLaunchResults(r.id) },
         { default: () => "View" }
       ),
   },
@@ -617,7 +621,7 @@ watch(projectId, async () => {
           {{ currentRun.companies_count }} companies •
           {{ currentRun.succeeded_count }} ok • {{ currentRun.failed_count }} failed
         </NText>
-        <NButton size="small" @click="viewResults(currentRun.id)">View results</NButton>
+        <NButton size="small" @click="viewLaunchResults(currentRun.id)">View results</NButton>
       </NSpace>
       <NAlert v-if="currentRun.error_message" type="error" style="margin-top: 8px">
         {{ currentRun.error_message }}
