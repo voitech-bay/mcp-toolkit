@@ -6,6 +6,15 @@ import {
   NInput,
 } from "naive-ui";
 import type { DataTableColumns, DataTableFilterState } from "naive-ui";
+import { useResizableTableColumns } from "./useResizableTableColumns";
+
+type ResizableColumn = {
+  key?: string | number;
+  width?: number;
+  minWidth?: number;
+  type?: string;
+  resizable?: boolean;
+};
 
 /** Escape special regex chars so the term can be used in new RegExp(escaped, 'gi'). */
 function escapeRegex(s: string): string {
@@ -44,8 +53,15 @@ export function useDataTableColumns(
     /** Single column key (legacy) or list of column keys to highlight search term in. */
     highlightColumnKey?: string;
     highlightColumnKeys?: string[];
+    /** Persist resizable column widths under this key (Tables tabs). */
+    tableKey?: string;
+    defaultColumnWidth?: number;
   }
 ) {
+  const defaultColumnWidth = options?.defaultColumnWidth ?? 200;
+  const resizable = options?.tableKey
+    ? useResizableTableColumns(options.tableKey, { avatar_url: 120, text: 360 })
+    : null;
   const highlightTerm = options?.highlightTerm;
   const highlightColumnKey = options?.highlightColumnKey ?? "";
   const highlightColumnKeys = options?.highlightColumnKeys ?? (highlightColumnKey ? [highlightColumnKey] : []);
@@ -156,8 +172,10 @@ export function useDataTableColumns(
     const dataColumns = effectiveVisibleKeys.value.map((key) => {
       const options = getUniqueValues(key);
       const isAvatar = isAvatarUrlColumn(key);
+      const baseWidth = isAvatar ? 120 : defaultColumnWidth;
       return {
-        width: isAvatar ? 120 : 200,
+        width: baseWidth,
+        minWidth: isAvatar ? 72 : 96,
         title: key,
         key,
         ellipsis: key === "text" ? false : true,
@@ -180,16 +198,24 @@ export function useDataTableColumns(
       title: "Actions",
       key: "__actions",
       width: 150,
+      minWidth: 110,
       fixed: "right" as const,
       filter: false,
       render: (row: Record<string, unknown>) => renderAction(row),
     } as const;
-    return [...dataColumns, actionsColumn];
+    const cols = [...dataColumns, actionsColumn];
+    return resizable ? resizable.applyResizable(cols, { __actions: 150, avatar_url: 120, text: 360 }) : cols;
   });
 
   const scrollX = computed(() => {
+    if (resizable) {
+      return resizable.scrollXFor(
+        tableColumns.value as ResizableColumn[],
+        { __actions: 150, avatar_url: 120, text: 360 }
+      );
+    }
     const cols = tableColumns.value;
-    return cols.reduce((sum, c) => sum + (Number((c as { width?: number }).width) || 200), 0);
+    return cols.reduce((sum, c) => sum + (Number((c as { width?: number }).width) || defaultColumnWidth), 0);
   });
 
   return {
@@ -197,5 +223,6 @@ export function useDataTableColumns(
     scrollX,
     allKeys,
     effectiveVisibleKeys,
+    onColumnResize: resizable?.onColumnResize,
   };
 }

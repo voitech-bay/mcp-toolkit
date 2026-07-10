@@ -26,6 +26,26 @@ import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon, Pencil, Plus, Trash2 } from "lucide-vue-next";
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
+import { useResizableTableColumns, type ResizableColumn } from "../composables/useResizableTableColumns";
+
+const COMPANY_COLUMN_WIDTHS = {
+  name: 220,
+  domain: 160,
+  website: 180,
+  industry: 160,
+  status: 110,
+  linkedin: 100,
+  hypotheses: 130,
+  contacts: 110,
+  context: 150,
+  created_at: 120,
+  actions: 90,
+} as const;
+
+const { applyResizable, onColumnResize, scrollXFor } = useResizableTableColumns(
+  "companies",
+  COMPANY_COLUMN_WIDTHS
+);
 
 const projectStore = useProjectStore();
 const message = useMessage();
@@ -373,11 +393,12 @@ watch(showAll, () => {
 });
 
 // --- Columns ---
-const columns = computed<DataTableColumns<CompanyRow>>(() => [
+const baseColumns = computed((): DataTableColumns<CompanyRow> => [
   { type: "selection", fixed: "left" },
   {
     key: "name",
     title: "Name",
+    width: COMPANY_COLUMN_WIDTHS.name,
     sorter: true,
     ellipsis: { tooltip: true },
     render: (row) => {
@@ -397,6 +418,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   {
     key: "domain",
     title: "Domain",
+    width: COMPANY_COLUMN_WIDTHS.domain,
     sorter: true,
     ellipsis: { tooltip: true },
     render: (row) => row.domain ?? "—",
@@ -404,6 +426,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   {
     key: "website",
     title: "Website",
+    width: COMPANY_COLUMN_WIDTHS.website,
     sorter: true,
     ellipsis: { tooltip: true },
     render: (row) => {
@@ -421,6 +444,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     {
       key: "industry",
       title: "Industry",
+      width: COMPANY_COLUMN_WIDTHS.industry,
       sorter: true,
       ellipsis: { tooltip: true },
       render: (row: CompanyRow) => row.industry ?? "—",
@@ -428,7 +452,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     {
       key: "status",
       title: "Status",
-      width: 110,
+      width: COMPANY_COLUMN_WIDTHS.status,
       sorter: true,
       render: (row: CompanyRow) => (row.status ? h(NTag, { size: "small", bordered: false }, { default: () => row.status! }) : "—"),
     },
@@ -436,7 +460,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   {
     key: "linkedin",
     title: "LinkedIn",
-    width: 100,
+    width: COMPANY_COLUMN_WIDTHS.linkedin,
     render: (row) => {
       if (!row.linkedin) return "—";
       const href = /^https?:\/\//i.test(row.linkedin) ? row.linkedin : `https://www.linkedin.com/company/${row.linkedin}`;
@@ -451,7 +475,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     {
       key: "hypotheses",
       title: "In hypothesis",
-      width: 130,
+      width: COMPANY_COLUMN_WIDTHS.hypotheses,
       render: (row: CompanyRow) => {
         const hyps = row.hypotheses ?? [];
         if (hyps.length === 0) return h("span", { style: "opacity:.4" }, "—");
@@ -476,7 +500,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     {
       key: "contacts",
       title: "Contacts",
-      width: 110,
+      width: COMPANY_COLUMN_WIDTHS.contacts,
       render: (row: CompanyRow) => {
         const count = row.contact_count ?? 0;
         const preview = row.contacts_preview ?? [];
@@ -518,7 +542,7 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   {
     key: "context",
     title: "Context",
-    width: 150,
+    width: COMPANY_COLUMN_WIDTHS.context,
     render: (row: CompanyRow) => {
       const count = row.company_id ? (companyContextCounts.value[row.company_id] ?? null) : null;
       return h(
@@ -537,13 +561,13 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
   {
     key: "created_at",
     title: "Added",
-    width: 120,
+    width: COMPANY_COLUMN_WIDTHS.created_at,
     render: (row) => new Date(row.created_at).toLocaleDateString(),
   },
   ...(!showAll.value ? [{
     key: "actions",
     title: "",
-    width: 90,
+    width: COMPANY_COLUMN_WIDTHS.actions,
     fixed: "right" as const,
     render: (row: CompanyRow) => h(NSpace, { size: 2 }, () => [
       h(NButton, { quaternary: true, size: "tiny", onClick: () => openCompanyEditor(row) }, () => h(Pencil, { size: 13 })),
@@ -551,6 +575,14 @@ const columns = computed<DataTableColumns<CompanyRow>>(() => [
     ]),
   }] : []),
 ]);
+
+const columns = computed((): DataTableColumns<CompanyRow> =>
+  applyResizable(baseColumns.value, COMPANY_COLUMN_WIDTHS)
+);
+
+const tableScrollX = computed(() =>
+  Math.max(980, scrollXFor(columns.value as ResizableColumn[], COMPANY_COLUMN_WIDTHS))
+);
 
 // --- Selection helpers ---
 const selectedRows = computed(() =>
@@ -721,9 +753,10 @@ async function submitAddToHypothesis() {
         :bordered="false"
         size="small"
         :max-height="600"
-        :scroll-x="980"
+        :scroll-x="tableScrollX"
         remote
         :row-key="(row: CompanyRow) => row.id"
+        @unstable-column-resize="onColumnResize"
         :pagination="{
           page,
           pageSize,

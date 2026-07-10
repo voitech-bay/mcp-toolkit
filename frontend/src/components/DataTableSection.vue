@@ -14,6 +14,11 @@ withDefaults(
     pageSizes: number[];
     filterState: DataTableFilterState;
     scrollX: number;
+    onColumnResize?: (
+      resizedWidth: number,
+      limitedWidth: number,
+      column: { key?: string | number }
+    ) => void;
   }>(),
   { loading: false, error: "" }
 );
@@ -60,6 +65,7 @@ function onUpdatePageSize(ps: number) {
       onUpdatePageSize: onUpdatePageSize,
     }"
     @update:filters="onUpdateFilters"
+    @unstable-column-resize="(w, l, c) => onColumnResize?.(w, l, c)"
   />
   <NEmpty v-else-if="!loading" description="No rows" />
 </template>

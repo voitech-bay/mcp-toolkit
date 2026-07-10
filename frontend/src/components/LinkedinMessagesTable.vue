@@ -30,7 +30,7 @@ const emit = defineEmits<{
 }>();
 
 const highlightTerm = computed(() => (props.searchTerm ?? "").trim());
-const { tableColumns, scrollX } = useDataTableColumns(
+const { tableColumns, scrollX, onColumnResize } = useDataTableColumns(
   toRef(props, "data"),
   toRef(props, "filterState"),
   toRef(props, "visibleColumnKeys"),
@@ -95,7 +95,7 @@ const { tableColumns, scrollX } = useDataTableColumns(
       : null;
     return h(NSpace, { size: 4 }, [conversationBtn, goToContactBtn, goToSenderBtn].filter(Boolean));
   },
-  { highlightTerm, highlightColumnKeys: ["text"] }
+  { highlightTerm, highlightColumnKeys: ["text"], tableKey: "tables/linkedin_messages", defaultColumnWidth: 220 }
 );
 </script>
 
@@ -111,6 +111,7 @@ const { tableColumns, scrollX } = useDataTableColumns(
     :page-sizes="pageSizes"
     :filter-state="filterState"
     :scroll-x="scrollX"
+    :on-column-resize="onColumnResize"
     @update:filters="emit('update:filters', $event)"
     @update:page="emit('update:page', $event)"
     @update:page-size="emit('update:pageSize', $event)"

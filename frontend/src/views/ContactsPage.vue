@@ -25,6 +25,24 @@ import { UsersIcon, FileTextIcon, BuildingIcon, Pencil, Plus, Trash2 } from "luc
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
+import { useResizableTableColumns } from "../composables/useResizableTableColumns";
+
+const CONTACT_COLUMN_WIDTHS = {
+  avatar: 54,
+  name: 200,
+  position: 180,
+  company_id: 180,
+  company_name: 200,
+  email: 220,
+  personal_email: 220,
+  context: 160,
+  actions: 90,
+} as const;
+
+const { applyResizable, onColumnResize, scrollXFor } = useResizableTableColumns(
+  "contacts-page",
+  CONTACT_COLUMN_WIDTHS
+);
 
 const projectStore = useProjectStore();
 const message = useMessage();
@@ -354,7 +372,7 @@ const pagination = computed(() => ({
   onUpdatePageSize,
 }));
 
-const columns = computed<DataTableColumns<ContactRow>>(() => [
+const baseColumns = computed((): DataTableColumns<ContactRow> => [
   { type: "selection" },
   {
     key: "avatar",
@@ -482,6 +500,14 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
     ]),
   },
 ]);
+
+const columns = computed((): DataTableColumns<ContactRow> =>
+  applyResizable(baseColumns.value, CONTACT_COLUMN_WIDTHS)
+);
+
+const tableScrollX = computed(() =>
+  Math.max(1200, scrollXFor(columns.value as Array<{ key?: string | number; width?: number; type?: string }>, CONTACT_COLUMN_WIDTHS))
+);
 </script>
 
 <template>
@@ -519,11 +545,12 @@ const columns = computed<DataTableColumns<ContactRow>>(() => [
       <NDataTable
         :columns="columns"
         :data="data"
-        :scroll-x="1200"
+        :scroll-x="tableScrollX"
         :row-key="(r: ContactRow) => (r.id ?? `${r.company_uuid ?? ''}/${r.first_name ?? ''}/${r.last_name ?? ''}/${r.position ?? ''}`)"
         v-model:checked-row-keys="checkedKeys"
         remote
         :pagination="pagination"
+        @unstable-column-resize="onColumnResize"
         @update:sorter="(sorter: any) => { sortBy = sorter?.columnKey === 'name' ? 'first_name' : (sorter?.columnKey ?? 'created_at'); sortDirection = sorter?.order === 'ascend' ? 'asc' : 'desc'; page = 1; }"
       />
     </template>
