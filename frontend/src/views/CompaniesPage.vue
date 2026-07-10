@@ -30,8 +30,7 @@ import { useResizableTableColumns, type ResizableColumn } from "../composables/u
 
 const COMPANY_COLUMN_WIDTHS = {
   name: 220,
-  domain: 160,
-  website: 180,
+  website: 220,
   industry: 160,
   status: 110,
   linkedin: 100,
@@ -416,14 +415,6 @@ const baseColumns = computed((): DataTableColumns<CompanyRow> => [
     },
   },
   {
-    key: "domain",
-    title: "Domain",
-    width: COMPANY_COLUMN_WIDTHS.domain,
-    sorter: true,
-    ellipsis: { tooltip: true },
-    render: (row) => row.domain ?? "—",
-  },
-  {
     key: "website",
     title: "Website",
     width: COMPANY_COLUMN_WIDTHS.website,
@@ -433,10 +424,17 @@ const baseColumns = computed((): DataTableColumns<CompanyRow> => [
       const href = companyWebsiteHref(row);
       if (!href) return "—";
       const label = row.website?.trim() || row.domain?.trim() || href;
+      const display = label.replace(/^https?:\/\//i, "").replace(/\/$/, "");
       return h(
         "a",
-        { href, target: "_blank", rel: "noopener", style: "color: #2080f0" },
-        label.replace(/^https?:\/\//i, "").replace(/\/$/, "")
+        {
+          href,
+          target: "_blank",
+          rel: "noopener noreferrer",
+          class: "company-website-link",
+          title: href,
+        },
+        display
       );
     },
   },
@@ -941,5 +939,14 @@ async function submitAddToHypothesis() {
   font-size: 0.82rem;
   opacity: 0.6;
   margin-top: 0.5rem;
+}
+
+.company-website-link {
+  color: #2080f0;
+  text-decoration: none;
+}
+
+.company-website-link:hover {
+  text-decoration: underline;
 }
 </style>
