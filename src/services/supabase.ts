@@ -1,5 +1,12 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { conversationMatchesSearch, parseSearchTokens } from "./conversation-search.js";
+import {
+  linkedinSlugFromUrl,
+  loadCompanyIdsByDomains,
+  loadContactUuidsByLinkedinSlugs,
+  normalizeDomain,
+} from "./n8n-entity-link.js";
+import { VELVETECH_PROJECT_ID } from "./n8n-trigger.js";
 import { COMPANY_SELECT_FOR_CONTACT_LLM } from "./prompt-resolver.js";
 import type { ApiCredentials } from "./source-api.js";
 import { decryptSecretPayload, encryptSecretPayload } from "./integration-secrets-crypto.js";
@@ -5511,6 +5518,195 @@ function mergeVelvetechResultFields(
   }
 }
 
+function velvetechNestedObject(
+  value: unknown
+): Record<string, unknown> | null {
+  return value != null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function velvetechContactSlug(entity: Record<string, unknown>): string | null {
+  const key = String(entity.contact_key ?? "").trim().toLowerCase();
+  if (key && !normalizeDomain(key)) return key;
+  const contact = velvetechNestedObject(entity.contact);
+  if (contact) {
+    const slug = linkedinSlugFromUrl(
+      typeof contact.linkedin_url === "string" ? contact.linkedin_url : null
+    );
+    if (slug) return slug;
+  }
+  const enrichment = velvetechNestedObject(entity.enrichment);
+  if (enrichment) {
+    const slug = linkedinSlugFromUrl(
+      typeof enrichment.linkedin_url === "string" ? enrichment.linkedin_url : null
+    );
+    if (slug) return slug;
+  }
+  return key || null;
+}
+
+function velvetechContactDisplayName(entity: Record<string, unknown>): string {
+  const contact = velvetechNestedObject(entity.contact);
+  if (contact) {
+    const full = contact.full_name;
+    if (typeof full === "string" && full.trim()) return full.trim();
+    const first = typeof contact.first_name === "string" ? contact.first_name.trim() : "";
+    const last = typeof contact.last_name === "string" ? contact.last_name.trim() : "";
+    if (first || last) return `${first} ${last}`.trim();
+  }
+  const key = String(entity.contact_key ?? "").trim();
+  return key || "contact";
+}
+
+function velvetechCompanyDisplayName(entity: Record<string, unknown>): string {
+  const name = entity.company_name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  const key = String(entity.company_key ?? "").trim();
+  return key || "company";
+}
+
+/** Resolve or create Contacts/companies cards so execution detail can link to `/contact/:uuid` and `/company/:id`. */
+async function attachVelvetechExecutionEntityLinks(
+  client: SupabaseClient,
+  companies: Array<Record<string, unknown>>,
+  contacts: Array<Record<string, unknown>>,
+  projectId = VELVETECH_PROJECT_ID
+): Promise<void> {
+  const domains = [
+    ...new Set(
+      companies
+        .map((co) => normalizeDomain(String(co.company_key ?? "")))
+        .filter((d): d is string => Boolean(d))
+    ),
+  ];
+  const slugs = [
+    ...new Set(
+      contacts.map((ct) => velvetechContactSlug(ct)).filter((s): s is string => Boolean(s))
+    ),
+  ];
+
+  const [companyByDomain, contactBySlug] = await Promise.all([
+    loadCompanyIdsByDomains(client, domains),
+    loadContactUuidsByLinkedinSlugs(client, slugs, projectId),
+  ]);
+
+  for (const co of companies) {
+    const domain = normalizeDomain(String(co.company_key ?? ""));
+    if (!domain) continue;
+    let companyId =
+      (typeof co.company_id === "string" && co.company_id) || companyByDomain.get(domain) || null;
+    if (!companyId) {
+      const created = await createProjectCompanyRecord(client, projectId, {
+        name: velvetechCompanyDisplayName(co),
+        domain,
+      });
+      const id = created.data?.id;
+      if (typeof id === "string" && id) {
+        companyId = id;
+        companyByDomain.set(domain, id);
+      }
+    }
+    if (companyId) co.company_id = companyId;
+    co.company_label = velvetechCompanyDisplayName(co);
+  }
+
+  for (const ct of contacts) {
+    const slug = velvetechContactSlug(ct);
+    const domain = normalizeDomain(String(ct.company_key ?? ""));
+    let contactId =
+      (typeof ct.contact_id === "string" && ct.contact_id) ||
+      (slug ? contactBySlug.get(slug) : undefined) ||
+      null;
+    const companyId = domain ? companyByDomain.get(domain) ?? null : null;
+    if (!contactId && slug) {
+      const contact = velvetechNestedObject(ct.contact);
+      const linkedinUrl =
+        (contact && typeof contact.linkedin_url === "string" && contact.linkedin_url) ||
+        `https://www.linkedin.com/in/${slug}`;
+      const created = await createProjectContactRecord(client, projectId, {
+        first_name: contact?.first_name,
+        last_name: contact?.last_name,
+        position:
+          (contact && typeof contact.title === "string" && contact.title) ||
+          (typeof ct.title === "string" ? ct.title : undefined),
+        linkedin: linkedinUrl,
+        company_uuid: companyId ?? undefined,
+        company_name:
+          (typeof ct.company_name === "string" && ct.company_name) ||
+          (domain ? velvetechCompanyDisplayName({ company_key: domain }) : undefined),
+      });
+      const uuid = created.data?.uuid;
+      if (typeof uuid === "string" && uuid) {
+        contactId = uuid;
+        contactBySlug.set(slug, uuid);
+      }
+    }
+    if (contactId) ct.contact_id = contactId;
+    if (companyId) ct.company_id = companyId;
+    ct.contact_label = velvetechContactDisplayName(ct);
+  }
+
+  const companyIds = [
+    ...new Set(
+      [...companies, ...contacts]
+        .map((row) => row.company_id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+    ),
+  ];
+  const contactIds = [
+    ...new Set(
+      contacts
+        .map((row) => row.contact_id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0)
+    ),
+  ];
+
+  const companyLabelById = new Map<string, string>();
+  const companyLogoById = new Map<string, string | null>();
+  for (const batch of n8nBatchArray(companyIds, 200)) {
+    const { data } = await client.from(COMPANIES_TABLE).select("id, name, logo_url").in("id", batch);
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const id = typeof row.id === "string" ? row.id : "";
+      if (!id) continue;
+      const nm = typeof row.name === "string" ? row.name.trim() : "";
+      companyLabelById.set(id, nm || velvetechCompanyDisplayName({ company_key: id }));
+      const logo = row.logo_url;
+      companyLogoById.set(id, typeof logo === "string" && logo.trim() ? logo.trim() : null);
+    }
+  }
+
+  const contactLabelByUuid = new Map<string, string>();
+  const contactAvatarByUuid = new Map<string, string | null>();
+  for (const batch of n8nBatchArray(contactIds, 200)) {
+    const { data } = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, name, first_name, last_name, avatar_url")
+      .in("uuid", batch);
+    for (const row of (data ?? []) as Array<Record<string, unknown>>) {
+      const uuid = typeof row.uuid === "string" ? row.uuid : "";
+      if (!uuid) continue;
+      contactLabelByUuid.set(uuid, n8nContactLabelFromRow(row));
+      const avatar = row.avatar_url;
+      contactAvatarByUuid.set(
+        uuid,
+        typeof avatar === "string" && avatar.trim() ? avatar.trim() : null
+      );
+    }
+  }
+
+  for (const co of companies) {
+    const id = typeof co.company_id === "string" ? co.company_id : "";
+    if (id && companyLabelById.has(id)) co.company_label = companyLabelById.get(id);
+    if (id) co.company_logo_url = companyLogoById.get(id) ?? null;
+  }
+  for (const ct of contacts) {
+    const id = typeof ct.contact_id === "string" ? ct.contact_id : "";
+    if (id && contactLabelByUuid.has(id)) ct.contact_label = contactLabelByUuid.get(id);
+    if (id) ct.contact_avatar_url = contactAvatarByUuid.get(id) ?? null;
+  }
+}
+
 function computeVelvetechFunnelFromRows(rows: N8nWorkflowResultListRow[]): Record<string, number> {
   const funnel: Record<string, number> = {
     companies_icp: 0,
@@ -5551,9 +5747,19 @@ function collectVelvetechFieldKeys(
   rows: Array<Record<string, unknown>>,
   priority: string[]
 ): string[] {
+  const linkOnly = new Set([
+    "company_id",
+    "company_label",
+    "company_logo_url",
+    "contact_id",
+    "contact_label",
+    "contact_avatar_url",
+  ]);
   const keys = new Set<string>();
   for (const row of rows) {
-    for (const key of Object.keys(row)) keys.add(key);
+    for (const key of Object.keys(row)) {
+      if (!linkOnly.has(key)) keys.add(key);
+    }
   }
   const ordered = [...keys].filter((k) => !priority.includes(k)).sort();
   return [...priority.filter((k) => keys.has(k)), ...ordered];
@@ -5708,6 +5914,11 @@ export async function getVelvetechExecutionDetail(
     if (ck && !isRunIdArtifactKey(ck, runId) && VELVETECH_COMPANY_WORKFLOWS.has(wf)) {
       const existing = companies.get(ck) ?? { company_key: ck };
       mergeVelvetechResultFields(existing, j);
+      if (row.company_id && !existing.company_id) existing.company_id = row.company_id;
+      if (row.company_label && !existing.company_label) existing.company_label = row.company_label;
+      if (row.company_logo_url && !existing.company_logo_url) {
+        existing.company_logo_url = row.company_logo_url;
+      }
       companies.set(ck, existing);
     }
 
@@ -5715,6 +5926,12 @@ export async function getVelvetechExecutionDetail(
       const existing = contacts.get(ctk) ?? { contact_key: ctk, company_key: ck || null };
       mergeVelvetechResultFields(existing, j);
       if (ck && !existing.company_key) existing.company_key = ck;
+      if (row.contact_id && !existing.contact_id) existing.contact_id = row.contact_id;
+      if (row.contact_label && !existing.contact_label) existing.contact_label = row.contact_label;
+      if (row.contact_avatar_url && !existing.contact_avatar_url) {
+        existing.contact_avatar_url = row.contact_avatar_url;
+      }
+      if (row.company_id && !existing.company_id) existing.company_id = row.company_id;
       contacts.set(ctk, existing);
     }
   }
@@ -5725,6 +5942,8 @@ export async function getVelvetechExecutionDetail(
   const contactList = [...contacts.values()].sort((a, b) =>
     String(a.contact_key ?? "").localeCompare(String(b.contact_key ?? ""))
   );
+
+  await attachVelvetechExecutionEntityLinks(client, companyList, contactList);
 
   const companyFieldKeys = collectVelvetechFieldKeys(companyList, ["company_key", "company_name"]);
   const contactFieldKeys = collectVelvetechFieldKeys(contactList, ["contact_key", "company_key"]);

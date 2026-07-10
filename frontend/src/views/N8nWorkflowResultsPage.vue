@@ -441,19 +441,125 @@ function formatCellValue(value: unknown): string {
   return String(value);
 }
 
+function velvetechCompanyLabelFromRow(row: Record<string, unknown>): string {
+  const label = row.company_label;
+  if (typeof label === "string" && label.trim()) return label.trim();
+  const name = row.company_name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  const key = row.company_key;
+  return typeof key === "string" && key.trim() ? key.trim() : "company";
+}
+
+function velvetechContactLabelFromRow(row: Record<string, unknown>): string {
+  const label = row.contact_label;
+  if (typeof label === "string" && label.trim()) return label.trim();
+  const contact = row.contact;
+  if (contact && typeof contact === "object" && !Array.isArray(contact)) {
+    const full = (contact as Record<string, unknown>).full_name;
+    if (typeof full === "string" && full.trim()) return full.trim();
+  }
+  const key = row.contact_key;
+  return typeof key === "string" && key.trim() ? key.trim() : "contact";
+}
+
+function renderEntityCardLink(
+  entityType: "company" | "contact",
+  row: Record<string, unknown>,
+  label: string
+) {
+  const id =
+    entityType === "company"
+      ? typeof row.company_id === "string"
+        ? row.company_id
+        : null
+      : typeof row.contact_id === "string"
+        ? row.contact_id
+        : null;
+  if (!id) return formatCellValue(label);
+  const avatarUrl =
+    entityType === "company"
+      ? (typeof row.company_logo_url === "string" ? row.company_logo_url : null)
+      : (typeof row.contact_avatar_url === "string" ? row.contact_avatar_url : null);
+  return h(
+    NSpace,
+    { align: "center", size: 8, wrap: false },
+    {
+      default: () => [
+        h(
+          NAvatar,
+          {
+            round: entityType === "contact",
+            size: 28,
+            src: avatarUrl || undefined,
+            style: { flexShrink: "0" },
+          },
+          { default: () => avatarFallback(label) }
+        ),
+        h(
+          RouterLink,
+          {
+            to: entityType === "company" ? `/company/${id}` : `/contact/${id}`,
+            style: "color:#2080f0;text-decoration:none;font-size:0.85rem",
+          },
+          { default: () => label }
+        ),
+      ],
+    }
+  );
+}
+
 function buildEntityColumns(
   fieldKeys: string[],
+  entityType: "company" | "contact",
   onOpenJson: (row: Record<string, unknown>) => void
 ): DataTableColumns<Record<string, unknown>> {
-  const cols: DataTableColumns<Record<string, unknown>> = fieldKeys.map((key) => ({
-    title: key,
-    key,
-    minWidth: key.length > 16 ? 180 : 120,
-    ellipsis: { tooltip: true },
-    render(row) {
-      return formatCellValue(row[key]);
+  const cols: DataTableColumns<Record<string, unknown>> = [
+    {
+      title: entityType === "company" ? "Company" : "Contact",
+      key: "_entity_card",
+      fixed: "left",
+      minWidth: 220,
+      render(row) {
+        const label =
+          entityType === "company"
+            ? velvetechCompanyLabelFromRow(row)
+            : velvetechContactLabelFromRow(row);
+        return renderEntityCardLink(entityType, row, label);
+      },
     },
-  }));
+  ];
+
+  for (const key of fieldKeys) {
+    cols.push({
+      title: key,
+      key,
+      minWidth: key.length > 16 ? 180 : 120,
+      ellipsis: { tooltip: true },
+      render(row) {
+        if (entityType === "company" && key === "company_key" && row.company_id) {
+          return renderEntityCardLink(entityType, row, formatCellValue(row[key]));
+        }
+        if (entityType === "company" && key === "company_name" && row.company_id) {
+          return renderEntityCardLink(entityType, row, formatCellValue(row[key]));
+        }
+        if (entityType === "contact" && key === "contact_key" && row.contact_id) {
+          return renderEntityCardLink(entityType, row, velvetechContactLabelFromRow(row));
+        }
+        if (entityType === "contact" && key === "company_key" && row.company_id) {
+          return h(
+            RouterLink,
+            {
+              to: `/company/${String(row.company_id)}`,
+              style: "color:#2080f0;text-decoration:none;font-size:0.85rem",
+            },
+            { default: () => formatCellValue(row[key]) }
+          );
+        }
+        return formatCellValue(row[key]);
+      },
+    });
+  }
+
   cols.push({
     title: "JSON",
     key: "_json",
@@ -917,14 +1023,14 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
 });
 
 const companyDetailColumns = computed(() =>
-  buildEntityColumns(detail.value?.company_field_keys ?? [], (row) =>
-    openEntityDetail(row, String(row.company_key ?? row.company_name ?? "company"))
+  buildEntityColumns(detail.value?.company_field_keys ?? [], "company", (row) =>
+    openEntityDetail(row, velvetechCompanyLabelFromRow(row))
   )
 );
 
 const contactDetailColumns = computed(() =>
-  buildEntityColumns(detail.value?.contact_field_keys ?? [], (row) =>
-    openEntityDetail(row, String(row.contact_key ?? "contact"))
+  buildEntityColumns(detail.value?.contact_field_keys ?? [], "contact", (row) =>
+    openEntityDetail(row, velvetechContactLabelFromRow(row))
   )
 );
 
