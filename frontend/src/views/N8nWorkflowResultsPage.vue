@@ -937,17 +937,29 @@ const detailFunnelEntries = computed(() => {
   }));
 });
 
-const detailBillingMetrics = computed(() => {
+const CORESIGNAL_CALL_LABELS: Record<string, string> = {
+  agentic_search: "Agentic search",
+  employee_collect: "Employee collect",
+  company_collect: "Company collect",
+  jobs_search: "Jobs search",
+};
+
+function formatCoresignalBreakdown(callsByType: Record<string, unknown> | undefined): string {
+  if (!callsByType || typeof callsByType !== "object") return "—";
+  const parts = Object.entries(callsByType)
+    .filter(([, v]) => v != null && Number(v) > 0)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${CORESIGNAL_CALL_LABELS[k] ?? k}: ${v}`);
+  return parts.length ? parts.join(" · ") : "—";
+}
+
+const detailCostMetrics = computed(() => {
   const s = detail.value?.summary;
   if (!s) return [];
-  const b = s.billing ?? {};
-  const or = (b.openrouter as Record<string, unknown> | undefined) ?? {};
-  const pr = (b.prospeo as Record<string, unknown> | undefined) ?? {};
-  const cs = (b.coresignal as Record<string, unknown> | undefined) ?? {};
-  const pa = (b.parallel as Record<string, unknown> | undefined) ?? {};
+  const or = ((s.billing ?? {}).openrouter as Record<string, unknown> | undefined) ?? {};
   const tokenEst = or.usd_estimated_from_tokens;
   const orSpent = or.usd_spent;
-  const metrics: Array<{ label: string; value: string }> = [
+  return [
     { label: "Total cost", value: formatUsd(s.cost_usd) },
     {
       label: "OpenRouter spent",
@@ -962,27 +974,94 @@ const detailBillingMetrics = computed(() => {
       label: "Token estimate",
       value: tokenEst == null ? "—" : formatUsd(Number(tokenEst)),
     },
-    { label: "LLM calls", value: or.llm_calls == null ? "—" : String(or.llm_calls) },
+  ];
+});
+
+const detailVendorMetrics = computed(() => {
+  const s = detail.value?.summary;
+  if (!s?.billing) return [];
+  const b = s.billing;
+  const or = (b.openrouter as Record<string, unknown> | undefined) ?? {};
+  const pr = (b.prospeo as Record<string, unknown> | undefined) ?? {};
+  const cs = (b.coresignal as Record<string, unknown> | undefined) ?? {};
+  const pa = (b.parallel as Record<string, unknown> | undefined) ?? {};
+
+  const parallelUsd = pa.usd_estimated;
+  const searchCalls = pa.search_calls;
+  const extractCalls = pa.extract_calls;
+  const parallelCalls =
+    searchCalls != null || extractCalls != null
+      ? [
+          searchCalls != null ? `${searchCalls} search` : null,
+          extractCalls != null ? `${extractCalls} extract` : null,
+        ]
+          .filter(Boolean)
+          .join(" · ")
+      : null;
+
+  const prospeoCredits = pr.credits_spent;
+  const prospeoPages = pr.search_pages_n8n;
+  let prospeoValue = "—";
+  if (prospeoCredits != null) {
+    prospeoValue = `${prospeoCredits} credits spent`;
+    if (prospeoPages != null) prospeoValue += ` (${prospeoPages} pages)`;
+    if (pr.remaining != null) prospeoValue += ` · ${pr.remaining} left`;
+  } else if (prospeoPages != null) {
+    prospeoValue = `~${prospeoPages} credits (${prospeoPages} search pages)`;
+  }
+
+  const csTotal = cs.credits_estimated;
+  const csBreakdown = formatCoresignalBreakdown(
+    cs.calls_by_type as Record<string, unknown> | undefined
+  );
+  const coresignalValue =
+    csTotal != null
+      ? `${csTotal} credits est.${csBreakdown !== "—" ? ` — ${csBreakdown}` : ""}`
+      : csBreakdown;
+
+  const metrics: Array<{ label: string; value: string; hint?: string }> = [
     {
-      label: "Parallel (Exa) est.",
-      value: pa.usd_estimated == null ? "—" : formatUsd(Number(pa.usd_estimated)),
+      label: "OpenRouter",
+      value: or.llm_calls == null ? "—" : `${or.llm_calls} LLM calls`,
+      hint: "LLM API usage (see token estimate above)",
     },
     {
-      label: "Prospeo pages",
-      value: pr.search_pages_n8n == null ? "—" : String(pr.search_pages_n8n),
+      label: "Parallel (Exa)",
+      value:
+        parallelUsd == null && !parallelCalls
+          ? "—"
+          : [
+              parallelUsd != null ? formatUsd(Number(parallelUsd)) : null,
+              parallelCalls ? parallelCalls : null,
+            ]
+              .filter(Boolean)
+              .join(" · "),
+      hint: "$5/1k search · $1/1k extract",
     },
     {
-      label: "CoreSignal credits est.",
-      value: cs.credits_estimated == null ? "—" : String(cs.credits_estimated),
+      label: "Prospeo",
+      value: prospeoValue,
+      hint: "1 credit per person search page",
+    },
+    {
+      label: "CoreSignal",
+      value: coresignalValue,
+      hint: "agentic/company collect 2cr · jobs 1cr · employee collect 2cr",
     },
   ];
+
   if (s.tokens_by_stage && Object.keys(s.tokens_by_stage).length) {
     const parts = Object.entries(s.tokens_by_stage)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([stage, tok]) => `${stage}: ${Number(tok).toLocaleString()}`);
-    metrics.push({ label: "Tokens by stage", value: parts.join(" · ") });
+    metrics.push({
+      label: "OpenRouter tokens",
+      value: parts.join(" · "),
+      hint: "Tokens by pipeline stage",
+    });
   }
-  return metrics;
+
+  return metrics.filter((m) => m.value !== "—");
 });
 </script>
 
@@ -1058,10 +1137,23 @@ const detailBillingMetrics = computed(() => {
           <NTag>{{ formatDuration(detail.summary.duration_sec) }}</NTag>
           <NTag type="warning">{{ formatUsd(detail.summary.cost_usd) }}</NTag>
         </NSpace>
-        <div v-if="detailBillingMetrics.length" class="funnel-grid">
-          <div v-for="m in detailBillingMetrics" :key="m.label" class="funnel-cell">
-            <div class="funnel-label">{{ m.label }}</div>
-            <div class="funnel-value metric-value">{{ m.value }}</div>
+        <div v-if="detailCostMetrics.length" class="funnel-section">
+          <h4 class="section-title">Cost summary</h4>
+          <div class="funnel-grid">
+            <div v-for="m in detailCostMetrics" :key="m.label" class="funnel-cell">
+              <div class="funnel-label">{{ m.label }}</div>
+              <div class="funnel-value metric-value">{{ m.value }}</div>
+            </div>
+          </div>
+        </div>
+        <div v-if="detailVendorMetrics.length" class="funnel-section">
+          <h4 class="section-title">Vendor usage</h4>
+          <div class="vendor-grid">
+            <div v-for="m in detailVendorMetrics" :key="m.label" class="vendor-cell">
+              <div class="funnel-label">{{ m.label }}</div>
+              <div class="funnel-value metric-value">{{ m.value }}</div>
+              <div v-if="m.hint" class="vendor-hint">{{ m.hint }}</div>
+            </div>
           </div>
         </div>
         <div v-if="detailFunnelEntries.length" class="funnel-section">
@@ -1296,6 +1388,21 @@ const detailBillingMetrics = computed(() => {
 }
 .funnel-section {
   margin-top: 0.5rem;
+}
+.vendor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 0.5rem;
+}
+.vendor-cell {
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 6px;
+  padding: 0.5rem 0.75rem;
+}
+.vendor-hint {
+  font-size: 0.7rem;
+  opacity: 0.6;
+  margin-top: 0.25rem;
 }
 .section-title {
   margin: 0.75rem 0 0.25rem;
