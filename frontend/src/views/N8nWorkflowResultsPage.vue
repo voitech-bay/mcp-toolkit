@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { ref, computed, watch, h } from "vue";
 import { useRoute, useRouter, RouterLink } from "vue-router";
+import { use } from "echarts/core";
+import { CanvasRenderer } from "echarts/renderers";
+import { BarChart } from "echarts/charts";
+import { GridComponent, TooltipComponent, LegendComponent } from "echarts/components";
+import type { EChartsOption } from "echarts";
+import VChart from "vue-echarts";
 import {
   NCard,
   NDataTable,
@@ -17,6 +23,105 @@ import {
   NAvatar,
 } from "naive-ui";
 import type { DataTableColumns, SelectOption } from "naive-ui";
+
+use([CanvasRenderer, BarChart, GridComponent, TooltipComponent, LegendComponent]);
+
+type LlmBucket = {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  usd_estimated: number;
+};
+
+type LlmLineItem = {
+  stage: string;
+  node: string;
+  model: string;
+  entity_key?: string;
+  company_key?: string;
+  contact_key?: string;
+  total_tokens: number;
+  usd_estimated: number;
+};
+
+type LlmBreakdown = {
+  usd_estimated_total?: number;
+  by_stage?: Record<string, LlmBucket>;
+  by_model?: Record<string, LlmBucket>;
+  by_company?: Record<string, LlmBucket>;
+  by_contact?: Record<string, LlmBucket>;
+  line_items?: LlmLineItem[];
+};
+
+const STAGE_LABELS: Record<string, string> = {
+  p0: "P0 ICP gate",
+  p1: "P1 discovery",
+  p2: "P2 enrichment",
+  p4: "P4 contact fit",
+  p5: "P5 deep research",
+  p6: "P6 POV",
+};
+
+function shortModel(model: string): string {
+  return model.includes("/") ? model.split("/").slice(1).join("/") : model;
+}
+
+function bucketEntries(buckets: Record<string, LlmBucket> | undefined, limit = 20) {
+  if (!buckets) return [] as Array<{ key: string; bucket: LlmBucket }>;
+  return Object.entries(buckets)
+    .sort((a, b) => b[1].usd_estimated - a[1].usd_estimated)
+    .slice(0, limit)
+    .map(([key, bucket]) => ({ key, bucket }));
+}
+
+function horizontalBarOption(
+  rows: Array<{ label: string; usd: number; tokens: number; calls: number }>,
+  valueMode: "usd" | "tokens"
+): EChartsOption {
+  const sorted = [...rows].sort((a, b) =>
+    valueMode === "usd" ? b.usd - a.usd : b.tokens - a.tokens
+  );
+  const labels = sorted.map((r) => r.label);
+  const values = sorted.map((r) => (valueMode === "usd" ? r.usd : r.tokens));
+  const valueLabel = valueMode === "usd" ? "Est. cost (USD)" : "Tokens";
+  return {
+    tooltip: {
+      trigger: "axis",
+      axisPointer: { type: "shadow" },
+      formatter: (params) => {
+        const p = Array.isArray(params) ? params[0] : params;
+        const idx = typeof p?.dataIndex === "number" ? p.dataIndex : 0;
+        const row = sorted[idx];
+        if (!row) return "";
+        return [
+          `<strong>${row.label}</strong>`,
+          `${valueLabel}: ${valueMode === "usd" ? `$${row.usd.toFixed(4)}` : row.tokens.toLocaleString()}`,
+          `Calls: ${row.calls}`,
+        ].join("<br/>");
+      },
+    },
+    grid: { left: 8, right: 48, top: 8, bottom: 8, containLabel: true },
+    xAxis: { type: "value", axisLabel: { formatter: valueMode === "usd" ? (v: number) => `$${v}` : undefined } },
+    yAxis: { type: "category", data: labels, inverse: true },
+    series: [
+      {
+        name: valueLabel,
+        type: "bar",
+        data: values,
+        itemStyle: { color: "#5470c6" },
+        label: {
+          show: true,
+          position: "right",
+          formatter: (p) =>
+            valueMode === "usd"
+              ? `$${Number(p.value ?? 0).toFixed(3)}`
+              : Number(p.value ?? 0).toLocaleString(),
+        },
+      },
+    ],
+  };
+}
 
 export type N8nWorkflowResultRow = {
   id: string;
@@ -113,6 +218,8 @@ type ExecutionSummary = {
   cost_usd: number | null;
   funnel: Record<string, number>;
   warnings: string[];
+  llm_breakdown?: LlmBreakdown | null;
+  billing?: Record<string, unknown> | null;
 };
 
 type ExecutionDetail = {
@@ -226,6 +333,80 @@ function formatDuration(sec: number | null | undefined): string {
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
 }
+
+const llmBreakdown = computed(() => detail.value?.summary?.llm_breakdown ?? null);
+const llmChartMode = ref<"usd" | "tokens">("usd");
+const openrouterWalletUsd = computed(() => {
+  const billing = detail.value?.summary?.billing as { openrouter?: { usd_spent?: number | null } } | null | undefined;
+  return billing?.openrouter?.usd_spent ?? detail.value?.summary?.cost_usd ?? null;
+});
+
+const llmStageChartRows = computed(() =>
+  bucketEntries(llmBreakdown.value?.by_stage).map(({ key, bucket }) => ({
+    label: STAGE_LABELS[key] ?? key.toUpperCase(),
+    usd: bucket.usd_estimated,
+    tokens: bucket.total_tokens,
+    calls: bucket.calls,
+  }))
+);
+
+const llmModelChartRows = computed(() =>
+  bucketEntries(llmBreakdown.value?.by_model).map(({ key, bucket }) => ({
+    label: shortModel(key),
+    usd: bucket.usd_estimated,
+    tokens: bucket.total_tokens,
+    calls: bucket.calls,
+  }))
+);
+
+const llmCompanyChartRows = computed(() =>
+  bucketEntries(llmBreakdown.value?.by_company).map(({ key, bucket }) => ({
+    label: key,
+    usd: bucket.usd_estimated,
+    tokens: bucket.total_tokens,
+    calls: bucket.calls,
+  }))
+);
+
+const llmStageChartOption = computed(() =>
+  horizontalBarOption(llmStageChartRows.value, llmChartMode.value)
+);
+const llmModelChartOption = computed(() =>
+  horizontalBarOption(llmModelChartRows.value, llmChartMode.value)
+);
+const llmCompanyChartOption = computed(() =>
+  horizontalBarOption(llmCompanyChartRows.value, llmChartMode.value)
+);
+
+const llmLineItemRows = computed(() =>
+  [...(llmBreakdown.value?.line_items ?? [])].sort(
+    (a, b) => b.usd_estimated - a.usd_estimated || b.total_tokens - a.total_tokens
+  )
+);
+
+const llmLineItemColumns: DataTableColumns<LlmLineItem> = [
+  { title: "Stage", key: "stage", width: 70, render: (row) => STAGE_LABELS[row.stage] ?? row.stage },
+  { title: "Model", key: "model", ellipsis: { tooltip: true }, render: (row) => shortModel(row.model) },
+  {
+    title: "Row",
+    key: "entity_key",
+    ellipsis: { tooltip: true },
+    render: (row) => row.contact_key || row.company_key || row.entity_key || "—",
+  },
+  { title: "Node", key: "node", ellipsis: { tooltip: true } },
+  {
+    title: "Tokens",
+    key: "total_tokens",
+    width: 90,
+    render: (row) => row.total_tokens.toLocaleString(),
+  },
+  {
+    title: "Est. $",
+    key: "usd_estimated",
+    width: 90,
+    render: (row) => `$${row.usd_estimated.toFixed(4)}`,
+  },
+];
 
 const execColumns: DataTableColumns<ExecutionSummary> = [
   {
@@ -797,6 +978,60 @@ const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => 
           </div>
         </div>
       </template>
+      <template v-if="llmBreakdown">
+        <div class="billing-section">
+          <div class="billing-section-header">
+            <h4 class="section-title">LLM cost breakdown</h4>
+            <NSpace wrap size="small">
+              <NTag type="warning">wallet {{ formatUsd(openrouterWalletUsd) }}</NTag>
+              <NTag>token est {{ formatUsd(llmBreakdown.usd_estimated_total ?? null) }}</NTag>
+              <NButton
+                size="tiny"
+                :type="llmChartMode === 'usd' ? 'primary' : 'default'"
+                @click="llmChartMode = 'usd'"
+              >
+                USD
+              </NButton>
+              <NButton
+                size="tiny"
+                :type="llmChartMode === 'tokens' ? 'primary' : 'default'"
+                @click="llmChartMode = 'tokens'"
+              >
+                Tokens
+              </NButton>
+            </NSpace>
+          </div>
+          <p class="muted billing-note">
+            Bar values use OpenRouter list price × tokens per call. Wallet spend can differ (cache, concurrent usage).
+          </p>
+          <div class="billing-charts">
+            <div v-if="llmStageChartRows.length" class="billing-chart-card">
+              <div class="billing-chart-title">By pipeline stage</div>
+              <VChart :option="llmStageChartOption" autoresize class="billing-chart" />
+            </div>
+            <div v-if="llmModelChartRows.length" class="billing-chart-card">
+              <div class="billing-chart-title">By model</div>
+              <VChart :option="llmModelChartOption" autoresize class="billing-chart" />
+            </div>
+            <div v-if="llmCompanyChartRows.length" class="billing-chart-card">
+              <div class="billing-chart-title">By company</div>
+              <VChart :option="llmCompanyChartOption" autoresize class="billing-chart" />
+            </div>
+          </div>
+          <template v-if="llmLineItemRows.length">
+            <h4 class="section-title">Per call (stage · model · row)</h4>
+            <NDataTable
+              :columns="llmLineItemColumns"
+              :data="llmLineItemRows"
+              size="small"
+              :max-height="320"
+            />
+          </template>
+        </div>
+      </template>
+      <NAlert v-else-if="detail?.summary && !detail.summary.warnings?.includes('no_billing_row')" type="info">
+        No LLM breakdown on this billing row — re-run with <code>--billing</code> or backfill after updating the billing script.
+      </NAlert>
       <template v-if="detail?.stages?.length">
         <h4 class="section-title">Stages</h4>
         <NDataTable :columns="stageDetailColumns" :data="detail.stages" size="small" :bordered="false" />
@@ -969,5 +1204,40 @@ const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => 
 .section-title {
   margin: 0.75rem 0 0.25rem;
   font-size: 0.95rem;
+}
+.billing-section {
+  margin-top: 0.5rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid rgba(128, 128, 128, 0.2);
+}
+.billing-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+.billing-note {
+  margin: 0.25rem 0 0.75rem;
+}
+.billing-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+.billing-chart-card {
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  border-radius: 8px;
+  padding: 0.5rem 0.75rem 0.25rem;
+}
+.billing-chart-title {
+  font-size: 0.8rem;
+  opacity: 0.8;
+  margin-bottom: 0.25rem;
+}
+.billing-chart {
+  width: 100%;
+  height: 220px;
 }
 </style>

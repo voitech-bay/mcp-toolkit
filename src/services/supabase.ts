@@ -5426,8 +5426,47 @@ export type VelvetechExecutionSummaryRow = {
   funnel: Record<string, number>;
   warnings: string[];
   billing: Record<string, unknown> | null;
+  llm_breakdown: VelvetechLlmBreakdown | null;
   row_count: number | null;
 };
+
+export type VelvetechLlmBucket = {
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  usd_estimated: number;
+};
+
+export type VelvetechLlmLineItem = {
+  stage: string;
+  node: string;
+  model: string;
+  entity_type?: string;
+  entity_key?: string;
+  company_key?: string;
+  contact_key?: string;
+  child_execution_id?: string;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  usd_estimated: number;
+};
+
+export type VelvetechLlmBreakdown = {
+  usd_estimated_total?: number;
+  by_stage?: Record<string, VelvetechLlmBucket>;
+  by_stage_model?: Record<string, Record<string, VelvetechLlmBucket>>;
+  by_model?: Record<string, VelvetechLlmBucket>;
+  by_company?: Record<string, VelvetechLlmBucket>;
+  by_contact?: Record<string, VelvetechLlmBucket>;
+  line_items?: VelvetechLlmLineItem[];
+};
+
+function parseLlmBreakdown(raw: unknown): VelvetechLlmBreakdown | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return raw as VelvetechLlmBreakdown;
+}
 
 function numFromResult(j: Record<string, unknown>, key: string): number | null {
   const v = j[key];
@@ -5463,6 +5502,7 @@ function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSu
     funnel,
     warnings,
     billing,
+    llm_breakdown: parseLlmBreakdown(j.llm_breakdown),
     row_count: null,
   };
 }
@@ -5606,6 +5646,7 @@ export async function getVelvetechExecutionDetail(
       },
       warnings: ["no_billing_row"],
       billing: null,
+      llm_breakdown: null,
       row_count: rows.length,
     };
   }
