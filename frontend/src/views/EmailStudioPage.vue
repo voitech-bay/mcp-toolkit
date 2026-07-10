@@ -4,6 +4,7 @@ import { NAlert, NAvatar, NButton, NCard, NCheckbox, NCollapse, NCollapseItem, N
 import { useProjectStore } from "../stores/project";
 import VelvetechLinkedInDraftsPanel from "../components/VelvetechLinkedInDraftsPanel.vue";
 import { isVelvetechProjectId } from "../project-ids";
+import { useWorkflowLaunch, type LaunchableWorkflow } from "../composables/useWorkflowLaunch";
 
 type Json = Record<string, any>;
 interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
@@ -11,6 +12,7 @@ interface Annotation { id:string; text:string; start:number; end:number; purpose
 interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
 
 const store = useProjectStore(); const toast = useMessage(); const dialog = useDialog();
+const { launching: launchingN8n, workflows, loadWorkflows, launch } = useWorkflowLaunch();
 const studioTab = ref<"email" | "linkedin">("email");
 const isVelvetech = computed(() => isVelvetechProjectId(store.selectedProjectId));
 const rows = ref<EmailRow[]>([]), total = ref(0), page = ref(1), pageSize = ref(25), loading = ref(false), error = ref("");
@@ -32,6 +34,10 @@ const annotations = computed<Annotation[]>(() => (currentVersion.value?.annotati
 const researchPoints = computed<Json[]>(() => detail.value?.researchPoints ?? []);
 const canApprove = computed(() => detail.value?.data?.status === "final_check" && openComments.value.length === 0);
 const canStartEmail = computed(() => !!selectedPickerContact.value && !pickerLoading.value && !actionLoading.value);
+const emailResearchWorkflow = computed<LaunchableWorkflow | undefined>(() =>
+  workflows.value.find((w) => w.adapter === "velvetech_research")
+  ?? workflows.value.find((w) => /research/i.test(`${w.key} ${w.label}`) && w.adapter !== "velvetech_reply")
+);
 
 function contactLabel(c: PickerContact): string {
   return (typeof c.name === "string" && c.name.trim())
@@ -42,7 +48,7 @@ function contactLabel(c: PickerContact): string {
 function fmt(v:string|null) { return v ? new Date(v).toLocaleString() : "—"; }
 function qs() { const q = new URLSearchParams({ projectId:String(store.selectedProjectId), page:String(page.value), pageSize:String(pageSize.value) }); if(search.value.trim())q.set("search",search.value.trim()); const status = savedView.value !== "all" ? savedView.value : statusFilter.value; if(status)q.set("status",status); if(campaignFilter.value)q.set("campaign",campaignFilter.value); if(batchFilter.value)q.set("batch",batchFilter.value); if(personaFilter.value)q.set("persona",personaFilter.value); if(reviewerFilter.value)q.set("reviewer",reviewerFilter.value); if(modelFilter.value)q.set("model",modelFilter.value); if(qualityFilter.value)q.set("researchQuality",qualityFilter.value); if(dateFrom.value)q.set("dateFrom",dateFrom.value); if(dateTo.value)q.set("dateTo",dateTo.value); if(openOnly.value)q.set("hasOpenComments","true"); return q; }
 async function load() { if(!store.selectedProjectId)return; loading.value=true; error.value=""; try { const r=await fetch(`/api/email-studio/emails?${qs()}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); rows.value=j.data??[]; total.value=j.total??0; } catch(e){error.value=e instanceof Error?e.message:"Could not load emails"} finally{loading.value=false} }
-let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,load); watch([page,pageSize],load); onMounted(load);
+let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows()}); watch([page,pageSize],load); onMounted(()=>{void load();void loadWorkflows()});
 
 function shouldIgnoreRowClick(event: MouseEvent): boolean {
   const target = event.target;
@@ -60,7 +66,7 @@ const emailRowProps = (row: EmailRow) => ({
 const columns:DataTableColumns<EmailRow> = [
   {title:"Contact",key:"contact_name",render:r=>h("div",[h("a",{class:"email-studio-link",href:"#",onClick:(e:MouseEvent)=>{e.preventDefault();void openEmail(r.id)}},r.contact_name||"Unknown"),h("div",{class:"muted"},r.recipient_email||"")])},
   {title:"Company",key:"company_name"},{title:"Batch",key:"batch_name"},{title:"Persona",key:"persona"},{title:"Step",key:"sequence_step",width:65},
-  {title:"Subject",key:"current_subject",ellipsis:{tooltip:true}},{title:"Status",key:"status",render:r=>h(NTag,{size:"small",type:statusType(r.status) as any},{default:()=>humanize(r.status)})},
+  {title:"Subject",key:"current_subject",ellipsis:{tooltip:true}},{title:"Status",key:"status",render:r=>h("div",{class:"status-cell"},[h(NTag,{size:"small",type:statusType(r.status) as any},{default:()=>humanize(r.status)}),r.status==="research_missing"?h(NButton,{size:"tiny",secondary:true,type:"primary",loading:launchingN8n.value,disabled:!emailResearchWorkflow.value?.configured,onClick:(e:MouseEvent)=>{e.stopPropagation();void launchEmailResearch(r)}},{default:()=>"Launch n8n"}):null])},
   {title:"Comments",key:"open_comment_count",width:90},{title:"Updated",key:"updated_at",render:r=>fmt(r.updated_at)},
   {title:"",key:"actions",width:90,render:r=>h(NButton,{size:"small",type:"primary",secondary:true,onClick:()=>openEmail(r.id)},{default:()=>"Review"})},
 ];
@@ -155,6 +161,27 @@ async function generate(initial=false,scope="full"){try{const path=initial?"gene
 async function adopt(){if(!candidate.value)return;try{await request(`/api/email-studio/emails/${selectedId.value}/versions/${candidate.value.id}/adopt`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId})});compareOpen.value=false;candidate.value=null;toast.success("New version adopted");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Could not adopt version")}}
 async function approve(){dialog.warning({title:"Approve this email?",content:"Approval locks the current version. Only Smartlead can mark it sent.",positiveText:"Approve",negativeText:"Cancel",onPositiveClick:async()=>{try{await request(`/api/email-studio/emails/${selectedId.value}/approve`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId})});toast.success("Email approved");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Approval failed")}}})}
 
+async function launchEmailResearch(rowLike: Json) {
+  const workflow = emailResearchWorkflow.value;
+  const contactId = String(rowLike.contact_id ?? "").trim();
+  if (!workflow) {
+    toast.error("No n8n research workflow is available for this project");
+    return;
+  }
+  if (!workflow.configured) {
+    toast.error(`${workflow.label} webhook is not configured`);
+    return;
+  }
+  if (!contactId) {
+    toast.error("This Email Studio record is missing a contact UUID");
+    return;
+  }
+  const launchId = await launch(workflow.key, [contactId], {
+    successMessage: `Launched n8n research for ${String(rowLike.contact_name ?? "this contact")}. Results will appear in a few minutes.`,
+  });
+  if (launchId) await load();
+}
+
 async function startEmailForContact() {
   const contact = selectedPickerContact.value;
   if (!contact?.uuid) return;
@@ -216,7 +243,7 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
     </NTabs>
 
     <NDrawer v-model:show="detailOpen" width="96vw"><NDrawerContent :title="`${detail?.data?.contact_name||'Email'} · step ${detail?.data?.sequence_step||''}`" closable><NSpin :show="detailLoading"><template v-if="detail">
-      <NSpace justify="space-between" align="center"><NSpace><NButton size="small" @click="previousRow">Previous</NButton><NButton size="small" @click="nextRow">Next</NButton><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>
+      <NSpace justify="space-between" align="center"><NSpace><NButton size="small" @click="previousRow">Previous</NButton><NButton size="small" @click="nextRow">Next</NButton><div class="status-cell"><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NButton v-if="detail.data.status==='research_missing'" size="tiny" secondary type="primary" :loading="launchingN8n" :disabled="!emailResearchWorkflow?.configured" @click="launchEmailResearch(detail.data)">Launch n8n</NButton></div><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>
       <div class="workspace">
         <section class="panel research"><h3>Research & instructions</h3><template v-if="researchPoints.length"><div v-for="p in researchPoints" :key="p.id" class="research-point"><NCheckbox :checked="selectedResearch.includes(p.id)" @update:checked="v=>selectedResearch=v?[...selectedResearch,p.id]:selectedResearch.filter(x=>x!==p.id)">{{p.statement}}</NCheckbox><NTag size="tiny" :type="p.kind==='verified'?'info':'warning'">{{p.kind}}</NTag></div></template><NEmpty v-else description="No structured research attached"/><h4>Active instructions</h4><div v-for="i in detail.instructions" :key="i.id" class="instruction"><NTag size="small" type="info">{{i.kind}}</NTag> {{i.title}} v{{i.version}}</div><details v-if="detail.research"><summary>Citations and raw research</summary><pre>{{JSON.stringify(detail.research,null,2)}}</pre></details></section>
         <section class="panel editor"><h3>Email</h3><template v-if="currentVersion"><NFormItem label="Subject"><NInput v-model:value="subject" @update:value="dirty=true"/></NFormItem><NFormItem label="Body"><NInput ref="bodyInput" v-model:value="emailBody" type="textarea" :autosize="{minRows:12,maxRows:24}" @select="captureSelection" @mouseup="captureSelection" @keyup="captureSelection" @update:value="dirty=true"/></NFormItem><NSpace><NButton type="primary" :disabled="!dirty" @click="saveEdits">Save as new version</NButton><NButton @click="generate(false,'full')">Regenerate all</NButton><NButton :disabled="!selectedText.quote" @click="generate(false,'paragraph')">Regenerate paragraph</NButton><NButton :disabled="!selectedText.quote" @click="generate(false,'selection')">Regenerate selection</NButton></NSpace><NInput v-model:value="regenerationPrompt" type="textarea" placeholder="Optional regeneration direction…" :autosize="{minRows:2,maxRows:4}" style="margin-top:10px"/><h4>Annotated preview</h4><div class="annotated"><template v-for="(s,i) in annotatedSegments" :key="i"><span v-if="s.annotation" class="annotated-span" :style="{borderBottomColor:annotationColor(s.annotation),backgroundColor:annotationColor(s.annotation)+'22'}" :title="`${s.annotation.purpose}\n${s.annotation.explanation}\nResearch: ${s.annotation.research_point_ids.join(', ')||'none'}\nRules: ${s.annotation.instruction_ids.join(', ')||'none'}\nConfidence: ${s.annotation.confidence}`">{{s.text}}</span><span v-else>{{s.text}}</span></template></div><div v-if="currentVersion.validation_results?.length"><NAlert v-for="v in currentVersion.validation_results" :key="v.code+v.message" :type="v.severity==='error'?'error':'warning'" :show-icon="false" style="margin-top:6px">{{v.message}}</NAlert></div></template><template v-else><NEmpty description="No draft yet"/><NButton type="primary" style="margin-top:12px" @click="generate(true)">Research and create AI draft</NButton></template></section>
@@ -273,4 +300,4 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
   </div>
 </template>
 
-<style scoped>.email-studio-link{color:#2080f0;text-decoration:none;font-weight:600}.email-studio-link:hover{text-decoration:underline}:deep(.clickable-email-row){cursor:pointer}:deep(.clickable-email-row:hover td){background:rgba(32,128,240,.06)}.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 180px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.instruction{margin:7px 0}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.muted{opacity:.55;font-size:.8em}:deep(.picker-row-selected td){background:rgba(32,128,240,.12)!important}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>
+<style scoped>.email-studio-link{color:#2080f0;text-decoration:none;font-weight:600}.email-studio-link:hover{text-decoration:underline}.status-cell{display:flex;flex-direction:column;align-items:flex-start;gap:6px}:deep(.clickable-email-row){cursor:pointer}:deep(.clickable-email-row:hover td){background:rgba(32,128,240,.06)}.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 180px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.instruction{margin:7px 0}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.muted{opacity:.55;font-size:.8em}:deep(.picker-row-selected td){background:rgba(32,128,240,.12)!important}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>
