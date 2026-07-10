@@ -78,7 +78,12 @@ export async function loadKnowledge(client: SupabaseClient, projectId: string): 
 }
 
 export async function structuredCall<T>(params: { model: string; system: string; user: string; schema: z.ZodType<T>; tools?: unknown[]; trace: Json }): Promise<{ value: T; usage: Json | null; annotations: unknown[] }> {
-  const first = await generateOpenRouterMessage({ model: params.model, systemPrompt: params.system, userPrompt: params.user, temperature: 0.2, tools: params.tools, timeoutMs: 150_000, trace: params.trace });
+  let first = await generateOpenRouterMessage({ model: params.model, systemPrompt: params.system, userPrompt: params.user, temperature: 0.2, maxTokens: 8_000, reasoningEffort: "low", tools: params.tools, timeoutMs: 150_000, trace: params.trace });
+  if (first.error?.includes("empty assistant message")) {
+    // Reasoning models can still burn the whole budget on hidden reasoning even at low effort;
+    // one retry with a much larger budget and no tool calls recovers most of these.
+    first = await generateOpenRouterMessage({ model: params.model, systemPrompt: params.system, userPrompt: params.user, temperature: 0.2, maxTokens: 16_000, reasoningEffort: "low", timeoutMs: 150_000, trace: { ...params.trace, stage: "empty_message_retry" } });
+  }
   if (first.error || !first.data) throw new Error(first.error ?? "Model call failed");
   try { return { value: params.schema.parse(jsonFromText(first.data.text)), usage: first.data.usage, annotations: first.data.annotations }; }
   catch (e) {

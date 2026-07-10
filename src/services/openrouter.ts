@@ -141,6 +141,7 @@ export async function generateOpenRouterMessage(
     userPrompt: string;
     temperature?: number;
     maxTokens?: number;
+    reasoningEffort?: "low" | "medium" | "high";
     user?: string;
     sessionId?: string;
     trace?: Record<string, unknown>;
@@ -171,6 +172,10 @@ export async function generateOpenRouterMessage(
       // trips a 402 pre-flight "insufficient credits" check on a modest balance.
       max_tokens: params.maxTokens ?? 4_096,
       temperature: params.temperature ?? 0.7,
+      // Reasoning models (o-series, gpt-5.x) spend max_tokens on hidden
+      // reasoning before content; an unset effort defaults to "high" on some
+      // models and can consume the whole budget, leaving an empty message.
+      ...(params.reasoningEffort ? { reasoning: { effort: params.reasoningEffort } } : {}),
       ...(cacheControl ? { cache_control: cacheControl } : {}),
       ...(params.user ? { user: params.user } : {}),
       ...(params.sessionId ? { session_id: params.sessionId } : {}),
@@ -201,7 +206,15 @@ export async function generateOpenRouterMessage(
   const firstChoice = Array.isArray(root?.choices) ? asRecord(root.choices[0]) : null;
   const message = asRecord(firstChoice?.message);
   const content = typeof message?.content === "string" ? message.content.trim() : "";
-  if (!content) return { data: null, error: "OpenRouter returned empty assistant message." };
+  if (!content) {
+    const finishReason = typeof firstChoice?.finish_reason === "string" ? firstChoice.finish_reason : "unknown";
+    const usage = asRecord(root?.usage);
+    const reasoningTokens = usage?.completion_tokens_details ? asRecord(usage.completion_tokens_details)?.reasoning_tokens : undefined;
+    return {
+      data: null,
+      error: `OpenRouter returned empty assistant message (finish_reason=${finishReason}${reasoningTokens != null ? `, reasoning_tokens=${reasoningTokens}` : ""}). The model likely spent its token budget on reasoning; retry with a higher max_tokens or lower reasoning effort.`,
+    };
+  }
   return {
     data: {
       text: content,
