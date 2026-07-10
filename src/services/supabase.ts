@@ -5426,6 +5426,7 @@ export type VelvetechExecutionSummaryRow = {
   funnel: Record<string, number>;
   warnings: string[];
   billing: Record<string, unknown> | null;
+  tokens_by_stage: Record<string, number> | null;
   llm_breakdown: VelvetechLlmBreakdown | null;
   row_count: number | null;
 };
@@ -5468,6 +5469,96 @@ function parseLlmBreakdown(raw: unknown): VelvetechLlmBreakdown | null {
   return raw as VelvetechLlmBreakdown;
 }
 
+const VELVETECH_BILLING_WORKFLOW = "velvetech-run-billing";
+
+const VELVETECH_COMPANY_WORKFLOWS = new Set([
+  "velvetech-icp-gate",
+  "velvetech-contact-discovery",
+  "velvetech-company-deep-research",
+  "velvetech-pov",
+]);
+
+const VELVETECH_CONTACT_WORKFLOWS = new Set([
+  "velvetech-contact-enrichment",
+  "velvetech-contact-fit",
+]);
+
+function velvetechWorkflowName(row: N8nWorkflowResultListRow): string {
+  const j = row.result ?? {};
+  return String(j.workflow_name ?? row.workflow ?? "").trim();
+}
+
+function isVelvetechBillingRow(row: N8nWorkflowResultListRow): boolean {
+  return velvetechWorkflowName(row) === VELVETECH_BILLING_WORKFLOW;
+}
+
+function isRunIdArtifactKey(key: string, runId: string): boolean {
+  const k = key.trim().toLowerCase();
+  const r = runId.trim().toLowerCase();
+  if (!k || !r) return false;
+  return k === r || (k.startsWith("vv-") && !k.includes("."));
+}
+
+function mergeVelvetechResultFields(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>
+): void {
+  const skip = new Set(["workflow_name", "persisted_at", "launch_id", "run_id", "project_id"]);
+  for (const [key, val] of Object.entries(source)) {
+    if (skip.has(key)) continue;
+    if (val === undefined || val === null || val === "") continue;
+    target[key] = val;
+  }
+}
+
+function computeVelvetechFunnelFromRows(rows: N8nWorkflowResultListRow[]): Record<string, number> {
+  const funnel: Record<string, number> = {
+    companies_icp: 0,
+    companies_discovery: 0,
+    contacts_enriched: 0,
+    contacts_fit_scored: 0,
+    contacts_high_medium: 0,
+    companies_deep: 0,
+    companies_pov: 0,
+    companies_pov_ok: 0,
+  };
+  for (const row of rows) {
+    if (isVelvetechBillingRow(row)) continue;
+    const j = row.result ?? {};
+    const wf = velvetechWorkflowName(row);
+    if (wf === "velvetech-icp-gate") funnel.companies_icp += 1;
+    else if (wf === "velvetech-contact-discovery") funnel.companies_discovery += 1;
+    else if (wf === "velvetech-contact-enrichment") funnel.contacts_enriched += 1;
+    else if (wf === "velvetech-contact-fit") {
+      funnel.contacts_fit_scored += 1;
+      if (String(j.fit ?? "") === "high" || String(j.fit ?? "") === "medium") {
+        funnel.contacts_high_medium += 1;
+      }
+    } else if (wf === "velvetech-company-deep-research") funnel.companies_deep += 1;
+    else if (wf === "velvetech-pov") {
+      funnel.companies_pov += 1;
+      if (j.pov_ok === true) funnel.companies_pov_ok += 1;
+    }
+  }
+  return funnel;
+}
+
+function funnelLooksEmpty(funnel: Record<string, number>): boolean {
+  return Object.values(funnel).every((v) => !v);
+}
+
+function collectVelvetechFieldKeys(
+  rows: Array<Record<string, unknown>>,
+  priority: string[]
+): string[] {
+  const keys = new Set<string>();
+  for (const row of rows) {
+    for (const key of Object.keys(row)) keys.add(key);
+  }
+  const ordered = [...keys].filter((k) => !priority.includes(k)).sort();
+  return [...priority.filter((k) => keys.has(k)), ...ordered];
+}
+
 function numFromResult(j: Record<string, unknown>, key: string): number | null {
   const v = j[key];
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -5491,6 +5582,16 @@ function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSu
     billingRaw && typeof billingRaw === "object" && !Array.isArray(billingRaw)
       ? (billingRaw as Record<string, unknown>)
       : null;
+  const tokensRaw = j.tokens_by_stage;
+  const tokens_by_stage =
+    tokensRaw && typeof tokensRaw === "object" && !Array.isArray(tokensRaw)
+      ? (tokensRaw as Record<string, number>)
+      : null;
+  const llmRaw = j.llm_breakdown;
+  const llm_breakdown =
+    llmRaw && typeof llmRaw === "object" && !Array.isArray(llmRaw)
+      ? (llmRaw as Record<string, unknown>)
+      : null;
   return {
     id: String(raw.id ?? ""),
     run_id: String(j.run_id ?? j.entity_key ?? ""),
@@ -5502,6 +5603,7 @@ function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSu
     funnel,
     warnings,
     billing,
+    tokens_by_stage,
     llm_breakdown: parseLlmBreakdown(j.llm_breakdown),
     row_count: null,
   };
@@ -5529,10 +5631,10 @@ export async function listVelvetechExecutionSummaries(
 
 export type VelvetechExecutionDetail = {
   summary: VelvetechExecutionSummaryRow | null;
-  stages: Array<{ workflow_name: string; row_count: number }>;
   companies: Array<Record<string, unknown>>;
   contacts: Array<Record<string, unknown>>;
-  rows: N8nWorkflowResultListRow[];
+  company_field_keys: string[];
+  contact_field_keys: string[];
 };
 
 /** Load one Velvetech run by `run_id` or parent `execution_id`. */
@@ -5593,40 +5695,41 @@ export async function getVelvetechExecutionDetail(
     return { data: null, error };
   }
 
-  const stageCounts = new Map<string, number>();
+  const stageRows = rows.filter((row) => !isVelvetechBillingRow(row));
   const companies = new Map<string, Record<string, unknown>>();
   const contacts = new Map<string, Record<string, unknown>>();
 
-  for (const row of rows) {
+  for (const row of stageRows) {
     const j = row.result ?? {};
-    const wf = String(j.workflow_name ?? row.workflow ?? "").trim();
-    if (wf && wf !== "velvetech-run-billing") {
-      stageCounts.set(wf, (stageCounts.get(wf) ?? 0) + 1);
-    }
+    const wf = velvetechWorkflowName(row);
     const ck = String(j.company_key ?? "").trim().toLowerCase();
-    if (ck && !companies.has(ck)) {
-      companies.set(ck, {
-        company_key: ck,
-        company_name: j.company_name ?? ck,
-        fit_score: j.fit_score ?? null,
-        pov_ok: j.pov_ok ?? null,
-      });
-    }
     const ctk = String(j.contact_key ?? "").trim().toLowerCase();
-    if (ctk && !contacts.has(ctk)) {
-      contacts.set(ctk, {
-        contact_key: ctk,
-        company_key: ck || null,
-        fit: j.fit ?? null,
-        verification_status: j.verification_status ?? null,
-        title: j.effective_title ?? j.current_title ?? j.title ?? null,
-      });
+
+    if (ck && !isRunIdArtifactKey(ck, runId) && VELVETECH_COMPANY_WORKFLOWS.has(wf)) {
+      const existing = companies.get(ck) ?? { company_key: ck };
+      mergeVelvetechResultFields(existing, j);
+      companies.set(ck, existing);
+    }
+
+    if (ctk && VELVETECH_CONTACT_WORKFLOWS.has(wf)) {
+      const existing = contacts.get(ctk) ?? { contact_key: ctk, company_key: ck || null };
+      mergeVelvetechResultFields(existing, j);
+      if (ck && !existing.company_key) existing.company_key = ck;
+      contacts.set(ctk, existing);
     }
   }
 
-  const stages = [...stageCounts.entries()]
-    .map(([workflow_name, row_count]) => ({ workflow_name, row_count }))
-    .sort((a, b) => a.workflow_name.localeCompare(b.workflow_name));
+  const companyList = [...companies.values()].sort((a, b) =>
+    String(a.company_key ?? "").localeCompare(String(b.company_key ?? ""))
+  );
+  const contactList = [...contacts.values()].sort((a, b) =>
+    String(a.contact_key ?? "").localeCompare(String(b.contact_key ?? ""))
+  );
+
+  const companyFieldKeys = collectVelvetechFieldKeys(companyList, ["company_key", "company_name"]);
+  const contactFieldKeys = collectVelvetechFieldKeys(contactList, ["contact_key", "company_key"]);
+
+  const computedFunnel = computeVelvetechFunnelFromRows(rows);
 
   if (!summary && rows.length > 0) {
     const first = rows[0];
@@ -5640,24 +5743,24 @@ export async function getVelvetechExecutionDetail(
       status: "legacy",
       duration_sec: null,
       cost_usd: null,
-      funnel: {
-        companies_pov: companies.size,
-        contacts_fit_scored: contacts.size,
-      },
+      funnel: computedFunnel,
       warnings: ["no_billing_row"],
       billing: null,
+      tokens_by_stage: null,
       llm_breakdown: null,
-      row_count: rows.length,
+      row_count: stageRows.length,
     };
+  } else if (summary && funnelLooksEmpty(summary.funnel)) {
+    summary = { ...summary, funnel: computedFunnel };
   }
 
   return {
     data: {
       summary,
-      stages,
-      companies: [...companies.values()],
-      contacts: [...contacts.values()],
-      rows,
+      companies: companyList,
+      contacts: contactList,
+      company_field_keys: companyFieldKeys,
+      contact_field_keys: contactFieldKeys,
     },
     error: null,
   };

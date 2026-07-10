@@ -218,17 +218,40 @@ type ExecutionSummary = {
   cost_usd: number | null;
   funnel: Record<string, number>;
   warnings: string[];
-  llm_breakdown?: LlmBreakdown | null;
-  billing?: Record<string, unknown> | null;
+  billing: Record<string, unknown> | null;
+  tokens_by_stage: Record<string, number> | null;
+  llm_breakdown: LlmBreakdown | null;
 };
 
 type ExecutionDetail = {
   summary: ExecutionSummary | null;
-  stages: Array<{ workflow_name: string; row_count: number }>;
   companies: Array<Record<string, unknown>>;
   contacts: Array<Record<string, unknown>>;
-  rows: N8nWorkflowResultRow[];
+  company_field_keys: string[];
+  contact_field_keys: string[];
 };
+
+const FUNNEL_LABELS: Record<string, string> = {
+  companies_icp: "ICP passed",
+  companies_discovery: "Contact discovery",
+  contacts_enriched: "Contacts enriched",
+  contacts_fit_scored: "Fit scored",
+  contacts_high_medium: "High / medium fit",
+  companies_deep: "Deep research",
+  companies_pov: "POV generated",
+  companies_pov_ok: "POV OK",
+};
+
+const FUNNEL_ORDER = [
+  "companies_icp",
+  "companies_discovery",
+  "contacts_enriched",
+  "contacts_fit_scored",
+  "contacts_high_medium",
+  "companies_deep",
+  "companies_pov",
+  "companies_pov_ok",
+];
 
 const pageMode = computed(() => {
   const view = String(route.query.view ?? "");
@@ -336,10 +359,6 @@ function formatDuration(sec: number | null | undefined): string {
 
 const llmBreakdown = computed(() => detail.value?.summary?.llm_breakdown ?? null);
 const llmChartMode = ref<"usd" | "tokens">("usd");
-const openrouterWalletUsd = computed(() => {
-  const billing = detail.value?.summary?.billing as { openrouter?: { usd_spent?: number | null } } | null | undefined;
-  return billing?.openrouter?.usd_spent ?? detail.value?.summary?.cost_usd ?? null;
-});
 
 const llmStageChartRows = computed(() =>
   bucketEntries(llmBreakdown.value?.by_stage).map(({ key, bucket }) => ({
@@ -407,6 +426,55 @@ const llmLineItemColumns: DataTableColumns<LlmLineItem> = [
     render: (row) => `$${row.usd_estimated.toFixed(4)}`,
   },
 ];
+
+function formatCellValue(value: unknown): string {
+  if (value == null) return "—";
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (typeof value === "number") return Number.isFinite(value) ? String(value) : "—";
+  if (typeof value === "string") return value.trim() || "—";
+  if (Array.isArray(value)) {
+    if (value.length === 0) return "—";
+    if (value.every((v) => typeof v === "string")) return value.join(", ");
+    return JSON.stringify(value);
+  }
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function buildEntityColumns(
+  fieldKeys: string[],
+  onOpenJson: (row: Record<string, unknown>) => void
+): DataTableColumns<Record<string, unknown>> {
+  const cols: DataTableColumns<Record<string, unknown>> = fieldKeys.map((key) => ({
+    title: key,
+    key,
+    minWidth: key.length > 16 ? 180 : 120,
+    ellipsis: { tooltip: true },
+    render(row) {
+      return formatCellValue(row[key]);
+    },
+  }));
+  cols.push({
+    title: "JSON",
+    key: "_json",
+    width: 72,
+    fixed: "right",
+    render(row) {
+      return h(
+        NButton,
+        { size: "tiny", quaternary: true, onClick: () => onOpenJson(row) },
+        { default: () => "JSON" }
+      );
+    },
+  });
+  return cols;
+}
+
+function openEntityDetail(row: Record<string, unknown>, label: string) {
+  drawerTitle.value = label;
+  drawerJson.value = JSON.stringify(row, null, 2);
+  drawerOpen.value = true;
+}
 
 const execColumns: DataTableColumns<ExecutionSummary> = [
   {
@@ -848,63 +916,74 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
   return [...head, ...agentCols, ...tail];
 });
 
-const stageDetailColumns: DataTableColumns<{ workflow_name: string; row_count: number }> = [
-  { title: "Stage", key: "workflow_name" },
-  { title: "Rows", key: "row_count", width: 80 },
-];
+const companyDetailColumns = computed(() =>
+  buildEntityColumns(detail.value?.company_field_keys ?? [], (row) =>
+    openEntityDetail(row, String(row.company_key ?? row.company_name ?? "company"))
+  )
+);
 
-const companyDetailColumns: DataTableColumns<Record<string, unknown>> = [
-  { title: "Domain", key: "company_key" },
-  { title: "Name", key: "company_name" },
-  {
-    title: "POV ok",
-    key: "pov_ok",
-    width: 80,
-    render(row) {
-      return String(row.pov_ok ?? "—");
-    },
-  },
-];
+const contactDetailColumns = computed(() =>
+  buildEntityColumns(detail.value?.contact_field_keys ?? [], (row) =>
+    openEntityDetail(row, String(row.contact_key ?? "contact"))
+  )
+);
 
-const contactDetailColumns: DataTableColumns<Record<string, unknown>> = [
-  { title: "Key", key: "contact_key" },
-  { title: "Fit", key: "fit", width: 80 },
-  { title: "Verification", key: "verification_status", width: 120 },
-  { title: "Title", key: "title", ellipsis: { tooltip: true } },
-];
+const detailFunnelEntries = computed(() => {
+  const funnel = detail.value?.summary?.funnel ?? {};
+  return FUNNEL_ORDER.filter((k) => funnel[k] != null).map((k) => ({
+    key: k,
+    label: FUNNEL_LABELS[k] ?? k,
+    value: funnel[k],
+  }));
+});
 
-const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => [
-  {
-    title: "Stage",
-    key: "workflow",
-    render(row) {
-      return String((row.result?.workflow_name as string) ?? row.workflow ?? "—");
+const detailBillingMetrics = computed(() => {
+  const s = detail.value?.summary;
+  if (!s) return [];
+  const b = s.billing ?? {};
+  const or = (b.openrouter as Record<string, unknown> | undefined) ?? {};
+  const pr = (b.prospeo as Record<string, unknown> | undefined) ?? {};
+  const cs = (b.coresignal as Record<string, unknown> | undefined) ?? {};
+  const pa = (b.parallel as Record<string, unknown> | undefined) ?? {};
+  const tokenEst = or.usd_estimated_from_tokens;
+  const orSpent = or.usd_spent;
+  const metrics: Array<{ label: string; value: string }> = [
+    { label: "Total cost", value: formatUsd(s.cost_usd) },
+    {
+      label: "OpenRouter spent",
+      value: orSpent == null ? "n/a (backfill)" : formatUsd(Number(orSpent)),
     },
-  },
-  {
-    title: "Entity",
-    key: "entity",
-    render(row) {
-      return String(row.result?.contact_key ?? row.result?.company_key ?? row.result?.entity_key ?? "—");
+    {
+      label: "OpenRouter balance",
+      value:
+        or.balance_remaining == null ? "—" : `$${Number(or.balance_remaining).toFixed(2)}`,
     },
-  },
-  {
-    title: "Created",
-    key: "created_at",
-    width: 168,
-    render(row) {
-      return new Date(row.created_at).toLocaleString();
+    {
+      label: "Token estimate",
+      value: tokenEst == null ? "—" : formatUsd(Number(tokenEst)),
     },
-  },
-  {
-    title: "JSON",
-    key: "json",
-    width: 72,
-    render(row) {
-      return h(NButton, { size: "tiny", quaternary: true, onClick: () => openRowDetail(row) }, { default: () => "JSON" });
+    { label: "LLM calls", value: or.llm_calls == null ? "—" : String(or.llm_calls) },
+    {
+      label: "Parallel (Exa) est.",
+      value: pa.usd_estimated == null ? "—" : formatUsd(Number(pa.usd_estimated)),
     },
-  },
-]);
+    {
+      label: "Prospeo pages",
+      value: pr.search_pages_n8n == null ? "—" : String(pr.search_pages_n8n),
+    },
+    {
+      label: "CoreSignal credits est.",
+      value: cs.credits_estimated == null ? "—" : String(cs.credits_estimated),
+    },
+  ];
+  if (s.tokens_by_stage && Object.keys(s.tokens_by_stage).length) {
+    const parts = Object.entries(s.tokens_by_stage)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([stage, tok]) => `${stage}: ${Number(tok).toLocaleString()}`);
+    metrics.push({ label: "Tokens by stage", value: parts.join(" · ") });
+  }
+  return metrics;
+});
 </script>
 
 <template>
@@ -959,7 +1038,15 @@ const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => 
       <NButton size="small" quaternary @click="backToExecutions">← Back to executions</NButton>
       <NAlert v-if="detailError" type="error">{{ detailError }}</NAlert>
       <NAlert v-if="detail?.summary?.warnings?.includes('no_billing_row')" type="warning">
-        No billing row yet for this run — showing stage rows only. Re-run with <code>--billing</code> on future batches.
+        No billing row yet for this run — funnel counts are computed from stage rows. Re-run with
+        <code>--billing</code> on future batches for cost snapshots.
+      </NAlert>
+      <NAlert
+        v-if="detail?.summary?.warnings?.some((w) => w.startsWith('funnel_fetch_failed'))"
+        type="warning"
+      >
+        Billing funnel fetch failed during post-run — pipeline funnel below is computed from persisted
+        stage rows.
       </NAlert>
       <template v-if="detail?.summary">
         <NSpace wrap>
@@ -971,10 +1058,19 @@ const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => 
           <NTag>{{ formatDuration(detail.summary.duration_sec) }}</NTag>
           <NTag type="warning">{{ formatUsd(detail.summary.cost_usd) }}</NTag>
         </NSpace>
-        <div v-if="detail.summary.funnel && Object.keys(detail.summary.funnel).length" class="funnel-grid">
-          <div v-for="(v, k) in detail.summary.funnel" :key="String(k)" class="funnel-cell">
-            <div class="funnel-label">{{ k }}</div>
-            <div class="funnel-value">{{ v }}</div>
+        <div v-if="detailBillingMetrics.length" class="funnel-grid">
+          <div v-for="m in detailBillingMetrics" :key="m.label" class="funnel-cell">
+            <div class="funnel-label">{{ m.label }}</div>
+            <div class="funnel-value metric-value">{{ m.value }}</div>
+          </div>
+        </div>
+        <div v-if="detailFunnelEntries.length" class="funnel-section">
+          <h4 class="section-title">Pipeline funnel</h4>
+          <div class="funnel-grid">
+            <div v-for="entry in detailFunnelEntries" :key="entry.key" class="funnel-cell">
+              <div class="funnel-label">{{ entry.label }}</div>
+              <div class="funnel-value">{{ entry.value }}</div>
+            </div>
           </div>
         </div>
       </template>
@@ -983,8 +1079,6 @@ const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => 
           <div class="billing-section-header">
             <h4 class="section-title">LLM cost breakdown</h4>
             <NSpace wrap size="small">
-              <NTag type="warning">wallet {{ formatUsd(openrouterWalletUsd) }}</NTag>
-              <NTag>token est {{ formatUsd(llmBreakdown.usd_estimated_total ?? null) }}</NTag>
               <NButton
                 size="tiny"
                 :type="llmChartMode === 'usd' ? 'primary' : 'default'"
@@ -1032,38 +1126,33 @@ const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => 
       <NAlert v-else-if="detail?.summary && !detail.summary.warnings?.includes('no_billing_row')" type="info">
         No LLM breakdown on this billing row — re-run with <code>--billing</code> or backfill after updating the billing script.
       </NAlert>
-      <template v-if="detail?.stages?.length">
-        <h4 class="section-title">Stages</h4>
-        <NDataTable :columns="stageDetailColumns" :data="detail.stages" size="small" :bordered="false" />
-      </template>
       <template v-if="detail?.companies?.length">
         <h4 class="section-title">Companies ({{ detail.companies.length }})</h4>
+        <p class="muted">Merged fields from ICP, discovery, deep research, and POV stages.</p>
         <NDataTable
           :columns="companyDetailColumns"
           :data="detail.companies"
+          :loading="detailLoading"
           size="small"
-          :max-height="240"
+          :scroll-x="Math.min(4800, 400 + (detail.company_field_keys?.length ?? 0) * 150)"
+          :max-height="360"
         />
       </template>
       <template v-if="detail?.contacts?.length">
         <h4 class="section-title">Contacts ({{ detail.contacts.length }})</h4>
+        <p class="muted">Merged fields from enrichment and fit stages.</p>
         <NDataTable
           :columns="contactDetailColumns"
           :data="detail.contacts"
-          size="small"
-          :max-height="320"
-        />
-      </template>
-      <template v-if="detail?.rows?.length">
-        <h4 class="section-title">All stage rows ({{ detail.rows.length }})</h4>
-        <NDataTable
-          :columns="detailRowColumns"
-          :data="detail.rows"
           :loading="detailLoading"
           size="small"
-          :max-height="400"
+          :scroll-x="Math.min(5600, 400 + (detail.contact_field_keys?.length ?? 0) * 150)"
+          :max-height="480"
         />
       </template>
+      <NAlert v-else-if="detail && !detailLoading && !detail.contacts?.length" type="info">
+        No contact rows found for this run.
+      </NAlert>
     </NSpace>
 
     <NSpace v-else vertical size="medium" style="width: 100%">
@@ -1200,6 +1289,13 @@ const detailRowColumns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => 
 .funnel-value {
   font-size: 1.1rem;
   font-weight: 600;
+}
+.metric-value {
+  font-size: 0.95rem;
+  font-weight: 500;
+}
+.funnel-section {
+  margin-top: 0.5rem;
 }
 .section-title {
   margin: 0.75rem 0 0.25rem;
