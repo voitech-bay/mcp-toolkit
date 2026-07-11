@@ -5,8 +5,8 @@
   "type": "module",
   "main": "dist/server.js",
   "scripts": {
-    "build": "tsc && cd frontend && npm ci && npm run build",
-    "build:backend": "tsc",
+    "build": "npm run build:backend && cd frontend && npm ci && npm run build",
+    "build:backend": "tsc && node -e \"const fs=require('fs');const p='dist/services/velvetech-messaging/_generated';fs.mkdirSync(p,{recursive:true});for (const f of fs.readdirSync('src/services/velvetech-messaging/_generated')) fs.copyFileSync('src/services/velvetech-messaging/_generated/'+f,p+'/'+f);\"",
     "build:worker": "tsc -p tsconfig.worker.json",
     "build:worker:clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.worker.json",
     "build:frontend": "cd frontend && npm run build",
