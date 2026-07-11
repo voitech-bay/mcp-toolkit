@@ -184,6 +184,7 @@ import {
   handleEmailStudioStatus,
   handleEmailStudioVersions,
   handleSmartleadEmailEvent,
+  handleEmailStudioIngestFromN8n,
 } from "./email-studio-handlers.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
@@ -399,6 +400,7 @@ const server = createServer(async (req, res) => {
     if (emailStudioEmailMatch) { if (req.method === "GET") await handleEmailStudioGet(req, res, emailStudioEmailMatch[1]); else { res.writeHead(405); res.end(); } return; }
     if (emailStudioCommentReplyMatch) { if (req.method === "POST") await handleEmailStudioReply(req, res, emailStudioCommentReplyMatch[1]); else { res.writeHead(405); res.end(); } return; }
     if (emailStudioCommentMatch) { if (req.method === "PATCH") await handleEmailStudioPatchComment(req, res, emailStudioCommentMatch[1]); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/email-studio/ingest-from-n8n") { if (req.method === "POST") await handleEmailStudioIngestFromN8n(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/outreach-agent/runs") {
       if (req.method === "POST") await handleCreateOutreachRun(req, res);

@@ -16,7 +16,7 @@ const N8N_BASE = (process.env.N8N_BASE_URL?.trim() || "https://primary-productio
 export const FEASIBLE_PROJECT_ID = "94dc3b92-1cae-4360-a958-917a58063309";
 export const VELVETECH_PROJECT_ID = "51cc22a1-868e-42c4-974f-9a7c5f5dce20";
 
-export type WorkflowLaunchAdapter = "feasible_list" | "velvetech_research" | "velvetech_reply";
+export type WorkflowLaunchAdapter = "feasible_list" | "velvetech_research" | "velvetech_reply" | "velvetech_messaging";
 
 export interface WorkflowRegistryEntry {
   /** Stable key used in API bodies and the launch record. */
@@ -59,6 +59,22 @@ export const WORKFLOW_REGISTRY: WorkflowRegistryEntry[] = [
     workflowId: "bMc92zIIWe0wGAbE",
     project: VELVETECH_PROJECT_ID,
     adapter: "velvetech_reply",
+  },
+  {
+    key: "velvetech_messaging",
+    label: "Velvetech — Proactive sequence",
+    webhookUrlEnv: "N8N_VELVETECH_MESSAGING_WEBHOOK_URL",
+    workflowId: "velvetech-messaging",
+    project: VELVETECH_PROJECT_ID,
+    adapter: "velvetech_messaging",
+  },
+  {
+    key: "velvetech_full",
+    label: "Velvetech — Full pipeline + messaging",
+    webhookUrlEnv: "N8N_VELVETECH_FULL_WEBHOOK_URL",
+    workflowId: "velvetech-full",
+    project: VELVETECH_PROJECT_ID,
+    adapter: "velvetech_research",
   },
 ];
 
@@ -153,6 +169,8 @@ export function resolveWebhookUrl(wf: WorkflowRegistryEntry): string {
   if (wf.key === "feasible_direct_pov") return `${N8N_BASE}/webhook/feasible-pipeline-trigger`;
   if (wf.key === "velvetech_research") return `${N8N_BASE}/webhook/velvetech-research-trigger`;
   if (wf.key === "velvetech_reply") return `${N8N_BASE}/webhook/velvetech-reply-trigger`;
+  if (wf.key === "velvetech_messaging") return `${N8N_BASE}/webhook/velvetech-messaging-trigger`;
+  if (wf.key === "velvetech_full") return `${N8N_BASE}/webhook/velvetech-full-trigger`;
   return "";
 }
 

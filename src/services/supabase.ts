@@ -5441,9 +5441,12 @@ export type VelvetechExecutionSummaryRow = {
 export type VelvetechLlmBucket = {
   calls: number;
   prompt_tokens: number;
+  cached_tokens?: number;
+  cache_write_tokens?: number;
   completion_tokens: number;
   total_tokens: number;
   usd_estimated: number;
+  usd_estimated_naive?: number;
 };
 
 export type VelvetechLlmLineItem = {
@@ -5456,13 +5459,21 @@ export type VelvetechLlmLineItem = {
   contact_key?: string;
   child_execution_id?: string;
   prompt_tokens: number;
+  cached_tokens?: number;
+  cache_write_tokens?: number;
+  cached_tokens_source?: string;
   completion_tokens: number;
   total_tokens: number;
   usd_estimated: number;
+  usd_estimated_naive?: number;
 };
 
 export type VelvetechLlmBreakdown = {
   usd_estimated_total?: number;
+  usd_estimated_naive_total?: number;
+  cache_savings_usd?: number;
+  cached_tokens_total?: number;
+  cache_tokens_source?: string;
   by_stage?: Record<string, VelvetechLlmBucket>;
   by_stage_model?: Record<string, Record<string, VelvetechLlmBucket>>;
   by_model?: Record<string, VelvetechLlmBucket>;

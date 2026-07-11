@@ -1864,6 +1864,7 @@ export async function handlePostGenerateMessage(
         .slice(0, 8)
     : [];
   const prompt = buildGeneratedMessagePrompt({
+    projectId,
     tone,
     goal,
     ctaStyle,

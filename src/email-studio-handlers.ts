@@ -1,7 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CONTACTS_TABLE, N8N_WORKFLOW_RESULTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
 import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
-import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, reanchorQuote, stableResearchPoints, validateDraft, type EmailStatus } from "./services/email-studio.js";
+import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, reanchorQuote, stableResearchPoints, validateDraft, validateDraftForProject, type EmailStatus } from "./services/email-studio.js";
+import { buildVelvetechSystemPrompt } from "./services/velvetech-messaging/prompt.js";
+import { isVelvetechProjectId } from "./services/velvetech-messaging/types.js";
 
 type Json = Record<string, unknown>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -198,7 +200,8 @@ export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerR
     campaign_id: String(b.campaignId ?? ""),
     batch_name: String(b.batchName ?? ""),
     persona: String(b.persona ?? ""),
-    sequence_step: Math.max(1, Number(b.sequenceStep ?? 1)),
+    channel: ["email", "linkedin_dm", "inmail", "reply"].includes(String(b.channel ?? "email")) ? String(b.channel ?? "email") : "email",
+    sequence_step: Math.max(0, Number(b.sequenceStep ?? 1)),
     recipient_email: b.recipientEmail ? String(b.recipientEmail).trim().toLowerCase() : contact.work_email,
     assigned_reviewer_id: b.assignedReviewerId ? String(b.assignedReviewerId) : null,
     provenance: String(b.provenance ?? "voitech_generated"),
@@ -206,7 +209,7 @@ export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerR
     research_quality: b.researchSnapshotId ? "unknown" : "missing",
     research_snapshot_id: validProject(b.researchSnapshotId) ? b.researchSnapshotId : null,
   };
-  const r = await client.from("outreach_emails").upsert(row, { onConflict: "project_id,contact_id,campaign_id,batch_name,sequence_step", ignoreDuplicates: false }).select("*").single();
+  const r = await client.from("outreach_emails").upsert(row, { onConflict: "project_id,contact_id,campaign_id,batch_name,channel,sequence_step", ignoreDuplicates: false }).select("*").single();
   if (r.error) return send(res, 500, { error: r.error.message });
   await client.from("outreach_email_status_events").insert({ email_id: r.data.id, from_status: null, to_status: r.data.status, actor_type: "user", actor_id: actor(req), reason: "Email Studio record created" });
   return send(res, 201, { data: r.data });
@@ -245,15 +248,21 @@ export async function handleEmailStudioStatus(req: IncomingMessage, res: ServerR
 
 async function generateDraft(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, prompt: string, previous?: Json, comments: Json[] = [], includedResearchPointIds: string[] = []) {
   const settings = await client.from("project_outreach_settings").select("*").eq("project_id", email.project_id).maybeSingle(); if (settings.error || !settings.data?.enabled) throw new Error("Outreach Agent is not enabled for this project");
-  const model = String(settings.data.default_model ?? "openai/gpt-5.2"); const context = await assembleOutreachContext(client, String(email.contact_id), Number(settings.data.contact_message_limit ?? 100), Number(settings.data.company_message_limit ?? 100));
+  const velvetech = isVelvetechProjectId(email.project_id);
+  const model = String(settings.data.default_model ?? (velvetech ? "openai/gpt-5.5" : "openai/gpt-5.2")); const context = await assembleOutreachContext(client, String(email.contact_id), Number(settings.data.contact_message_limit ?? 100), Number(settings.data.company_message_limit ?? 100));
   const researchResult = email.research_snapshot_id ? await client.from("outreach_research_snapshots").select("*").eq("id", email.research_snapshot_id).single() : null;
   const research = researchResult?.data ?? (await getOrCreateResearch(client, { projectId: String(email.project_id), contactId: String(email.contact_id), companyId: email.company_id ? String(email.company_id) : null, model, ttlDays: Number(settings.data.research_ttl_days ?? 30), context, force: false })).snapshot;
   const knowledge = await loadKnowledge(client, String(email.project_id)); const points = stableResearchPoints(research as Json); const allowed = includedResearchPointIds.length ? points.filter((p) => includedResearchPointIds.includes(String(p.id))) : points;
+  const channel = String(email.channel ?? "email");
+  const sequenceStep = Number(email.sequence_step ?? 1);
+  const systemPrompt = velvetech
+    ? buildVelvetechSystemPrompt(channel === "inmail" ? "inmail" : channel === "linkedin_dm" ? "linkedin_dm" : "email", sequenceStep, String(email.persona ?? ""), "standard")
+    : "Write one research-based cold email. Return JSON only matching the supplied schema. Annotations use zero-based offsets into body only and exact text. Use concise user-facing audit explanations, never hidden chain-of-thought. Verified claims must reference supplied research IDs. Follow active project knowledge. Do not send or schedule anything.";
   const call = await structuredCall({ model, schema: EmailDraftSchema, trace: { feature: "email-studio", stage: previous ? "regenerate" : "generate", project_id: email.project_id, contact_id: email.contact_id },
-    system: "Write one research-based cold email. Return JSON only matching the supplied schema. Annotations use zero-based offsets into body only and exact text. Use concise user-facing audit explanations, never hidden chain-of-thought. Verified claims must reference supplied research IDs. Follow active project knowledge. Do not send or schedule anything.",
+    system: systemPrompt,
     user: JSON.stringify({ task: prompt, recipient_context: context, research_points: allowed, active_knowledge: knowledge.documents, previous_version: previous ?? null, unresolved_comments: comments.map((c) => ({ id: c.id, selected_quote: c.selected_quote, body: c.body })), required_comment_ids: comments.map((c) => c.id), sequence_step: email.sequence_step }) });
-  call.value.annotations = normalizeAnnotationRanges(call.value.body, call.value.annotations); const validation = validateDraft(call.value.subject, call.value.body, call.value.annotations, new Set(allowed.map((x) => String(x.id))), new Set(knowledge.documents.map((x) => String(x.id)))); if (validation.some((x) => x.severity === "error")) throw new Error(`Generated draft failed validation: ${validation.filter((x) => x.severity === "error").map((x) => x.message).join("; ")}`);
-  return { draft: call.value, validation, model, knowledgeManifest: knowledge.manifest, research };
+  call.value.annotations = normalizeAnnotationRanges(call.value.body, call.value.annotations); const validation = validateDraftForProject(String(email.project_id), channel, sequenceStep, call.value.subject, call.value.body, call.value.annotations, new Set(allowed.map((x) => String(x.id))), new Set(knowledge.documents.map((x) => String(x.id)))); if (validation.some((x) => x.severity === "error")) throw new Error(`Generated draft failed validation: ${validation.filter((x) => x.severity === "error").map((x) => x.message).join("; ")}`);
+  return { draft: call.value, validation, model, knowledgeManifest: knowledge.manifest, research, usage: call.usage };
 }
 
 async function insertVersion(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, values: Json, makeCurrent: boolean) {
@@ -267,13 +276,13 @@ async function insertVersion(client: NonNullable<ReturnType<typeof getSupabase>>
 
 export async function handleEmailStudioGenerate(req: IncomingMessage, res: ServerResponse, id: string) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" });
-  try { const result = await generateDraft(client, email, String(b.prompt ?? "Create a concise, research-led cold email."), undefined, [], Array.isArray(b.includedResearchPointIds) ? b.includedResearchPointIds.map(String) : []); const version = await insertVersion(client, email, { subject: result.draft.subject, body: result.draft.body, author_type: "ai", author_id: "email-studio-agent", model: result.model, knowledge_manifest: result.knowledgeManifest, annotations: result.draft.annotations, validation_results: result.validation, generation_reason: "initial_generation" }, true); const updated = await statusChange(client, email, "ai_draft_made", "agent", "email-studio-agent", "Initial email generated"); await client.from("outreach_emails").update({ research_snapshot_id: (result.research as Json).id, research_quality: (result.research as Json).partial ? "partial" : "verified" }).eq("id", id); return send(res, 201, { data: updated, version }); } catch (e) { try { await statusChange(client, email, "generation_failed", "agent", "email-studio-agent", e instanceof Error ? e.message : "Generation failed"); } catch {} return send(res, 500, { error: e instanceof Error ? e.message : "Generation failed" }); }
+  try { const result = await generateDraft(client, email, String(b.prompt ?? "Create a concise, research-led cold email."), undefined, [], Array.isArray(b.includedResearchPointIds) ? b.includedResearchPointIds.map(String) : []); const version = await insertVersion(client, email, { subject: result.draft.subject, body: result.draft.body, author_type: "ai", author_id: "email-studio-agent", model: result.model, knowledge_manifest: result.knowledgeManifest, annotations: result.draft.annotations, validation_results: result.validation, generation_reason: "initial_generation", prompt_manifest: { usage: result.usage } }, true); const updated = await statusChange(client, email, "ai_draft_made", "agent", "email-studio-agent", "Initial email generated"); await client.from("outreach_emails").update({ research_snapshot_id: (result.research as Json).id, research_quality: (result.research as Json).partial ? "partial" : "verified" }).eq("id", id); return send(res, 201, { data: updated, version }); } catch (e) { try { await statusChange(client, email, "generation_failed", "agent", "email-studio-agent", e instanceof Error ? e.message : "Generation failed"); } catch {} return send(res, 500, { error: e instanceof Error ? e.message : "Generation failed" }); }
 }
 
 export async function handleEmailStudioRegenerate(req: IncomingMessage, res: ServerResponse, id: string) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" });
   const current = await client.from("outreach_email_versions").select("*").eq("id", email.current_version_id).single(); const comments = await client.from("outreach_email_comments").select("*").eq("email_id", id).eq("status", "open");
-  try { const scope = String(b.scope ?? "full"); const selectionDirective = scope === "full" ? "" : ` Preserve all content outside this exact ${scope}: ${JSON.stringify(b.selection ?? null)}.`; const result = await generateDraft(client, email, `${String(b.prompt ?? `Regenerate the ${scope} email and address every unresolved comment.`)}${selectionDirective}`, current.data as Json, (comments.data ?? []) as Json[], Array.isArray(b.includedResearchPointIds) ? b.includedResearchPointIds.map(String) : []); const version = await insertVersion(client, email, { subject: result.draft.subject, body: result.draft.body, author_type: "ai", author_id: "email-studio-agent", model: result.model, knowledge_manifest: result.knowledgeManifest, prompt_manifest: { scope, selection: b.selection ?? null }, annotations: result.draft.annotations, validation_results: result.validation, generation_reason: `feedback_${scope}` }, false);
+  try { const scope = String(b.scope ?? "full"); const selectionDirective = scope === "full" ? "" : ` Preserve all content outside this exact ${scope}: ${JSON.stringify(b.selection ?? null)}.`; const result = await generateDraft(client, email, `${String(b.prompt ?? `Regenerate the ${scope} email and address every unresolved comment.`)}${selectionDirective}`, current.data as Json, (comments.data ?? []) as Json[], Array.isArray(b.includedResearchPointIds) ? b.includedResearchPointIds.map(String) : []); const version = await insertVersion(client, email, { subject: result.draft.subject, body: result.draft.body, author_type: "ai", author_id: "email-studio-agent", model: result.model, knowledge_manifest: result.knowledgeManifest, prompt_manifest: { scope, selection: b.selection ?? null, usage: result.usage }, annotations: result.draft.annotations, validation_results: result.validation, generation_reason: `feedback_${scope}` }, false);
     const returnedResolutions = result.draft.feedback_resolutions ?? []; const resolutions = new Map(returnedResolutions.map((x) => [x.comment_id, x])); for (const c of (comments.data ?? []) as Json[]) { const rr = resolutions.get(String(c.id)) ?? { outcome: "not_followed", explanation: "The model did not return a resolution for this comment." }; await client.from("outreach_email_feedback_resolutions").upsert({ email_id: id, version_id: version.id, comment_id: c.id, outcome: rr.outcome, explanation: rr.explanation }, { onConflict: "version_id,comment_id" }); }
     await statusChange(client, email, "regenerated", "agent", "email-studio-agent", "Feedback regeneration candidate created"); return send(res, 201, { version, resolutions: returnedResolutions });
   } catch (e) { return send(res, 500, { error: e instanceof Error ? e.message : "Regeneration failed" }); }
@@ -314,6 +323,101 @@ export async function handleEmailStudioApprove(req: IncomingMessage, res: Server
 }
 
 export async function handleEmailStudioVersions(req: IncomingMessage, res: ServerResponse, id: string) { const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const projectId = url(req).searchParams.get("projectId") ?? ""; const email = await getScopedEmail(client, id, projectId); if (!email) return send(res, 404, { error: "Email not found" }); const r = await client.from("outreach_email_versions").select("*").eq("email_id", id).order("version_number", { ascending: false }); return send(res, r.error ? 500 : 200, r.error ? { error: r.error.message } : { data: r.data }); }
+
+type IngestTouch = { step?: unknown; subject?: unknown; body?: unknown; message?: unknown };
+
+export async function handleEmailStudioIngestFromN8n(req: IncomingMessage, res: ServerResponse) {
+  const client = getSupabase();
+  if (!client) return send(res, 500, { error: "Supabase not configured" });
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const b = await body(req);
+  const projectId = str(b.projectId);
+  const contactId = str(b.contactId);
+  const batchName = str(b.batchName) || str(b.launchId);
+  const persona = str(b.persona) || "ops";
+  const sequenceMode = str(b.sequenceMode) === "cfo" ? "cfo" : "standard";
+  if (!validProject(projectId) || !validProject(contactId)) return send(res, 400, { error: "projectId and contactId are required UUIDs" });
+  const enabled = await client.from("project_outreach_settings").select("email_studio_enabled").eq("project_id", projectId).maybeSingle();
+  if (!enabled.data?.email_studio_enabled) return send(res, 403, { error: "Email Studio is not enabled for this project" });
+
+  const contactRow = await client.from(CONTACTS_TABLE).select("uuid, name, first_name, last_name, company_name, company_uuid, work_email").eq("project_id", projectId).eq("uuid", contactId).maybeSingle();
+  if (contactRow.error) return send(res, 500, { error: contactRow.error.message });
+  if (!contactRow.data) return send(res, 404, { error: "Contact not found in this project" });
+  const contact = contactSummary(contactRow.data as Record<string, unknown>);
+
+  const critique = b.critique && typeof b.critique === "object" ? (b.critique as Json) : {};
+  const pass = critique.pass === true;
+  const status: EmailStatus = pass ? "needs_review" : "generation_failed";
+  const campaignId = str(b.campaignId) || "velvetech-proactive";
+  const rows: Array<{ channel: string; sequence_step: number; subject: string; body: string }> = [];
+
+  for (const touch of (Array.isArray(b.emailSequence) ? b.emailSequence : []) as IngestTouch[]) {
+    const step = Math.max(1, Number(touch.step ?? rows.length + 1));
+    rows.push({ channel: "email", sequence_step: step, subject: str(touch.subject), body: str(touch.body) });
+  }
+  for (const touch of (Array.isArray(b.linkedinSequence) ? b.linkedinSequence : []) as IngestTouch[]) {
+    const step = Math.max(1, Number(touch.step ?? 1));
+    rows.push({ channel: "linkedin_dm", sequence_step: step, subject: "", body: str(touch.message) || str(touch.body) });
+  }
+  const inmail = b.inmailFallback && typeof b.inmailFallback === "object" ? (b.inmailFallback as Json) : null;
+  if (inmail) {
+    rows.push({ channel: "inmail", sequence_step: 0, subject: str(inmail.subject), body: str(inmail.body) });
+  }
+  if (rows.length === 0) return send(res, 400, { error: "No sequence rows to ingest" });
+
+  const ingested: Json[] = [];
+  for (const row of rows) {
+    const validation = validateDraftForProject(projectId, row.channel, row.sequence_step, row.subject, row.body, [], undefined, undefined, sequenceMode);
+    const upsert = await client.from("outreach_emails").upsert({
+      project_id: projectId,
+      contact_id: contact.uuid,
+      contact_name: contact.name,
+      company_name: contact.company_name,
+      company_id: contact.company_uuid,
+      campaign_id: campaignId,
+      batch_name: batchName,
+      persona,
+      channel: row.channel,
+      sequence_step: row.sequence_step,
+      recipient_email: contact.work_email,
+      current_subject: row.subject,
+      current_body: row.body,
+      provenance: "voitech_generated",
+      status,
+      research_quality: "verified",
+    }, { onConflict: "project_id,contact_id,campaign_id,batch_name,channel,sequence_step", ignoreDuplicates: false }).select("*").single();
+    if (upsert.error) return send(res, 500, { error: upsert.error.message, channel: row.channel, step: row.sequence_step });
+    const email = upsert.data as Json;
+    const version = await insertVersion(client, email, {
+      subject: row.subject,
+      body: row.body,
+      author_type: "ai",
+      author_id: "n8n-messaging-agent",
+      model: "openai/gpt-5.5",
+      annotations: [],
+      validation_results: validation,
+      generation_reason: "n8n_messaging_ingest",
+      prompt_manifest: {
+        launchId: str(b.launchId),
+        sequenceMode,
+        tacticsUsed: b.tacticsUsed ?? [],
+        critique,
+        n8nResultId: b.n8nResultId ?? null,
+      },
+    }, true);
+    await client.from("outreach_email_status_events").insert({
+      email_id: email.id,
+      from_status: null,
+      to_status: status,
+      actor_type: "agent",
+      actor_id: "n8n-messaging-agent",
+      reason: pass ? "n8n messaging ingest" : "n8n messaging ingest with critique failures",
+      idempotency_key: `n8n-ingest:${batchName}:${contact.uuid}:${row.channel}:${row.sequence_step}`,
+    });
+    ingested.push({ email, version });
+  }
+  return send(res, 201, { data: ingested, count: ingested.length, pass });
+}
 
 export async function handleSmartleadEmailEvent(req: IncomingMessage, res: ServerResponse) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const eventId = String(b.event_id ?? b.eventId ?? ""), eventType = String(b.event_type ?? b.eventType ?? "").toLowerCase(); if (!eventId || !eventType) return send(res, 400, { error: "event_id and event_type are required" });

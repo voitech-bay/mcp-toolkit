@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { isVelvetechProjectId } from "./velvetech-messaging/types.js";
+import { validateVelvetechDraft } from "./velvetech-messaging/validate.js";
 
 export const EMAIL_STATUSES = [
   "research_ready", "ai_draft_made", "needs_review", "comments_made", "regenerated",
@@ -70,6 +72,30 @@ export function validateDraft(subject: string, body: string, annotations: Array<
     if (allowedInstructionIds && a.instruction_ids.some((id) => !allowedInstructionIds.has(id))) results.push({ code: "unknown_instruction", severity: "error", message: `Annotation ${a.id} references an unknown instruction.` });
   }
   return results;
+}
+
+export function validateDraftForProject(
+  projectId: string,
+  channel: string,
+  sequenceStep: number | null,
+  subject: string,
+  body: string,
+  annotations: Array<Omit<z.infer<typeof EmailAnnotationSchema>, "warnings"> & { warnings?: string[] }>,
+  allowedResearchIds?: Set<string>,
+  allowedInstructionIds?: Set<string>,
+  sequenceMode: import("./velvetech-messaging/types.js").VelvetechSequenceMode = "standard",
+) {
+  const generic = validateDraft(subject, body, annotations, allowedResearchIds, allowedInstructionIds);
+  if (!isVelvetechProjectId(projectId)) return generic;
+  const mappedChannel = channel === "linkedin_dm" ? "linkedin_dm" : channel === "inmail" ? "inmail" : "email";
+  return [
+    ...generic,
+    ...validateVelvetechDraft(mappedChannel, subject, body, { sequenceStep, sequenceMode }).map((r) => ({
+      code: `velvetech_${r.code}`,
+      severity: r.severity,
+      message: r.message,
+    })),
+  ];
 }
 
 export function normalizeAnnotationRanges<T extends { text: string; start: number; end: number }>(body: string, annotations: T[]): T[] {

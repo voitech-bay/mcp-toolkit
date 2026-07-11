@@ -161,6 +161,26 @@ async function latestVelvetechPov(client: NonNullable<ReturnType<typeof getSupab
   return result && typeof result === "object" && !Array.isArray(result) ? (result as Json) : null;
 }
 
+async function latestVelvetechWorkflowResult(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  workflowName: string,
+  entityKey: string
+): Promise<Json | null> {
+  if (!entityKey) return null;
+  const freshCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const { data } = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("result,created_at")
+    .eq("workflow_name", workflowName)
+    .eq("result->>entity_key", entityKey)
+    .gte("created_at", freshCutoff)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const result = data && typeof data === "object" ? (data as Json).result : null;
+  return result && typeof result === "object" && !Array.isArray(result) ? (result as Json) : null;
+}
+
 async function buildVelvetechResearchPayload(
   client: NonNullable<ReturnType<typeof getSupabase>>,
   args: { projectId: string; launchId: string; leadUuids: string[] }
@@ -266,6 +286,69 @@ async function buildVelvetechReplyPayloads(
   return { ok: true, payloads };
 }
 
+async function buildVelvetechMessagingPayloads(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  args: { projectId: string; launchId: string; leadUuids: string[] }
+): Promise<{ ok: true; payloads: Json[] } | { ok: false; status: number; error: string }> {
+  const { contacts, error } = await getContactsByUuidsForProject(client, args.projectId, args.leadUuids);
+  if (error) return { ok: false, status: 500, error };
+  const contactRows = args.leadUuids.map((uuid) => contacts[uuid]).filter((row): row is Json => !!row);
+  const missing = args.leadUuids.length - contactRows.length;
+  if (missing > 0) return { ok: false, status: 400, error: `${missing} selected lead(s) are not synced in Contacts` };
+
+  const companyIds = contactRows.map((c) => str(c, "company_uuid")).filter(Boolean);
+  const companiesRes = await getCompaniesByIdsForProject(client, args.projectId, companyIds);
+  if (companiesRes.error) return { ok: false, status: 500, error: companiesRes.error };
+
+  const payloads: Json[] = [];
+  const missingResearch: string[] = [];
+  for (const c of contactRows) {
+    const leadUuid = str(c, "uuid");
+    const companyId = str(c, "company_uuid");
+    const co = companiesRes.companies[companyId] as Json | undefined;
+    const domain = domainFrom(strAny(co, "domain")) || emailDomain(str(c, "work_email"));
+    if (!domain) {
+      missingResearch.push(`${contactName(c) || leadUuid}: no company domain`);
+      continue;
+    }
+    const pov = await latestVelvetechWorkflowResult(client, "velvetech-pov", domain);
+    const deep = await latestVelvetechWorkflowResult(client, "velvetech-company-deep-research", domain);
+    if (!pov || !deep) {
+      missingResearch.push(`${contactName(c) || leadUuid}: missing ${[!pov ? "POV" : "", !deep ? "deep research" : ""].filter(Boolean).join(" and ")}`);
+      continue;
+    }
+    payloads.push({
+      run_id: `${args.launchId}-${leadUuid.slice(0, 8)}`,
+      launch_id: args.launchId,
+      project_id: args.projectId,
+      batch_name: args.launchId,
+      company_domain: domain,
+      company_key: domain,
+      company_name: strAny(co, "name") || str(c, "company_name") || domain,
+      company_uuid: companyId,
+      pov,
+      deep_research: deep,
+      contact_fit: {},
+      lead: {
+        lead_uuid: leadUuid,
+        contact_id: leadUuid,
+        company_uuid: companyId,
+        name: contactName(c),
+        first_name: firstName(c),
+        title: str(c, "position"),
+        linkedin: str(c, "linkedin"),
+        email: str(c, "work_email"),
+      },
+      prior_account_messaging: [],
+      sequence_mode: "standard",
+    });
+  }
+  if (missingResearch.length > 0) {
+    return { ok: false, status: 409, error: `Fresh Velvetech research required before messaging: ${missingResearch.join("; ")}` };
+  }
+  return { ok: true, payloads };
+}
+
 // --- GET /api/n8n/workflows --------------------------------------------------
 export async function handleN8nWorkflows(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
@@ -346,7 +429,22 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
       return sendJson(res, built.status, { error: built.error, launchId });
     }
     trig = await triggerWorkflowPayload(workflowKey, built.payload);
-  } else {
+  } else if (wf.adapter === "velvetech_messaging") {
+    const built = await buildVelvetechMessagingPayloads(client, { projectId, launchId, leadUuids });
+    if (!built.ok) {
+      await client
+        .from(LAUNCH_RUNS_TABLE)
+        .update({ status: "failed", error_message: built.error, finished_at: new Date().toISOString() })
+        .eq("id", launchId);
+      return sendJson(res, built.status, { error: built.error, launchId });
+    }
+    let failed: string | null = null;
+    for (const payload of built.payloads) {
+      const one = await triggerWorkflowPayload(workflowKey, payload);
+      if (!one.ok) failed = one.error ?? "Trigger failed";
+    }
+    trig = failed ? { ok: false, status: 502, error: failed } : { ok: true, status: 200 };
+  } else if (wf.adapter === "velvetech_reply") {
     const built = await buildVelvetechReplyPayloads(client, { projectId, launchId, leadUuids });
     if (!built.ok) {
       await client
@@ -361,6 +459,12 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
       if (!one.ok) failed = one.error ?? "Trigger failed";
     }
     trig = failed ? { ok: false, status: 502, error: failed } : { ok: true, status: 200 };
+  } else {
+    await client
+      .from(LAUNCH_RUNS_TABLE)
+      .update({ status: "failed", error_message: `Unsupported adapter: ${wf.adapter}`, finished_at: new Date().toISOString() })
+      .eq("id", launchId);
+    return sendJson(res, 500, { error: `Unsupported adapter: ${wf.adapter}`, launchId });
   }
   if (!trig.ok) {
     await client

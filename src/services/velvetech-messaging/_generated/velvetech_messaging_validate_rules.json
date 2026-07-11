@@ -1,0 +1,58 @@
+{
+  "channels": {
+    "email": {
+      "hard_bans": [
+        "em_dash",
+        "en_dash",
+        "hyphen_joined_words",
+        "contrast_tail"
+      ],
+      "subject_max_chars": 50,
+      "word_cap_cfo": 80,
+      "word_cap_standard": 60
+    },
+    "inmail": {
+      "hard_bans": [
+        "em_dash",
+        "en_dash",
+        "hyphen_joined_words",
+        "contrast_tail"
+      ],
+      "subject_max_chars": 50,
+      "subject_required": true,
+      "word_cap_hard": 100,
+      "word_cap_target": 60
+    },
+    "linkedin_dm": {
+      "hard_bans": [
+        "em_dash",
+        "en_dash",
+        "hyphen_joined_words",
+        "contrast_tail"
+      ],
+      "subject_required": false,
+      "word_cap": 130
+    },
+    "reply": {
+      "hard_bans": [
+        "em_dash",
+        "en_dash",
+        "hyphen_joined_words",
+        "contrast_tail"
+      ],
+      "word_cap": 130
+    }
+  },
+  "framework": "velvetech-messaging",
+  "output_contract": {
+    "email_sequence": 3,
+    "inmail_fallback": 1,
+    "linkedin_sequence": 3,
+    "sequence_mode": "standard|cfo",
+    "tactics_used": "optional"
+  },
+  "sequence_modes": [
+    "standard",
+    "cfo"
+  ]
+}

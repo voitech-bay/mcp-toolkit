@@ -1,3 +1,6 @@
+import { buildVelvetechSystemPrompt } from "./velvetech-messaging/prompt.js";
+import { isVelvetechProjectId } from "./velvetech-messaging/types.js";
+
 export type GenerationTone =
   | "professional"
   | "friendly"
@@ -64,6 +67,7 @@ export type PromptInput = {
   mentionBlocks: MentionBlock[];
   additionalInstructions?: string;
   messageExamples?: string[];
+  projectId?: string;
   contact: Record<string, unknown>;
   company: Record<string, unknown> | null;
   messages: Array<Record<string, unknown>>;
@@ -318,7 +322,15 @@ export function buildGeneratedMessagePrompt(input: PromptInput): {
   const hasMessageExamples = messageExamples.length > 0;
   const topSignals = gatherTopSignals(input, mentionBlocks);
   const objective = `${input.goal}/${input.ctaType}/${input.ctaStyle}`;
-  const systemPrompt = [
+  const systemPrompt = isVelvetechProjectId(input.projectId)
+    ? [
+        buildVelvetechSystemPrompt("reply"),
+        `Conversation objective: ${objective}. Continue the actual thread; do not restart a proactive cadence. Hard constraints: questions<=${input.questionCountMax}; paragraphs=${input.format.paragraphs}; sentences~${input.format.sentences}.`,
+        methodologyInstruction(input.methodology),
+        ctaTypeInstruction(input.ctaType),
+        "Return final message text only.",
+      ].join(" ")
+    : [
     "YOU ARE OUTBOUND GTM MESSAGE MANAGER for generating high-converting outbound messages.",
     "You write high-converting LinkedIn reply drafts.",
     "Primary objective: maximize likelihood of a positive reply while staying factual and specific.",

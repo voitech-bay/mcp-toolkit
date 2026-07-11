@@ -3,6 +3,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { z } from "zod";
 import { generateOpenRouterMessage } from "./openrouter.js";
 import { CONTACTS_TABLE, COMPANIES_TABLE, LINKEDIN_MESSAGES_TABLE, N8N_WORKFLOW_RESULTS_TABLE } from "./supabase.js";
+import { buildVelvetechSystemPrompt } from "./velvetech-messaging/prompt.js";
+import { isVelvetechProjectId } from "./velvetech-messaging/types.js";
+import { validateVelvetechDraft } from "./velvetech-messaging/validate.js";
 
 type Json = Record<string, unknown>;
 export type OutreachChannel = "inmail" | "message" | "email";
@@ -139,10 +142,21 @@ export function validateVariant(channel: OutreachChannel, v: { subject: string |
 }
 
 export async function generateVariants(args: { model: string; projectId: string; contactId: string; channel: OutreachChannel; prompt: string; pov: OutreachPov; context: OutreachContext; knowledge: Json[] }): Promise<{ variants: Array<{ subject: string | null; body: string; rationale: string; warnings: string[] }>; usage: Json | null }> {
+  const velvetech = isVelvetechProjectId(args.projectId);
   const channelRules = args.channel === "inmail" ? "Each variant needs a concise subject and body. Subject <=200 chars; body <=1900 chars." : args.channel === "email" ? "Each variant needs a concise subject and cold-email body with no more than one CTA/question." : "Each variant has subject:null. Continue the existing conversation naturally; never reset it, repeat prior outreach, or use more than one CTA/question.";
+  const system = velvetech
+    ? `${buildVelvetechSystemPrompt(args.channel === "message" ? "linkedin_dm" : args.channel, null, null, "standard")}\n\nWrite exactly three genuinely distinct variants from the supplied POV. Return JSON only: {"variants":[{"subject":string|null,"body":string,"rationale":string}, ... exactly 3]}.`
+    : `Write exactly three genuinely distinct outreach variants from the supplied POV. ${channelRules} No placeholders. No unsupported facts or product claims. Return JSON only: {"variants":[{"subject":string|null,"body":string,"rationale":string}, ... exactly 3]}. ACTIVE KNOWLEDGE:\n${knowledgeBlock(args.knowledge)}`;
   const call = await structuredCall({ model: args.model,
-    system: `Write exactly three genuinely distinct outreach variants from the supplied POV. ${channelRules} No placeholders. No unsupported facts or product claims. Return JSON only: {"variants":[{"subject":string|null,"body":string,"rationale":string}, ... exactly 3]}. ACTIVE KNOWLEDGE:\n${knowledgeBlock(args.knowledge)}`,
-    user: `USER PROMPT: ${args.prompt}\nPOV: ${JSON.stringify(args.pov)}\nTARGET CONVERSATION: ${JSON.stringify(args.context.target_messages)}`,
+    system,
+    user: `USER PROMPT: ${args.prompt}\nPOV: ${JSON.stringify(args.pov)}\nTARGET CONVERSATION: ${JSON.stringify(args.context.target_messages)}\nACTIVE KNOWLEDGE: ${JSON.stringify(args.knowledge)}`,
     schema: VariantsSchema, trace: { feature: "outreach-agent", stage: "variants", project_id: args.projectId, contact_id: args.contactId } });
-  return { variants: call.value.variants.map((v) => ({ ...v, subject: args.channel === "message" ? null : v.subject, warnings: validateVariant(args.channel, { ...v, subject: args.channel === "message" ? null : v.subject }) })), usage: call.usage };
+  return { variants: call.value.variants.map((v) => {
+    const subject = args.channel === "message" ? null : v.subject;
+    const warnings = validateVariant(args.channel, { ...v, subject });
+    if (velvetech) {
+      warnings.push(...validateVelvetechDraft(args.channel === "message" ? "linkedin_dm" : args.channel, subject, v.body).map((r) => r.message));
+    }
+    return { ...v, subject, warnings };
+  }), usage: call.usage };
 }

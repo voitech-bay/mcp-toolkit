@@ -380,7 +380,9 @@ async function launch(): Promise<void> {
   const successMessage =
     adapter === "velvetech_reply"
       ? `Draft reply started for ${leadUuids.length} contact${leadUuids.length === 1 ? "" : "s"}. Review in Email Studio → LinkedIn.`
-      : undefined;
+      : adapter === "velvetech_messaging"
+        ? `Proactive sequence started for ${leadUuids.length} contact${leadUuids.length === 1 ? "" : "s"}. Results will ingest into Email Studio when n8n completes.`
+        : undefined;
 
   const launchId = await launchWorkflow(selectedWorkflow.value, leadUuids, {
     sourceListUuid: targetMode.value === "list" ? selectedList.value : null,
@@ -438,10 +440,7 @@ async function loadHistory(): Promise<void> {
 }
 
 function viewLaunchResults(launchId: string): void {
-  const filters = encodeURIComponent(
-    JSON.stringify([{ field: "launch_id", op: "eq", value: launchId }])
-  );
-  router.push({ path: "/n8n/workflow-results", query: { filters } });
+  router.push({ path: "/n8n/workflow-results", query: { runId: launchId } });
 }
 
 const contactColumns = computed<DataTableColumns<ContactRow>>(() => [
