@@ -219,6 +219,53 @@ async function buildVelvetechResearchPayload(
   };
 }
 
+/**
+ * Feasible's pipeline webhook accepts an inline `leads` array (skipping the
+ * GetSales-list-fetch branch entirely when non-empty — see "IF Feasible inline
+ * leads" / "Feasible Prepare Contacts" nodes in workflow PqAsnwNHiezGsMTw).
+ * Row shape matches buildVelvetechResearchPayload's (uuid/company_uuid/domain/
+ * company_name/first_name/last_name/position/linkedin_url), so bare contact
+ * UUIDs can be launched the same way Velvetech's research pipeline is.
+ */
+async function buildFeasibleDirectLeadsPayload(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  args: { projectId: string; launchId: string; leadUuids: string[] }
+): Promise<{ ok: true; payload: Json } | { ok: false; status: number; error: string }> {
+  const { contacts, error } = await getContactsByUuidsForProject(client, args.projectId, args.leadUuids);
+  if (error) return { ok: false, status: 500, error };
+  const contactRows = args.leadUuids.map((uuid) => contacts[uuid]).filter((row): row is Json => !!row);
+  const missing = args.leadUuids.length - contactRows.length;
+  if (missing > 0) return { ok: false, status: 400, error: `${missing} selected lead(s) are not synced in Contacts` };
+
+  const companyIds = contactRows.map((c) => str(c, "company_uuid")).filter(Boolean);
+  const companiesRes = await getCompaniesByIdsForProject(client, args.projectId, companyIds);
+  if (companiesRes.error) return { ok: false, status: 500, error: companiesRes.error };
+
+  const leads = contactRows.map((c) => {
+    const companyId = str(c, "company_uuid");
+    const co = companiesRes.companies[companyId] as Json | undefined;
+    const domain = domainFrom(strAny(co, "domain")) || emailDomain(str(c, "work_email"));
+    return {
+      uuid: str(c, "uuid"),
+      lead_uuid: str(c, "uuid"),
+      company_uuid: companyId,
+      domain,
+      company_name: strAny(co, "name") || str(c, "company_name") || domain,
+      first_name: str(c, "first_name"),
+      last_name: str(c, "last_name"),
+      full_name: contactName(c),
+      position: str(c, "position"),
+      linkedin_url: str(c, "linkedin"),
+      email: str(c, "work_email"),
+    };
+  }).filter((r) => r.domain);
+  if (leads.length === 0) return { ok: false, status: 400, error: "Selected leads have no company domain or work email domain" };
+  return {
+    ok: true,
+    payload: { launch_id: args.launchId, project_id: args.projectId, list_uuid: "", max_companies: 0, leads },
+  };
+}
+
 async function buildVelvetechReplyPayloads(
   client: NonNullable<ReturnType<typeof getSupabase>>,
   args: { projectId: string; launchId: string; leadUuids: string[] }
@@ -382,9 +429,6 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
   }
   const projectId = wf.project;
   const sourceListUuid = str(body, "sourceListUuid") || null;
-  if (wf.adapter === "feasible_list" && !sourceListUuid) {
-    return sendJson(res, 400, { error: "sourceListUuid is required" });
-  }
   const leadUuids = Array.isArray(body.leadUuids)
     ? [...new Set(body.leadUuids.map((u) => String(u).trim()).filter(Boolean))]
     : [];
@@ -417,8 +461,21 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
   const launchId = String((inserted as Json).id);
 
   let trig: { ok: boolean; status: number; error?: string };
-  if (wf.adapter === "feasible_list") {
+  if (wf.adapter === "feasible_list" && sourceListUuid) {
     trig = await triggerWorkflowByUuids(workflowKey, { leadUuids, projectId, launchId, sourceListUuid });
+  } else if (wf.adapter === "feasible_list") {
+    // No list selected: launch by bare contact UUID(s), same UX as Velvetech's
+    // research pipeline. The workflow accepts inline `leads` and skips its
+    // GetSales-list-fetch branch entirely (see buildFeasibleDirectLeadsPayload).
+    const built = await buildFeasibleDirectLeadsPayload(client, { projectId, launchId, leadUuids });
+    if (!built.ok) {
+      await client
+        .from(LAUNCH_RUNS_TABLE)
+        .update({ status: "failed", error_message: built.error, finished_at: new Date().toISOString() })
+        .eq("id", launchId);
+      return sendJson(res, built.status, { error: built.error, launchId });
+    }
+    trig = await triggerWorkflowPayload(workflowKey, built.payload);
   } else if (wf.adapter === "velvetech_research") {
     const built = await buildVelvetechResearchPayload(client, { projectId, launchId, leadUuids });
     if (!built.ok) {

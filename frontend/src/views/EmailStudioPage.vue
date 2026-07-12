@@ -43,6 +43,7 @@ const lastGenerationFailure = computed(() => {
 const canStartEmail = computed(() => !!selectedPickerContact.value && !pickerLoading.value && !actionLoading.value);
 const emailResearchWorkflow = computed<LaunchableWorkflow | undefined>(() =>
   workflows.value.find((w) => w.adapter === "velvetech_research")
+  ?? workflows.value.find((w) => w.adapter === "feasible_list")
   ?? workflows.value.find((w) => /research/i.test(`${w.key} ${w.label}`) && w.adapter !== "velvetech_reply")
 );
 
