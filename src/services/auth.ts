@@ -3,9 +3,11 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { VELVETECH_PROJECT_ID } from "./n8n-trigger.js";
 
 export type AuthRole = "workspace" | "velvetech";
+export type AuthLogin = "workspace" | "paul" | "velvetech";
 
 export type AuthSession = {
   role: AuthRole;
+  login: AuthLogin;
   name: string;
   projectId: string | null;
   exp: number;
@@ -27,6 +29,7 @@ export function assertAuthConfigured(): void {
   const missing = [
     ["VOITECH_AUTH_SESSION_SECRET", process.env.VOITECH_AUTH_SESSION_SECRET],
     ["VOITECH_WORKSPACE_PASSWORD", process.env.VOITECH_WORKSPACE_PASSWORD],
+    ["VOITECH_PAUL_PASSWORD", process.env.VOITECH_PAUL_PASSWORD],
     ["VOITECH_VELVETECH_PASSWORD", process.env.VOITECH_VELVETECH_PASSWORD],
   ].filter(([, value]) => !String(value ?? "").trim()).map(([key]) => key);
   if (missing.length) throw new Error(`Auth is enabled but missing: ${missing.join(", ")}`);
@@ -51,10 +54,22 @@ function parseCookies(req: IncomingMessage): Record<string, string> {
   return out;
 }
 
-export function createSessionCookie(role: AuthRole): string {
+function accountName(login: AuthLogin): string {
+  if (login === "workspace") return "Voitech workspace";
+  if (login === "paul") return "Paul (Voitech)";
+  return "Velvetech";
+}
+
+function accountRole(login: AuthLogin): AuthRole {
+  return login === "workspace" ? "workspace" : "velvetech";
+}
+
+export function createSessionCookie(login: AuthLogin): string {
+  const role = accountRole(login);
   const session: AuthSession = {
     role,
-    name: role === "workspace" ? "Voitech workspace" : "Velvetech",
+    login,
+    name: accountName(login),
     projectId: role === "velvetech" ? VELVETECH_PROJECT_ID : null,
     exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
   };
@@ -72,7 +87,7 @@ export function sessionCookieHeader(token: string): string {
 
 export function getAuthSession(req: IncomingMessage): AuthSession | null {
   if (!authEnabled()) {
-    return { role: "workspace", name: "Voitech workspace", projectId: null, exp: Number.MAX_SAFE_INTEGER };
+    return { role: "workspace", login: "workspace", name: "Voitech workspace", projectId: null, exp: Number.MAX_SAFE_INTEGER };
   }
   const token = parseCookies(req)[COOKIE_NAME];
   if (!token) return null;
@@ -85,23 +100,27 @@ export function getAuthSession(req: IncomingMessage): AuthSession | null {
     const parsed = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as AuthSession;
     if (parsed.exp < Math.floor(Date.now() / 1000)) return null;
     if (parsed.role !== "workspace" && parsed.role !== "velvetech") return null;
-    return parsed;
+    const login = parsed.login === "paul" || parsed.login === "velvetech" || parsed.login === "workspace"
+      ? parsed.login
+      : parsed.role === "workspace" ? "workspace" : "velvetech";
+    return { ...parsed, login, name: parsed.name || accountName(login) };
   } catch {
     return null;
   }
 }
 
-export function loginRoleForCredentials(login: string, password: string): AuthRole | null {
+export function loginRoleForCredentials(login: string, password: string): AuthLogin | null {
   const normalized = login.trim().toLowerCase();
   const expected =
     normalized === "workspace" ? process.env.VOITECH_WORKSPACE_PASSWORD :
+    normalized === "paul" ? process.env.VOITECH_PAUL_PASSWORD :
     normalized === "velvetech" ? process.env.VOITECH_VELVETECH_PASSWORD :
     null;
   if (!expected) return null;
   const a = Buffer.from(password);
   const b = Buffer.from(expected);
   if (a.length !== b.length) return null;
-  return crypto.timingSafeEqual(a, b) ? normalized as AuthRole : null;
+  return crypto.timingSafeEqual(a, b) ? normalized as AuthLogin : null;
 }
 
 export function isPublicAuthPath(pathname: string): boolean {

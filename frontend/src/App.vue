@@ -47,7 +47,13 @@ import {
 import { useProjectStore } from "./stores/project";
 import { VELVETECH_PROJECT_ID, isFeasibleProjectId } from "./project-ids";
 
-type AuthSession = { role: "workspace" | "velvetech"; name: string; projectId: string | null; exp: number };
+type AuthSession = {
+  role: "workspace" | "velvetech";
+  login: "workspace" | "paul" | "velvetech";
+  name: string;
+  projectId: string | null;
+  exp: number;
+};
 type AppUser = { id: string; name: string; color: string };
 const USER_STORAGE_KEY = "voitech.selectedUserId";
 const selectedUserId = ref<string | null>(localStorage.getItem(USER_STORAGE_KEY));
@@ -661,6 +667,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   v-model:value="loginForm.login"
                   :options="[
                     { label: 'Voitech workspace', value: 'workspace' },
+                    { label: 'Paul (Velvetech access)', value: 'paul' },
                     { label: 'Velvetech', value: 'velvetech' },
                   ]"
                   size="large"
