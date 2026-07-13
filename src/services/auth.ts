@@ -77,6 +77,11 @@ export function createSessionCookie(login: AuthLogin): string {
   return `${payload}.${sign(payload)}`;
 }
 
+export function projectAllowedForLogin(login: AuthLogin, projectId: string): boolean {
+  if (login === "workspace") return true;
+  return projectId === VELVETECH_PROJECT_ID;
+}
+
 export function clearSessionCookieHeader(): string {
   return `${COOKIE_NAME}=; HttpOnly; SameSite=Lax; Secure; Path=/; Max-Age=0`;
 }
@@ -124,7 +129,7 @@ export function loginRoleForCredentials(login: string, password: string): AuthLo
 }
 
 export function isPublicAuthPath(pathname: string): boolean {
-  return pathname === "/api/auth/login" || pathname === "/api/auth/session" || pathname === "/api/auth/logout";
+  return pathname === "/api/auth/login" || pathname === "/api/auth/session" || pathname === "/api/auth/logout" || pathname === "/api/auth/projects";
 }
 
 export function isVelvetechAllowedApiPath(pathname: string): boolean {

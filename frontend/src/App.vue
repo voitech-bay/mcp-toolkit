@@ -55,6 +55,7 @@ type AuthSession = {
   exp: number;
 };
 type AppUser = { id: string; name: string; color: string };
+type LoginProject = { id: string; name: string; description: string | null };
 const USER_STORAGE_KEY = "voitech.selectedUserId";
 const selectedUserId = ref<string | null>(localStorage.getItem(USER_STORAGE_KEY));
 const users = ref<AppUser[]>([]);
@@ -89,7 +90,9 @@ const route = useRoute();
 const router = useRouter();
 const authLoading = ref(true);
 const authSession = ref<AuthSession | null>(null);
-const loginForm = ref({ login: "workspace", password: "" });
+const authProjects = ref<LoginProject[]>([]);
+const authProjectsLoading = ref(false);
+const loginForm = ref({ projectId: VELVETECH_PROJECT_ID, login: "", password: "" });
 const loginLoading = ref(false);
 const loginError = ref("");
 const isVelvetechLogin = computed(() => authSession.value?.role === "velvetech");
@@ -308,6 +311,10 @@ const projectOptions = computed<SelectOption[]>(() =>
   projectStore.projects.map((p) => ({ label: p.name, value: p.id }))
 );
 
+const authProjectOptions = computed<SelectOption[]>(() =>
+  authProjects.value.map((p) => ({ label: p.name, value: p.id }))
+);
+
 const userOptions = computed<SelectOption[]>(() =>
   users.value.map((u) => ({ label: u.name, value: u.id }))
 );
@@ -407,25 +414,45 @@ function toggleTheme() {
   isDark.value = !isDark.value;
 }
 
-async function loadAppData() {
+async function loadAppData(preferredProjectId?: string | null) {
   await projectStore.loadProjects();
   if (isVelvetechLogin.value) {
     projectStore.selectProject(VELVETECH_PROJECT_ID);
     if (!VELVETECH_PATHS.includes(route.path as typeof VELVETECH_PATHS[number])) {
       await router.replace("/velvetech/research-launch");
     }
+  } else if (preferredProjectId && projectStore.projects.some((p) => p.id === preferredProjectId)) {
+    projectStore.selectProject(preferredProjectId);
   }
   await loadUsers();
 }
 
-async function loadAuthSession() {
+async function loadAuthProjects() {
+  authProjectsLoading.value = true;
+  try {
+    const r = await fetch("/api/auth/projects");
+    const j = (await r.json()) as { data?: LoginProject[] };
+    authProjects.value = Array.isArray(j.data) ? j.data : [];
+    if (!loginForm.value.projectId && authProjects.value.length > 0) {
+      loginForm.value.projectId = authProjects.value.find((p) => p.id === VELVETECH_PROJECT_ID)?.id ?? authProjects.value[0].id;
+    }
+  } catch {
+    authProjects.value = [];
+  } finally {
+    authProjectsLoading.value = false;
+  }
+}
+
+async function loadAuthSession(preferredProjectId?: string | null) {
   try {
     const r = await fetch("/api/auth/session");
     const j = (await r.json()) as { authenticated?: boolean; session?: AuthSession | null };
     authSession.value = j.authenticated && j.session ? j.session : null;
-    if (authSession.value) await loadAppData();
+    if (authSession.value) await loadAppData(preferredProjectId);
+    else await loadAuthProjects();
   } catch {
     authSession.value = null;
+    await loadAuthProjects();
   } finally {
     authLoading.value = false;
   }
@@ -445,7 +472,7 @@ async function submitLogin() {
       loginError.value = j.error ?? "Invalid login";
       return;
     }
-    await loadAuthSession();
+    await loadAuthSession(loginForm.value.projectId);
   } catch {
     loginError.value = "Login failed";
   } finally {
@@ -457,7 +484,9 @@ async function logout() {
   await fetch("/api/auth/logout", { method: "POST" });
   authSession.value = null;
   projectStore.selectProject(null);
+  loginForm.value.login = "";
   loginForm.value.password = "";
+  await loadAuthProjects();
 }
 
 void loadAuthSession();
@@ -683,13 +712,19 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
             <form @submit.prevent="submitLogin">
               <NSpace vertical size="medium">
                 <NSelect
-                  v-model:value="loginForm.login"
-                  :options="[
-                    { label: 'Voitech workspace', value: 'workspace' },
-                    { label: 'Paul (Velvetech access)', value: 'paul' },
-                    { label: 'Velvetech', value: 'velvetech' },
-                  ]"
+                  v-model:value="loginForm.projectId"
+                  :options="authProjectOptions"
+                  :loading="authProjectsLoading"
+                  placeholder="Project"
                   size="large"
+                />
+                <NInput
+                  v-model:value="loginForm.login"
+                  type="text"
+                  size="large"
+                  placeholder="Login"
+                  autocapitalize="off"
+                  autocomplete="username"
                 />
                 <NInput
                   v-model:value="loginForm.password"
@@ -697,6 +732,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   size="large"
                   placeholder="Password"
                   show-password-on="click"
+                  autocomplete="current-password"
                 />
                 <NAlert v-if="loginError" type="error" :show-icon="false">{{ loginError }}</NAlert>
                 <NButton type="primary" attr-type="submit" block size="large" :loading="loginLoading">
@@ -717,7 +753,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                 <RocketIcon :size="14" style="margin-right: 4px" />
                 Velvetech
               </NButton>
-              <NSelect v-model:value="selectedUserId" :options="userOptions" :loading="usersLoading"
+              <NSelect v-if="!isVelvetechLogin" v-model:value="selectedUserId" :options="userOptions" :loading="usersLoading"
                 :render-label="renderUserLabel" placeholder="User…" clearable size="small"
                 style="width: 150px" />
               <template v-if="selectedProjectId && !isVelvetechLogin">

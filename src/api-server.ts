@@ -151,7 +151,7 @@ import {
 import { handleLeadViewsItems, handleLeadViewsDecide } from "./lead-views-handlers.js";
 import { handleMessageLog } from "./message-log-handlers.js";
 import { handleUsers } from "./users-handlers.js";
-import { handleAuthLogin, handleAuthLogout, handleAuthSession } from "./auth-handlers.js";
+import { handleAuthLogin, handleAuthLogout, handleAuthProjects, handleAuthSession } from "./auth-handlers.js";
 import {
   handleVelvetechResearchCsvLaunch,
   handleVelvetechResearchCsvPreview,
@@ -413,6 +413,7 @@ const server = createServer(async (req, res) => {
 
   try {
     if (pathname === "/api/auth/session") { await handleAuthSession(req, res); return; }
+    if (pathname === "/api/auth/projects") { await handleAuthProjects(req, res); return; }
     if (pathname === "/api/auth/login") { await handleAuthLogin(req, res); return; }
     if (pathname === "/api/auth/logout") { await handleAuthLogout(req, res); return; }
     if (pathname.startsWith("/api/") && !isPublicAuthPath(pathname)) {

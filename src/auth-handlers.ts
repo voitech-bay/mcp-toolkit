@@ -4,8 +4,10 @@ import {
   createSessionCookie,
   getAuthSession,
   loginRoleForCredentials,
+  projectAllowedForLogin,
   sessionCookieHeader,
 } from "./services/auth.js";
+import { getProjects, getSupabase } from "./services/supabase.js";
 
 type Json = Record<string, unknown>;
 
@@ -31,16 +33,31 @@ export async function handleAuthSession(req: IncomingMessage, res: ServerRespons
   send(res, 200, { authenticated: Boolean(session), session });
 }
 
+export async function handleAuthProjects(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "GET") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase();
+  if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const result = await getProjects(client);
+  if (result.error) return send(res, 500, { data: [], error: result.error });
+  send(res, 200, { data: result.data });
+}
+
 export async function handleAuthLogin(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
   const b = await body(req);
+  const projectId = String(b.projectId ?? "").trim();
+  if (!projectId) return send(res, 400, { error: "Select a project" });
   const login = loginRoleForCredentials(String(b.login ?? ""), String(b.password ?? ""));
   if (!login) return send(res, 401, { error: "Invalid login" });
+  if (!projectAllowedForLogin(login, projectId)) {
+    return send(res, 403, { error: "This login is not assigned to the selected project" });
+  }
   const token = createSessionCookie(login);
   send(res, 200, {
     authenticated: true,
     login,
     role: login === "workspace" ? "workspace" : "velvetech",
+    projectId,
   }, { "Set-Cookie": sessionCookieHeader(token) });
 }
 
