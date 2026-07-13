@@ -46,6 +46,32 @@ import {
 import { useProjectStore } from "./stores/project";
 import { isFeasibleProjectId } from "./project-ids";
 
+type AppUser = { id: string; name: string; color: string };
+const USER_STORAGE_KEY = "voitech.selectedUserId";
+const selectedUserId = ref<string | null>(localStorage.getItem(USER_STORAGE_KEY));
+const users = ref<AppUser[]>([]);
+const usersLoading = ref(false);
+
+const fetchWindow = window as typeof window & { __voitechUserFetchPatched?: boolean };
+if (!fetchWindow.__voitechUserFetchPatched) {
+  const originalFetch = window.fetch.bind(window);
+  window.fetch = (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+    if (!url.startsWith("/api/")) return originalFetch(input, init);
+    const userId = localStorage.getItem(USER_STORAGE_KEY);
+    if (!userId) return originalFetch(input, init);
+    const headers = new Headers(init.headers);
+    headers.set("X-User-Id", userId);
+    return originalFetch(input, { ...init, headers });
+  };
+  fetchWindow.__voitechUserFetchPatched = true;
+}
+
+watch(selectedUserId, (value) => {
+  if (value) localStorage.setItem(USER_STORAGE_KEY, value);
+  else localStorage.removeItem(USER_STORAGE_KEY);
+});
+
 const isDark = useDark();
 isDark.value = true;
 
@@ -258,6 +284,37 @@ const projectOptions = computed<SelectOption[]>(() =>
   projectStore.projects.map((p) => ({ label: p.name, value: p.id }))
 );
 
+const userOptions = computed<SelectOption[]>(() =>
+  users.value.map((u) => ({ label: u.name, value: u.id }))
+);
+
+function renderUserLabel(option: SelectOption) {
+  const user = users.value.find((u) => u.id === option.value);
+  return h("div", { style: "display:flex;align-items:center;gap:8px" }, [
+    h("span", {
+      style: `width:8px;height:8px;border-radius:50%;background:${user?.color ?? "#64748b"};flex-shrink:0`,
+    }),
+    h("span", {}, option.label as string),
+  ]);
+}
+
+async function loadUsers() {
+  usersLoading.value = true;
+  try {
+    const r = await fetch("/api/users");
+    const j = (await r.json()) as { data?: AppUser[] };
+    users.value = Array.isArray(j.data) ? j.data : [];
+    if (!selectedUserId.value && users.value.length > 0) selectedUserId.value = users.value[0].id;
+    if (selectedUserId.value && !users.value.some((u) => u.id === selectedUserId.value)) {
+      selectedUserId.value = users.value[0]?.id ?? null;
+    }
+  } catch {
+    users.value = [];
+  } finally {
+    usersLoading.value = false;
+  }
+}
+
 const selectedProjectId = computed({
   get: () => projectStore.selectedProjectId,
   set: (id: string | null) => projectStore.selectProject(id),
@@ -327,6 +384,7 @@ function toggleTheme() {
 }
 
 projectStore.loadProjects();
+void loadUsers();
 
 /** Header chips: last sync + analytics day range (same payload as home overview). */
 interface HeaderDashboardPayload {
@@ -532,6 +590,9 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
               <NSelect v-model:value="selectedProjectId" :options="projectOptions" :loading="projectStore.loading"
                 :render-label="renderProjectLabel" placeholder="Select project…" clearable size="small"
                 style="width: 220px" />
+              <NSelect v-model:value="selectedUserId" :options="userOptions" :loading="usersLoading"
+                :render-label="renderUserLabel" placeholder="User…" clearable size="small"
+                style="width: 150px" />
               <template v-if="selectedProjectId">
                 <button
                   v-if="headerBrandImageUrl && !headerImageBroken"

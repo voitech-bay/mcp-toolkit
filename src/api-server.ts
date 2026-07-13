@@ -150,6 +150,7 @@ import {
 } from "./launcher-handlers.js";
 import { handleLeadViewsItems, handleLeadViewsDecide } from "./lead-views-handlers.js";
 import { handleMessageLog } from "./message-log-handlers.js";
+import { handleUsers } from "./users-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -296,7 +297,7 @@ const server = createServer(async (req, res) => {
   // MCP Streamable HTTP handles its own CORS/preflight on /mcp
   if (req.method === "OPTIONS" && !pathname.startsWith("/mcp")) {
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-User-Id");
     res.writeHead(204);
     res.end();
     return;
@@ -403,6 +404,7 @@ const server = createServer(async (req, res) => {
     if (emailStudioCommentMatch) { if (req.method === "PATCH") await handleEmailStudioPatchComment(req, res, emailStudioCommentMatch[1]); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/ingest-from-n8n") { if (req.method === "POST") await handleEmailStudioIngestFromN8n(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/users") { await handleUsers(req, res); return; }
     if (pathname === "/api/outreach-agent/runs") {
       if (req.method === "POST") await handleCreateOutreachRun(req, res);
       else if (req.method === "GET") await handleListOutreachRuns(req, res);

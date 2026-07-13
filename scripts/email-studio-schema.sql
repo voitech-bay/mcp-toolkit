@@ -16,6 +16,23 @@ create table if not exists public.outreach_sequences (
   updated_at timestamptz not null default now()
 );
 
+create table if not exists public.users (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  color text not null default '#64748b',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists users_name_lower_idx on public.users (lower(name));
+
+insert into public.users(name, color)
+select 'Pavel', '#2563eb'
+where not exists (select 1 from public.users where lower(name) = lower('Pavel'));
+insert into public.users(name, color)
+select 'Reviewer', '#7c3aed'
+where not exists (select 1 from public.users where lower(name) = lower('Reviewer'));
+
 create table if not exists public.outreach_emails (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public."Projects"(id) on delete cascade,
@@ -49,6 +66,7 @@ create table if not exists public.outreach_emails (
   )),
   approved_version_id uuid,
   approved_by text,
+  approved_by_user_id uuid references public.users(id) on delete set null,
   approved_at timestamptz,
   sent_at timestamptz,
   smartlead_campaign_id text,
@@ -69,6 +87,7 @@ create table if not exists public.outreach_email_versions (
   body text not null default '',
   author_type text not null check (author_type in ('ai','human','import')),
   author_id text,
+  author_user_id uuid references public.users(id) on delete set null,
   model text,
   prompt_manifest jsonb not null default '{}'::jsonb,
   knowledge_manifest jsonb not null default '[]'::jsonb,
@@ -94,6 +113,7 @@ create table if not exists public.outreach_email_status_events (
   to_status text not null,
   actor_type text not null default 'user' check (actor_type in ('user','agent','system','smartlead','import')),
   actor_id text,
+  actor_user_id uuid references public.users(id) on delete set null,
   reason text,
   idempotency_key text unique,
   created_at timestamptz not null default now()
@@ -110,6 +130,7 @@ create table if not exists public.outreach_email_comments (
   context_after text not null default '',
   body text not null,
   author_id text,
+  author_user_id uuid references public.users(id) on delete set null,
   status text not null default 'open' check (status in ('open','resolved')),
   mapped_start_offset integer,
   mapped_end_offset integer,
@@ -124,6 +145,7 @@ create table if not exists public.outreach_email_comment_replies (
   comment_id uuid not null references public.outreach_email_comments(id) on delete cascade,
   body text not null,
   author_id text,
+  author_user_id uuid references public.users(id) on delete set null,
   created_at timestamptz not null default now()
 );
 
@@ -159,7 +181,10 @@ create index if not exists outreach_emails_sequence_idx on public.outreach_email
 create index if not exists outreach_emails_channel_idx on public.outreach_emails(project_id, contact_id, channel, step_number);
 create index if not exists outreach_emails_search_idx on public.outreach_emails(project_id, contact_name, company_name);
 create index if not exists outreach_email_versions_email_idx on public.outreach_email_versions(email_id, version_number desc);
+create index if not exists outreach_email_versions_author_user_idx on public.outreach_email_versions(author_user_id);
 create index if not exists outreach_email_comments_open_idx on public.outreach_email_comments(email_id, status);
+create index if not exists outreach_email_comments_author_user_idx on public.outreach_email_comments(author_user_id);
 create index if not exists outreach_email_status_events_idx on public.outreach_email_status_events(email_id, created_at desc);
+create index if not exists outreach_email_status_events_actor_user_idx on public.outreach_email_status_events(actor_user_id);
 
 commit;

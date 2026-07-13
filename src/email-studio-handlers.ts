@@ -11,6 +11,7 @@ function send(res: ServerResponse, status: number, data: unknown) { res.writeHea
 async function body(req: IncomingMessage): Promise<Json> { const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer); try { const x = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); return x && typeof x === "object" && !Array.isArray(x) ? x as Json : {}; } catch { return {}; } }
 function url(req: IncomingMessage) { return new URL(req.url ?? "", "http://localhost"); }
 function actor(req: IncomingMessage) { return String(req.headers["x-user-id"] ?? "voitech-user").slice(0, 200); }
+function actorUserId(req: IncomingMessage) { const value = String(req.headers["x-user-id"] ?? ""); return UUID_RE.test(value) ? value : null; }
 function validProject(value: unknown): value is string { return typeof value === "string" && UUID_RE.test(value); }
 function str(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
 
@@ -105,17 +106,17 @@ async function getScopedEmail(client: NonNullable<ReturnType<typeof getSupabase>
   return r.data as Json | null;
 }
 
-async function statusChange(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, to: EmailStatus, actorType: string, actorId: string | null, reason?: string, idempotencyKey?: string) {
+async function statusChange(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, to: EmailStatus, actorType: string, actorId: string | null, reason?: string, idempotencyKey?: string, userId: string | null = null) {
   const from = String(email.status) as EmailStatus;
   if (!canTransition(from, to, actorType)) throw new Error(`Status cannot move from ${from} to ${to}`);
   const now = new Date().toISOString();
-  const event = await client.from("outreach_email_status_events").insert({ email_id: email.id, from_status: from, to_status: to, actor_type: actorType, actor_id: actorId, reason: reason ?? null, idempotency_key: idempotencyKey ?? null }).select("id").single();
+  const event = await client.from("outreach_email_status_events").insert({ email_id: email.id, from_status: from, to_status: to, actor_type: actorType, actor_id: actorId, actor_user_id: userId, reason: reason ?? null, idempotency_key: idempotencyKey ?? null }).select("id").single();
   if (event.error) {
     if (idempotencyKey && event.error.code === "23505") return email;
     throw new Error(event.error.message);
   }
   const patch: Json = { status: to, updated_at: now };
-  if (to !== "approved") Object.assign(patch, { approved_by: null, approved_at: null, approved_version_id: null });
+  if (to !== "approved") Object.assign(patch, { approved_by: null, approved_by_user_id: null, approved_at: null, approved_version_id: null });
   const updated = await client.from("outreach_emails").update(patch).eq("id", email.id).select("*").single();
   if (updated.error) throw new Error(updated.error.message);
   return updated.data as Json;
@@ -219,7 +220,7 @@ export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerR
   };
   const r = await client.from("outreach_emails").upsert(row, { onConflict: "project_id,contact_id,campaign_id,batch_name,channel,step_number", ignoreDuplicates: false }).select("*").single();
   if (r.error) return send(res, 500, { error: r.error.message });
-  await client.from("outreach_email_status_events").insert({ email_id: r.data.id, from_status: null, to_status: r.data.status, actor_type: "user", actor_id: actor(req), reason: "Email Studio record created" });
+  await client.from("outreach_email_status_events").insert({ email_id: r.data.id, from_status: null, to_status: r.data.status, actor_type: "user", actor_id: actor(req), actor_user_id: actorUserId(req), reason: "Email Studio record created" });
   return send(res, 201, { data: r.data });
 }
 
@@ -251,7 +252,7 @@ export async function handleEmailStudioStatus(req: IncomingMessage, res: ServerR
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const projectId = String(b.projectId ?? "");
   const email = await getScopedEmail(client, id, projectId); if (!email) return send(res, 404, { error: "Email not found" }); const to = String(b.status) as EmailStatus;
   if (!EMAIL_STATUSES.includes(to)) return send(res, 400, { error: "Invalid status" });
-  try { return send(res, 200, { data: await statusChange(client, email, to, "user", actor(req), String(b.reason ?? "Manual workflow update")) }); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Status update failed" }); }
+  try { return send(res, 200, { data: await statusChange(client, email, to, "user", actor(req), String(b.reason ?? "Manual workflow update"), undefined, actorUserId(req)) }); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Status update failed" }); }
 }
 
 async function generateDraft(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, prompt: string, previous?: Json, comments: Json[] = [], includedResearchPointIds: string[] = []) {
@@ -305,13 +306,13 @@ export async function handleEmailStudioAdoptVersion(req: IncomingMessage, res: S
 
 export async function handleEmailStudioHumanVersion(req: IncomingMessage, res: ServerResponse, id: string) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const subject = String(b.subject ?? "").trim(), content = String(b.body ?? "").trim(); if (!subject || !content) return send(res, 400, { error: "subject and body are required" });
-  try { const validation = validateDraft(subject, content, []); const version = await insertVersion(client, email, { subject, body: content, author_type: "human", author_id: actor(req), annotations: [], validation_results: validation, generation_reason: "manual_edit" }, true); let updated: Json = email; if (email.status === "approved" || email.status === "final_check") updated = await statusChange(client, email, "needs_review", "user", actor(req), "Content edited; prior approval invalidated"); return send(res, 201, { data: updated, version }); } catch (e) { return send(res, 500, { error: e instanceof Error ? e.message : "Save failed" }); }
+  try { const validation = validateDraft(subject, content, []); const version = await insertVersion(client, email, { subject, body: content, author_type: "human", author_id: actor(req), author_user_id: actorUserId(req), annotations: [], validation_results: validation, generation_reason: "manual_edit" }, true); let updated: Json = email; if (email.status === "approved" || email.status === "final_check") updated = await statusChange(client, email, "needs_review", "user", actor(req), "Content edited; prior approval invalidated", undefined, actorUserId(req)); return send(res, 201, { data: updated, version }); } catch (e) { return send(res, 500, { error: e instanceof Error ? e.message : "Save failed" }); }
 }
 
 export async function handleEmailStudioCreateComment(req: IncomingMessage, res: ServerResponse, id: string) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const version = await client.from("outreach_email_versions").select("body").eq("id", email.current_version_id).single(); const start = Number(b.startOffset), end = Number(b.endOffset), quote = String(b.selectedQuote ?? ""); if (!quote || start < 0 || end <= start || String(version.data?.body ?? "").slice(start, end) !== quote) return send(res, 400, { error: "Comment selection no longer matches the current version" });
-  const r = await client.from("outreach_email_comments").insert({ email_id: id, source_version_id: email.current_version_id, selected_quote: quote, start_offset: start, end_offset: end, context_before: String(b.contextBefore ?? ""), context_after: String(b.contextAfter ?? ""), body: String(b.body ?? "").trim(), author_id: actor(req), mapped_version_id: email.current_version_id, mapped_start_offset: start, mapped_end_offset: end }).select("*").single(); if (r.error) return send(res, 500, { error: r.error.message });
-  if (email.status !== "comments_made") try { await statusChange(client, email, "comments_made", "user", actor(req), "Review comment added"); } catch {}
+  const r = await client.from("outreach_email_comments").insert({ email_id: id, source_version_id: email.current_version_id, selected_quote: quote, start_offset: start, end_offset: end, context_before: String(b.contextBefore ?? ""), context_after: String(b.contextAfter ?? ""), body: String(b.body ?? "").trim(), author_id: actor(req), author_user_id: actorUserId(req), mapped_version_id: email.current_version_id, mapped_start_offset: start, mapped_end_offset: end }).select("*").single(); if (r.error) return send(res, 500, { error: r.error.message });
+  if (email.status !== "comments_made") try { await statusChange(client, email, "comments_made", "user", actor(req), "Review comment added", undefined, actorUserId(req)); } catch {}
   return send(res, 201, { data: r.data });
 }
 
@@ -322,12 +323,12 @@ export async function handleEmailStudioPatchComment(req: IncomingMessage, res: S
 }
 
 export async function handleEmailStudioReply(req: IncomingMessage, res: ServerResponse, commentId: string) {
-  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); if (!validProject(b.projectId) || !String(b.body ?? "").trim()) return send(res, 400, { error: "projectId and body are required" }); const c = await client.from("outreach_email_comments").select("email_id,outreach_emails!inner(project_id)").eq("id", commentId).single(); if (c.error || nestedProjectId(c.data.outreach_emails) !== b.projectId) return send(res, 404, { error: "Comment not found" }); const r = await client.from("outreach_email_comment_replies").insert({ comment_id: commentId, body: String(b.body).trim(), author_id: actor(req) }).select("*").single(); return send(res, r.error ? 500 : 201, r.error ? { error: r.error.message } : { data: r.data });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); if (!validProject(b.projectId) || !String(b.body ?? "").trim()) return send(res, 400, { error: "projectId and body are required" }); const c = await client.from("outreach_email_comments").select("email_id,outreach_emails!inner(project_id)").eq("id", commentId).single(); if (c.error || nestedProjectId(c.data.outreach_emails) !== b.projectId) return send(res, 404, { error: "Comment not found" }); const r = await client.from("outreach_email_comment_replies").insert({ comment_id: commentId, body: String(b.body).trim(), author_id: actor(req), author_user_id: actorUserId(req) }).select("*").single(); return send(res, r.error ? 500 : 201, r.error ? { error: r.error.message } : { data: r.data });
 }
 
 export async function handleEmailStudioApprove(req: IncomingMessage, res: ServerResponse, id: string) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const open = await client.from("outreach_email_comments").select("id", { count: "exact", head: true }).eq("email_id", id).eq("status", "open"); if ((open.count ?? 0) > 0) return send(res, 409, { error: "Resolve all comments before approval" });
-  try { const updated = await statusChange(client, email, "approved", "user", actor(req), "Current version approved"); const r = await client.from("outreach_emails").update({ approved_version_id: email.current_version_id, approved_by: actor(req), approved_at: new Date().toISOString() }).eq("id", id).select("*").single(); return send(res, 200, { data: r.data ?? updated }); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Approval failed" }); }
+  try { const updated = await statusChange(client, email, "approved", "user", actor(req), "Current version approved", undefined, actorUserId(req)); const r = await client.from("outreach_emails").update({ approved_version_id: email.current_version_id, approved_by: actor(req), approved_by_user_id: actorUserId(req), approved_at: new Date().toISOString() }).eq("id", id).select("*").single(); return send(res, 200, { data: r.data ?? updated }); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Approval failed" }); }
 }
 
 export async function handleEmailStudioVersions(req: IncomingMessage, res: ServerResponse, id: string) { const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const projectId = url(req).searchParams.get("projectId") ?? ""; const email = await getScopedEmail(client, id, projectId); if (!email) return send(res, 404, { error: "Email not found" }); const r = await client.from("outreach_email_versions").select("*").eq("email_id", id).order("version_number", { ascending: false }); return send(res, r.error ? 500 : 200, r.error ? { error: r.error.message } : { data: r.data }); }
