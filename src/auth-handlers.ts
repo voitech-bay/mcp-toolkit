@@ -34,10 +34,14 @@ export async function handleAuthSession(req: IncomingMessage, res: ServerRespons
 export async function handleAuthLogin(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
   const b = await body(req);
-  const role = loginRoleForCredentials(String(b.login ?? ""), String(b.password ?? ""));
-  if (!role) return send(res, 401, { error: "Invalid login" });
-  const token = createSessionCookie(role);
-  send(res, 200, { authenticated: true, role }, { "Set-Cookie": sessionCookieHeader(token) });
+  const login = loginRoleForCredentials(String(b.login ?? ""), String(b.password ?? ""));
+  if (!login) return send(res, 401, { error: "Invalid login" });
+  const token = createSessionCookie(login);
+  send(res, 200, {
+    authenticated: true,
+    login,
+    role: login === "workspace" ? "workspace" : "velvetech",
+  }, { "Set-Cookie": sessionCookieHeader(token) });
 }
 
 export async function handleAuthLogout(req: IncomingMessage, res: ServerResponse) {
