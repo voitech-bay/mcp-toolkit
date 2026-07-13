@@ -136,6 +136,17 @@ export function isPublicWebhookPath(pathname: string): boolean {
   return pathname.startsWith("/api/webhooks/");
 }
 
+/** n8n POST /api/n8n/workflow-results with Bearer N8N_WORKFLOW_RESULTS_SECRET (no session cookie). */
+export function isN8nWorkflowResultsMachineAuth(req: IncomingMessage, pathname: string): boolean {
+  if (pathname !== "/api/n8n/workflow-results" || req.method !== "POST") return false;
+  const secret = process.env.N8N_WORKFLOW_RESULTS_SECRET?.trim();
+  if (!secret) return false;
+  const raw =
+    (req.headers.authorization as string | undefined) ??
+    (req.headers.Authorization as string | undefined);
+  return typeof raw === "string" && raw === `Bearer ${secret}`;
+}
+
 export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/auth/session" || pathname === "/api/auth/logout") return true;
   if (pathname === "/api/projects" || pathname === "/api/users") return true;

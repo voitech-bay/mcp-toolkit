@@ -167,7 +167,7 @@ import { createMcpHandler } from "./server.js";
 import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
 import { startScheduledGetSalesSync } from "./services/getsales-sync-scheduler.js";
 import { assertSupabaseConfigured } from "./services/supabase.js";
-import { assertAuthConfigured, getAuthSession, isPublicAuthPath, isPublicWebhookPath, isVelvetechAllowedApiPath, sendAuthError } from "./services/auth.js";
+import { assertAuthConfigured, getAuthSession, isN8nWorkflowResultsMachineAuth, isPublicAuthPath, isPublicWebhookPath, isVelvetechAllowedApiPath, sendAuthError } from "./services/auth.js";
 import { VELVETECH_PROJECT_ID } from "./services/n8n-trigger.js";
 import {
   handleCreateOutreachRun,
@@ -424,7 +424,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/auth/projects") { await handleAuthProjects(req, res); return; }
     if (pathname === "/api/auth/login") { await handleAuthLogin(req, res); return; }
     if (pathname === "/api/auth/logout") { await handleAuthLogout(req, res); return; }
-    if (pathname.startsWith("/api/") && !isPublicAuthPath(pathname) && !isPublicWebhookPath(pathname)) {
+    if (pathname.startsWith("/api/") && !isPublicAuthPath(pathname) && !isPublicWebhookPath(pathname) && !isN8nWorkflowResultsMachineAuth(req, pathname)) {
       const session = getAuthSession(req);
       if (!session) return sendAuthError(res);
       if (session.role === "velvetech" && !isVelvetechAllowedApiPath(pathname)) {
