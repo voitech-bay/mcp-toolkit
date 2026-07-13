@@ -132,6 +132,10 @@ export function isPublicAuthPath(pathname: string): boolean {
   return pathname === "/api/auth/login" || pathname === "/api/auth/session" || pathname === "/api/auth/logout" || pathname === "/api/auth/projects";
 }
 
+export function isPublicWebhookPath(pathname: string): boolean {
+  return pathname.startsWith("/api/webhooks/");
+}
+
 export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/auth/session" || pathname === "/api/auth/logout") return true;
   if (pathname === "/api/projects" || pathname === "/api/users") return true;
