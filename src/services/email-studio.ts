@@ -78,6 +78,7 @@ const transitions: Record<EmailStatus, readonly EmailStatus[]> = {
 export function canTransition(from: EmailStatus, to: EmailStatus, actorType = "user"): boolean {
   if (from === to) return true;
   if (to === "sent" && actorType !== "smartlead") return false;
+  if (to === "sent" && actorType === "smartlead") return true;
   return transitions[from].includes(to);
 }
 

@@ -10,12 +10,13 @@ function req(method: string, authorization?: string): IncomingMessage {
   } as IncomingMessage;
 }
 
-test("n8n machine auth accepts workflow results, ingest, and GetSales push paths", () => {
+test("n8n machine auth accepts workflow results, ingest, Smartlead events, and GetSales push paths", () => {
   process.env.N8N_WORKFLOW_RESULTS_SECRET = "machine-secret";
   const authed = req("POST", "Bearer machine-secret");
 
   assert.equal(isN8nMachineAuth(authed, "/api/n8n/workflow-results"), true);
   assert.equal(isN8nMachineAuth(authed, "/api/email-studio/ingest-from-n8n"), true);
+  assert.equal(isN8nMachineAuth(authed, "/api/email-studio/smartlead/events"), true);
   assert.equal(isN8nMachineAuth(authed, "/api/email-studio/push-getsales-linkedin-sequence"), true);
 });
 

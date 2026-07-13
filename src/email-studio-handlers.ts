@@ -468,11 +468,86 @@ export async function handleEmailStudioIngestFromN8n(req: IncomingMessage, res: 
 }
 
 export async function handleSmartleadEmailEvent(req: IncomingMessage, res: ServerResponse) {
-  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const eventId = String(b.event_id ?? b.eventId ?? ""), eventType = String(b.event_type ?? b.eventType ?? "").toLowerCase(); if (!eventId || !eventType) return send(res, 400, { error: "event_id and event_type are required" });
-  const existing = await client.from("outreach_email_delivery_events").select("*").eq("provider", "smartlead").eq("provider_event_id", eventId).maybeSingle(); if (existing.data) return send(res, 200, { data: existing.data, replay: true });
-  const messageId = String(b.message_id ?? b.messageId ?? ""), leadId = String(b.lead_id ?? b.leadId ?? ""), campaignId = String(b.campaign_id ?? b.campaignId ?? ""), recipient = String(b.recipient_email ?? b.email ?? "").trim().toLowerCase(), step = Number(b.sequence_step ?? b.sequenceNumber ?? 0);
-  let candidates: Json[] = []; if (messageId) { const r = await client.from("outreach_emails").select("*").eq("smartlead_message_id", messageId); candidates = (r.data ?? []) as Json[]; } if (!candidates.length && leadId && campaignId) { const r = await client.from("outreach_emails").select("*").eq("smartlead_lead_id", leadId).eq("smartlead_campaign_id", campaignId); candidates = (r.data ?? []) as Json[]; } if (!candidates.length && recipient && campaignId && step > 0) { const r = await client.from("outreach_emails").select("*").eq("recipient_email", recipient).eq("smartlead_campaign_id", campaignId).eq("sequence_step", step); candidates = (r.data ?? []) as Json[]; }
-  const matchStatus = candidates.length === 1 ? "matched" : candidates.length > 1 ? "ambiguous" : "unmatched"; const occurred = String(b.occurred_at ?? b.timestamp ?? new Date().toISOString()); const ins = await client.from("outreach_email_delivery_events").insert({ provider: "smartlead", provider_event_id: eventId, event_type: eventType, payload: b, email_id: candidates.length === 1 ? candidates[0].id : null, match_status: matchStatus, match_reason: candidates.length === 1 ? "Unique Smartlead identifiers matched" : `${candidates.length} matching records`, occurred_at: occurred }).select("*").single(); if (ins.error) return send(res, 500, { error: ins.error.message });
-  if (candidates.length === 1 && ["sent", "email_sent", "delivered"].includes(eventType)) { const email = candidates[0]; try { await statusChange(client, email, "sent", "smartlead", "smartlead", `Verified Smartlead ${eventType} event`, `smartlead:${eventId}:sent`); await client.from("outreach_emails").update({ sent_at: occurred, smartlead_message_id: messageId || email.smartlead_message_id }).eq("id", email.id); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Delivery status failed", event: ins.data }); } }
-  return send(res, 202, { data: ins.data });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const b = await body(req);
+  const eventType = str(b.event_type ?? b.eventType ?? b.type).toLowerCase();
+  if (!eventType) return send(res, 400, { error: "event_type is required" });
+
+  const lead = b.lead && typeof b.lead === "object" ? b.lead as Json : {};
+  const messageId = String(b.message_id ?? b.messageId ?? b.email_message_id ?? "").trim();
+  const campaignId = String(b.campaign_id ?? b.campaignId ?? "").trim();
+  const leadId = String(b.lead_id ?? b.leadId ?? b.client_lead_id ?? lead.id ?? "").trim();
+  const recipient = String(b.to_email ?? b.recipient_email ?? b.email ?? b.lead_email ?? "").trim().toLowerCase();
+  const step = Number(b.sequence_number ?? b.sequence_step ?? b.sequenceNumber ?? b.step ?? 0);
+  const occurred = String(
+    b.occurred_at ??
+    b.time_sent ??
+    b.time_opened ??
+    b.time_clicked ??
+    b.time_replied ??
+    b.timestamp ??
+    new Date().toISOString(),
+  );
+  const eventId = String(b.event_id ?? b.eventId ?? "").trim() || [eventType, messageId, campaignId, recipient, step || "", occurred].filter(Boolean).join(":");
+  if (!eventId) return send(res, 400, { error: "event_id or enough payload identity is required" });
+
+  const existing = await client.from("outreach_email_delivery_events").select("*").eq("provider", "smartlead").eq("provider_event_id", eventId).maybeSingle();
+  if (existing.error) return send(res, 500, { error: existing.error.message });
+  if (existing.data) return send(res, 200, { data: existing.data, replay: true });
+
+  let candidates: Json[] = [];
+  let matchReason = "No matching Smartlead identifiers";
+  if (messageId) {
+    const r = await client.from("outreach_emails").select("*").eq("smartlead_message_id", messageId);
+    if (r.error) return send(res, 500, { error: r.error.message });
+    candidates = (r.data ?? []) as Json[];
+    matchReason = "Smartlead message id";
+  }
+  if (!candidates.length && leadId && campaignId) {
+    const r = await client.from("outreach_emails").select("*").eq("smartlead_lead_id", leadId).eq("smartlead_campaign_id", campaignId);
+    if (r.error) return send(res, 500, { error: r.error.message });
+    candidates = (r.data ?? []) as Json[];
+    matchReason = "Smartlead lead id and campaign id";
+  }
+  if (!candidates.length && recipient && campaignId && step > 0) {
+    const r = await client.from("outreach_emails").select("*").eq("recipient_email", recipient).eq("smartlead_campaign_id", campaignId).eq("sequence_step", step);
+    if (r.error) return send(res, 500, { error: r.error.message });
+    candidates = (r.data ?? []) as Json[];
+    matchReason = "Recipient email, campaign id, and sequence number";
+  }
+  if (!candidates.length && recipient && step > 0) {
+    const r = await client.from("outreach_emails").select("*").eq("recipient_email", recipient).eq("sequence_step", step).order("created_at", { ascending: false }).limit(5);
+    if (r.error) return send(res, 500, { error: r.error.message });
+    candidates = (r.data ?? []) as Json[];
+    matchReason = "Recipient email and sequence number";
+  }
+
+  const matchStatus = candidates.length === 1 ? "matched" : candidates.length > 1 ? "ambiguous" : "unmatched";
+  const ins = await client.from("outreach_email_delivery_events").insert({
+    provider: "smartlead",
+    provider_event_id: eventId,
+    event_type: eventType,
+    payload: b,
+    email_id: candidates.length === 1 ? candidates[0].id : null,
+    match_status: matchStatus,
+    match_reason: candidates.length === 1 ? matchReason : `${matchReason}; ${candidates.length} candidates`,
+    occurred_at: occurred,
+  }).select("*").single();
+  if (ins.error) return send(res, 500, { error: ins.error.message });
+
+  if (candidates.length === 1 && ["email_sent", "first_email_sent", "sent", "delivered"].includes(eventType)) {
+    const email = candidates[0];
+    try {
+      await statusChange(client, email, "sent", "smartlead", "smartlead", `Verified Smartlead ${eventType} event`, `smartlead:${eventId}:sent`);
+      await client.from("outreach_emails").update({
+        sent_at: occurred,
+        smartlead_message_id: messageId || email.smartlead_message_id,
+        smartlead_campaign_id: campaignId || email.smartlead_campaign_id,
+        smartlead_lead_id: leadId || email.smartlead_lead_id,
+      }).eq("id", email.id);
+    } catch (e) {
+      return send(res, 409, { error: e instanceof Error ? e.message : "Delivery status failed", event: ins.data });
+    }
+  }
+  return send(res, 202, { data: ins.data, matchStatus, matchedEmailId: candidates.length === 1 ? candidates[0].id : null });
 }

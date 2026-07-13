@@ -140,6 +140,7 @@ const N8N_MACHINE_AUTH_POST_PATHS = new Set([
   "/api/n8n/workflow-results",
   "/api/email-studio/ingest-from-n8n",
   "/api/email-studio/push-getsales-linkedin-sequence",
+  "/api/email-studio/smartlead/events",
 ]);
 
 /** n8n POST endpoints with Bearer N8N_WORKFLOW_RESULTS_SECRET (no session cookie). */
