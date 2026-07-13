@@ -579,6 +579,7 @@ const tableScrollX = computed(() =>
         <div style="display:flex;align-items:center;gap:8px">
           <UsersIcon :size="16" />
           <span>Contacts</span>
+          <NTag v-if="projectStore.selectedProjectId" size="small" :bordered="false">{{ total }}</NTag>
           <span v-if="loading" style="opacity:0.6;font-size:0.82rem">Loading…</span>
         </div>
         <NSpace size="small" align="center" wrap>
