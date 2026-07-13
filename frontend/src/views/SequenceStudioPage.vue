@@ -138,11 +138,19 @@ function isExpanded(id: string) {
 }
 
 async function toggleLead(row: StudioLead) {
-  const next = new Set(expandedIds.value);
-  if (next.has(row.contact.uuid)) next.delete(row.contact.uuid);
-  else next.add(row.contact.uuid);
+  const next = new Set<string>();
+  if (!expandedIds.value.has(row.contact.uuid)) next.add(row.contact.uuid);
   expandedIds.value = next;
   if (next.has(row.contact.uuid)) await openLead(row.contact.uuid, false);
+}
+
+function rowFacts(row: StudioLead): Json[] {
+  return selectedContactId.value === row.contact.uuid ? facts.value : [];
+}
+
+function rowFactMarked(row: StudioLead, fact: Json): boolean {
+  if (selectedContactId.value !== row.contact.uuid) return false;
+  return markKeys.value.has(`${fact.entityKey}:${fact.id}`);
 }
 
 function qs() {
@@ -189,8 +197,8 @@ async function openLead(contactId: string, openDrawer = true) {
   }
 }
 
-async function refreshDetail() {
-  if (selectedContactId.value) await openLead(selectedContactId.value);
+async function refreshDetail(openDrawer = detailOpen.value) {
+  if (selectedContactId.value) await openLead(selectedContactId.value, openDrawer);
 }
 
 async function markFact(fact: Json, priority: boolean) {
@@ -348,31 +356,67 @@ onMounted(load);
           </header>
 
           <div v-if="isExpanded(row.contact.uuid)" class="lead-expanded">
-            <section v-for="channel in ['email','linkedin_dm','linkedin_inmail']" :key="channel" class="track">
-              <div class="track-head">
-                <span>{{ channelLabel(channel) }}</span>
-                <span class="muted">{{ channelMessages(row, channel).length }} step{{ channelMessages(row, channel).length === 1 ? "" : "s" }}</span>
+            <div class="tracks-grid">
+              <section v-for="channel in ['email','linkedin_dm','linkedin_inmail']" :key="channel" class="track">
+                <div class="track-head">
+                  <span>{{ channelLabel(channel) }}</span>
+                  <span class="muted">{{ channelMessages(row, channel).length }} step{{ channelMessages(row, channel).length === 1 ? "" : "s" }}</span>
+                </div>
+                <div v-if="channelMessages(row, channel).length" class="track-messages">
+                  <article v-for="message in channelMessages(row, channel)" :key="message.id" class="message-preview">
+                    <button class="message-title" @click="openEmailMessage(message)">
+                      <MailIcon :size="14" />
+                      {{ messageTitle(message) }}
+                    </button>
+                    <NTag size="tiny" :type="statusType(message.status)">{{ humanize(message.status) }}</NTag>
+                    <div v-if="message.current_subject" class="subject">{{ message.current_subject }}</div>
+                    <div class="message-body">
+                      <p v-for="(paragraph, index) in messageParagraphs(message.current_body)" :key="index">{{ paragraph }}</p>
+                    </div>
+                    <NSpace v-if="['linkedin_dm','linkedin_inmail'].includes(message.channel)" size="small">
+                      <NButton size="tiny" secondary :loading="actionLoading === `preview:${message.id}`" @click="previewPush(message)">Preview fields</NButton>
+                      <NButton size="tiny" type="primary" :disabled="message.status !== 'approved'" :loading="actionLoading === `push:${message.id}`" @click="pushToGetSales(message)">Push</NButton>
+                      <NTag v-if="message.external_pushed_at" size="tiny" type="success">Pushed</NTag>
+                    </NSpace>
+                  </article>
+                </div>
+                <NEmpty v-else size="small" description="No drafts" />
+              </section>
+            </div>
+
+            <aside class="pov-side-panel">
+              <div class="pov-head">
+                <span>POV points</span>
+                <span class="muted">Use while reviewing copy</span>
               </div>
-              <div v-if="channelMessages(row, channel).length" class="track-messages">
-                <article v-for="message in channelMessages(row, channel)" :key="message.id" class="message-preview">
-                  <button class="message-title" @click="openEmailMessage(message)">
-                    <MailIcon :size="14" />
-                    {{ messageTitle(message) }}
-                  </button>
-                  <NTag size="tiny" :type="statusType(message.status)">{{ humanize(message.status) }}</NTag>
-                  <div v-if="message.current_subject" class="subject">{{ message.current_subject }}</div>
-                  <div class="message-body">
-                    <p v-for="(paragraph, index) in messageParagraphs(message.current_body)" :key="index">{{ paragraph }}</p>
-                  </div>
-                  <NSpace v-if="['linkedin_dm','linkedin_inmail'].includes(message.channel)" size="small">
-                    <NButton size="tiny" secondary :loading="actionLoading === `preview:${message.id}`" @click="previewPush(message)">Preview fields</NButton>
-                    <NButton size="tiny" type="primary" :disabled="message.status !== 'approved'" :loading="actionLoading === `push:${message.id}`" @click="pushToGetSales(message)">Push</NButton>
-                    <NTag v-if="message.external_pushed_at" size="tiny" type="success">Pushed</NTag>
-                  </NSpace>
-                </article>
-              </div>
-              <NEmpty v-else size="small" description="No drafts" />
-            </section>
+              <NSpin :show="detailLoading && selectedContactId === row.contact.uuid">
+                <div v-if="rowFacts(row).length" class="side-fact-list">
+                  <article v-for="fact in rowFacts(row)" :key="`${fact.entityKey}:${fact.id}`" class="side-fact">
+                    <div class="side-fact-main">
+                      <NButton
+                        circle
+                        size="small"
+                        :type="rowFactMarked(row, fact) ? 'warning' : 'default'"
+                        @click="markFact(fact, !rowFactMarked(row, fact))"
+                      >
+                        <template #icon><StarIcon :size="14" /></template>
+                      </NButton>
+                      <span>{{ fact.text }}</span>
+                    </div>
+                    <NInput
+                      v-model:value="factComments[`${fact.entityKey}:${fact.id}`]"
+                      size="small"
+                      type="textarea"
+                      :autosize="{ minRows: 1, maxRows: 3 }"
+                      placeholder="Comment for this fact"
+                      @blur="rowFactMarked(row, fact) && markFact(fact, true)"
+                    />
+                    <div class="muted">{{ fact.source }} · {{ fmt(fact.createdAt) }}</div>
+                  </article>
+                </div>
+                <NEmpty v-else size="small" description="No POV points for this lead/company yet" />
+              </NSpin>
+            </aside>
           </div>
         </article>
       </div>
@@ -461,34 +505,40 @@ onMounted(load);
 </template>
 
 <style scoped>
-.sequence-studio{max-width:1760px;margin:auto}
+.sequence-studio{max-width:1760px;margin:auto;color:#f8fafc}
 .header-row{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:14px}
 .header-row h1{margin:0}
 .toolbar{display:grid;grid-template-columns:minmax(260px,520px) auto;gap:10px;align-items:center;margin-bottom:12px}
-.muted{opacity:.62;font-size:.86em}
+.muted{color:#cbd5e1;font-size:.86em}
 .lead-stack{display:flex;flex-direction:column;gap:10px}
-.lead-card{border:1px solid rgba(148,163,184,.24);border-radius:8px;background:rgba(15,23,42,.24);overflow:hidden}
+.lead-card{border:1px solid #334155;border-radius:8px;background:#111827;overflow:hidden}
 .lead-header{display:grid;grid-template-columns:28px 38px minmax(210px,1fr) minmax(420px,1.6fr) auto;gap:10px;align-items:center;padding:12px}
-.expand-button,.link-button,.message-title{border:0;background:transparent;color:#7db7ff;padding:0;cursor:pointer}
+.expand-button,.link-button,.message-title{border:0;background:transparent;color:#93c5fd;padding:0;cursor:pointer}
 .expand-button{display:flex;align-items:center;justify-content:center;color:inherit}
 .link-button{font-weight:700;text-align:left}
 .link-button:hover,.message-title:hover{text-decoration:underline}
 .lead-title{min-width:0}
 .channel-pills{display:grid;grid-template-columns:repeat(3,minmax(120px,1fr));gap:8px}
-.channel-pill{border:1px solid rgba(148,163,184,.22);border-radius:8px;padding:7px 9px;display:flex;align-items:center;gap:7px;min-height:38px;background:rgba(148,163,184,.08)}
-.channel-pill.empty{opacity:.58}
+.channel-pill{border:1px solid #475569;border-radius:8px;padding:7px 9px;display:flex;align-items:center;gap:7px;min-height:38px;background:#1f2937;color:#f8fafc}
+.channel-pill.empty{background:#172033;color:#cbd5e1}
 .pill-label{font-weight:700;font-size:.88em}
-.lead-expanded{display:grid;grid-template-columns:repeat(3,minmax(260px,1fr));gap:10px;padding:0 12px 12px}
-.track{border-top:1px solid rgba(148,163,184,.18);padding-top:10px;min-width:0}
+.lead-expanded{display:grid;grid-template-columns:minmax(0,1fr) minmax(300px,380px);gap:12px;padding:0 12px 12px}
+.tracks-grid{display:grid;grid-template-columns:repeat(3,minmax(230px,1fr));gap:10px;min-width:0}
+.track{border-top:1px solid #475569;padding-top:10px;min-width:0}
 .track-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;font-weight:700}
 .track-messages{display:flex;flex-direction:column;gap:8px}
-.message-preview{border:1px solid rgba(148,163,184,.2);border-radius:8px;padding:10px;background:rgba(2,6,23,.2)}
+.message-preview{border:1px solid #475569;border-radius:8px;padding:10px;background:#0f172a;color:#f8fafc}
 .message-title{display:inline-flex;align-items:center;gap:6px;font-weight:700;margin-right:8px}
-.subject{font-weight:700;margin-top:8px}
-.message-body{margin-top:8px;color:rgba(241,245,249,.9)}
+.subject{font-weight:700;margin-top:8px;color:#ffffff}
+.message-body{margin-top:8px;color:#e5e7eb}
 .message-body p{white-space:pre-line;line-height:1.52;margin:0 0 10px;word-break:break-word}
 .message-body p:last-child{margin-bottom:0}
-.message-body.full{border:1px solid rgba(148,163,184,.18);border-radius:8px;padding:12px;background:rgba(2,6,23,.16)}
+.message-body.full{border:1px solid #475569;border-radius:8px;padding:12px;background:#0f172a}
+.pov-side-panel{border:1px solid #475569;border-radius:8px;background:#0b1220;padding:12px;min-height:180px}
+.pov-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;font-weight:800;margin-bottom:10px}
+.side-fact-list{display:flex;flex-direction:column;gap:9px;max-height:620px;overflow:auto;padding-right:2px}
+.side-fact{border:1px solid #334155;border-radius:8px;background:#111827;padding:10px;color:#f8fafc}
+.side-fact-main{display:grid;grid-template-columns:32px 1fr;gap:9px;align-items:start;line-height:1.45;margin-bottom:8px}
 .pagination-row{display:flex;justify-content:flex-end;margin-top:14px}
 .detail-grid{display:grid;grid-template-columns:minmax(420px,1.25fr) minmax(300px,.75fr);gap:14px}
 .panel{border:1px solid rgba(128,128,128,.24);border-radius:8px;padding:14px;min-height:200px}
@@ -499,6 +549,7 @@ onMounted(load);
 .fact-row{display:grid;grid-template-columns:32px 1fr;gap:9px;align-items:start;line-height:1.45;margin-bottom:8px}
 .field-preview{margin:10px 0}
 .field-preview pre{white-space:pre-wrap;word-break:break-word;padding:8px;border-radius:6px;background:rgba(128,128,128,.12)}
-@media(max-width:1180px){.lead-header{grid-template-columns:28px 38px minmax(180px,1fr) auto}.channel-pills{grid-column:1/-1}.lead-expanded{grid-template-columns:1fr}}
+@media(max-width:1280px){.tracks-grid{grid-template-columns:1fr}.lead-expanded{grid-template-columns:minmax(0,1fr) minmax(280px,360px)}}
+@media(max-width:1180px){.lead-header{grid-template-columns:28px 38px minmax(180px,1fr) auto}.channel-pills{grid-column:1/-1}.lead-expanded{grid-template-columns:1fr}.tracks-grid{grid-template-columns:1fr}.side-fact-list{max-height:none}}
 @media(max-width:960px){.header-row,.message-head{flex-direction:column}.toolbar,.detail-grid{grid-template-columns:1fr}.lead-header{grid-template-columns:28px 38px 1fr}.lead-header>.n-button{grid-column:1/-1}.channel-pills{grid-template-columns:1fr}}
 </style>
