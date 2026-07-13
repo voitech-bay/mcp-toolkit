@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import { NAlert, NAvatar, NButton, NCard, NCheckbox, NCollapse, NCollapseItem, NDataTable, NDrawer, NDrawerContent, NEmpty, NFormItem, NInput, NInputNumber, NModal, NPagination, NSelect, NSpace, NSpin, NTabPane, NTabs, NTag, NText, useDialog, useMessage, type DataTableColumns } from "naive-ui";
 import { useProjectStore } from "../stores/project";
 import VelvetechLinkedInDraftsPanel from "../components/VelvetechLinkedInDraftsPanel.vue";
@@ -12,6 +13,7 @@ interface Annotation { id:string; text:string; start:number; end:number; purpose
 interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
 
 const store = useProjectStore(); const toast = useMessage(); const dialog = useDialog();
+const route = useRoute();
 const { launching: launchingN8n, workflows, loadWorkflows, launch } = useWorkflowLaunch();
 const studioTab = ref<"email" | "linkedin">("email");
 const isVelvetech = computed(() => isVelvetechProjectId(store.selectedProjectId));
@@ -56,7 +58,13 @@ function contactLabel(c: PickerContact): string {
 function fmt(v:string|null) { return v ? new Date(v).toLocaleString() : "—"; }
 function qs() { const q = new URLSearchParams({ projectId:String(store.selectedProjectId), page:String(page.value), pageSize:String(pageSize.value) }); if(search.value.trim())q.set("search",search.value.trim()); const status = savedView.value !== "all" ? savedView.value : statusFilter.value; if(status)q.set("status",status); if(campaignFilter.value)q.set("campaign",campaignFilter.value); if(batchFilter.value)q.set("batch",batchFilter.value); if(personaFilter.value)q.set("persona",personaFilter.value); if(reviewerFilter.value)q.set("reviewer",reviewerFilter.value); if(modelFilter.value)q.set("model",modelFilter.value); if(qualityFilter.value)q.set("researchQuality",qualityFilter.value); if(dateFrom.value)q.set("dateFrom",dateFrom.value); if(dateTo.value)q.set("dateTo",dateTo.value); if(openOnly.value)q.set("hasOpenComments","true"); return q; }
 async function load() { if(!store.selectedProjectId)return; loading.value=true; error.value=""; try { const r=await fetch(`/api/email-studio/emails?${qs()}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); rows.value=j.data??[]; total.value=j.total??0; } catch(e){error.value=e instanceof Error?e.message:"Could not load emails"} finally{loading.value=false} }
-let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows()}); watch([page,pageSize],load); onMounted(()=>{void load();void loadWorkflows()});
+async function openQueryEmail() {
+  const emailId = typeof route.query.emailId === "string" ? route.query.emailId : "";
+  const projectId = typeof route.query.projectId === "string" ? route.query.projectId : "";
+  if (projectId && projectId !== store.selectedProjectId) store.selectProject(projectId);
+  if (emailId) await openEmail(emailId);
+}
+let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows()}); watch([page,pageSize],load); watch(()=>route.query.emailId,()=>{void openQueryEmail()}); onMounted(()=>{void load();void loadWorkflows();void openQueryEmail()});
 
 function shouldIgnoreRowClick(event: MouseEvent): boolean {
   const target = event.target;

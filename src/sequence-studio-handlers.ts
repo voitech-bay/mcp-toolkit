@@ -156,6 +156,7 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
       draftCount: drafts.length,
       statusSummary: statusSummary(drafts),
       latestDraft: drafts[0] ?? null,
+      messages: drafts,
     };
   });
   return send(res, 200, { data, total: contacts.count ?? 0, page, pageSize });
