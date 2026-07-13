@@ -25,6 +25,7 @@ import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import { useWorkflowLaunch } from "../composables/useWorkflowLaunch";
 import { isFeasibleProjectId, isVelvetechProjectId } from "../project-ids";
+import CompanyDossier from "../components/dossier/CompanyDossier.vue";
 
 type Json = Record<string, unknown>;
 
@@ -154,6 +155,8 @@ const emailStatusFilter = ref(routeString("contactEmailStatus"));
 const companyId = computed(() => String(route.params.id ?? ""));
 const company = computed<Json>(() => (card.value?.company as Json) ?? {});
 const latestResults = computed<Json[]>(() => (card.value?.latest_results as Json[]) ?? []);
+const dossier = computed<Json | null>(() => (card.value?.dossier as Json) ?? null);
+const showDossier = computed(() => isVelvetechProject.value && !!dossier.value);
 const roster = computed<RosterRow[]>(() => (card.value?.contacts as RosterRow[]) ?? []);
 const threads = computed<Thread[]>(() => (card.value?.conversations as Thread[]) ?? []);
 const contextEntries = computed<Json[]>(() => (card.value?.context_entries as Json[]) ?? []);
@@ -669,6 +672,9 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
           />
         </NSpace>
       </NCard>
+
+      <!-- Velvetech account dossier (POV contract) -->
+      <CompanyDossier v-if="showDossier" :dossier="(dossier as any)" />
 
       <!-- Company research -->
       <NCard title="Company research (n8n)" size="small">

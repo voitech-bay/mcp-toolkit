@@ -341,6 +341,106 @@ function companyOneLinerFromLatestResults(rows: Json[]): string | null {
   return null;
 }
 
+function jsonArray(value: unknown): Json[] {
+  return Array.isArray(value) ? (value as Json[]) : [];
+}
+
+// Latest velvetech-pov result row, if present. latestResults is already
+// newest-first-per-workflow, so the first pov row is the current one.
+function povResultFromLatestResults(rows: Json[]): Json | null {
+  for (const row of rows) {
+    if (String(row.workflow_name ?? "") !== "velvetech-pov") continue;
+    const r = row.result;
+    if (r && typeof r === "object" && !Array.isArray(r)) return r as Json;
+  }
+  return null;
+}
+
+function groupFitContactsByPersona(fitContacts: Json[]): Record<string, Json[]> {
+  const groups: Record<string, Json[]> = { it: [], ops: [], finance: [] };
+  for (const c of fitContacts) {
+    const persona = String(c.persona ?? "it") || "it";
+    if (!groups[persona]) groups[persona] = [];
+    groups[persona].push(c);
+  }
+  return groups;
+}
+
+// Older POV rows (pre headline_facts contract) have no ranked facts. Derive a
+// best-effort ranked list from the structured arrays they do carry so the
+// dossier tile is never empty for the already-run accounts.
+function deriveFallbackHeadlineFacts(pov: Json): Json[] {
+  const facts: Json[] = [];
+  for (const t of jsonArray(pov.transformation_signals).slice(0, 2)) {
+    const claim = stringField(t.claim);
+    if (claim) facts.push({ fact: claim, type: "trigger", tier: 1, source: stringField(t.source) ?? "company data" });
+  }
+  const tech = jsonArray(pov.tech_stack).map((x) => String(x)).filter(Boolean);
+  if (tech.length) facts.push({ fact: `Runs ${tech.slice(0, 8).join(", ")}.`, type: "systems", tier: 2, source: "company data" });
+  for (const p of jsonArray(pov.pressure_points).map((x) => String(x)).filter(Boolean).slice(0, 2)) {
+    facts.push({ fact: p, type: "pain", tier: 2, source: "company data" });
+  }
+  return facts.slice(0, 5);
+}
+
+// Project the latest POV row into the typed dossier the CompanyDossier tile
+// renders. Native contract fields win; fallback derives them for older rows.
+function dossierFromLatestResults(rows: Json[]): Json | null {
+  const pov = povResultFromLatestResults(rows);
+  if (!pov) return null;
+  const fitContacts = jsonArray(pov.fit_contacts);
+  let headlineFacts = jsonArray(pov.headline_facts);
+  const fromContract = headlineFacts.length > 0;
+  if (!fromContract) headlineFacts = deriveFallbackHeadlineFacts(pov);
+  const discovery = jsonArray(pov.discovery_questions).map((x) => String(x)).filter(Boolean);
+
+  let hook = stringField(pov.hook);
+  if (!hook) {
+    const tier1 = headlineFacts.find((f) => Number(f.tier) === 1);
+    hook = stringField(tier1?.fact) ?? stringField(headlineFacts[0]?.fact);
+  }
+  let leadQuestion = stringField(pov.lead_question) ?? (discovery[0] ?? null);
+
+  let target: Json | null =
+    pov.target && typeof pov.target === "object" && !Array.isArray(pov.target) ? (pov.target as Json) : null;
+  if (!target && fitContacts.length) {
+    const best =
+      fitContacts.find((c) => String(c.fit ?? "") === "high") ??
+      fitContacts.find((c) => String(c.fit ?? "") === "medium") ??
+      fitContacts[0];
+    const profile = best.profile && typeof best.profile === "object" ? (best.profile as Json) : {};
+    target = {
+      name: best.name ?? "",
+      title: best.title ?? "",
+      persona: best.persona ?? "it",
+      role_type: best.role_type ?? "other",
+      linkedin_url: best.linkedin_url ?? "",
+      contact_key: best.contact_key ?? "",
+      tenure_months: (profile.tenure_months as unknown) ?? null,
+      profile_highlight: stringField(profile.summary_excerpt) ?? stringField(profile.headline) ?? "",
+    };
+  }
+
+  return {
+    pov_ok: pov.pov_ok === true,
+    from_contract: fromContract,
+    hook,
+    lead_question: leadQuestion,
+    headline_facts: headlineFacts,
+    target,
+    tech_stack: jsonArray(pov.tech_stack),
+    fit_contacts_by_persona: groupFitContactsByPersona(fitContacts),
+    fit_score: pov.fit_score ?? null,
+    score_rationale: stringField(pov.score_rationale),
+    vertical: stringField(pov.vertical),
+    build_risk: stringField(pov.build_risk),
+    pressure_points: jsonArray(pov.pressure_points),
+    discovery_questions: discovery,
+    brief_markdown: stringField(pov.brief_markdown),
+    company_name: stringField(pov.company_name),
+  };
+}
+
 function mergeLatestWorkflowResults(
   primary: Json[],
   supplemental: Array<Record<string, unknown>>
@@ -543,6 +643,7 @@ export async function buildCompanyCard(
     data: {
       company: companyWithResearch,
       latest_results: latestResults,
+      dossier: dossierFromLatestResults(latestResults),
       contacts: rosterWithActivity,
       conversations: threads,
       context_entries: plainContextEntries,
