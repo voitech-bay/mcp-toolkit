@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { N8N_WORKFLOW_RESULTS_TABLE, getSupabase } from "./supabase.js";
 
 type Json = Record<string, unknown>;
@@ -6,11 +7,9 @@ type Client = NonNullable<ReturnType<typeof getSupabase>>;
 /** POV workflow whose result rows hold the ranked account facts operators mark. */
 export const POV_WORKFLOW_NAME = "velvetech-pov";
 
-/** A single extracted account fact. `id` is stable across reruns as long as the
- *  fact text keeps its position in its source array — this is the key that
- *  `pov_fact_marks.fact_id` is stored against, so the scheme must stay identical
- *  everywhere it is produced (Sequence Studio marking + message generation). */
-export type PovFact = { id: string; text: string; source: string };
+/** A single extracted account fact. `id` is content-based so marks survive POV
+ *  reruns that reorder facts. `legacyId` keeps old source-index marks readable. */
+export type PovFact = { id: string; legacyId: string; text: string; source: string };
 
 function str(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
@@ -23,8 +22,19 @@ function factText(value: unknown): string {
   return str(row.statement) || str(row.fact) || str(row.text) || str(row.summary) || str(row.title);
 }
 
-/** Pull ranked facts out of a POV workflow result. Order and indexing here define
- *  the `fact_id` contract shared with `pov_fact_marks`. */
+function normalizedFactText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+export function povFactId(source: string, text: string): string {
+  const normalized = `${source}:${normalizedFactText(text)}`;
+  const hash = crypto.createHash("sha256").update(normalized).digest("hex").slice(0, 16);
+  return `${source}:${hash}`;
+}
+
+/** Pull ranked facts out of a POV workflow result. Content-hashed IDs define the
+ *  `fact_id` contract shared with `pov_fact_marks`; source-index legacy IDs are
+ *  still resolved for marks created before the hash contract. */
 export function extractPovFacts(result: unknown): PovFact[] {
   const root = result && typeof result === "object" ? (result as Json) : {};
   const candidates: Array<{ source: string; value: unknown }> = [
@@ -41,7 +51,7 @@ export function extractPovFacts(result: unknown): PovFact[] {
     candidate.value.forEach((item, index) => {
       const text = factText(item);
       if (!text) return;
-      out.push({ id: `${candidate.source}:${index + 1}`, text, source: candidate.source });
+      out.push({ id: povFactId(candidate.source, text), legacyId: `${candidate.source}:${index + 1}`, text, source: candidate.source });
     });
   }
   return out;
@@ -102,12 +112,15 @@ export async function loadPriorityAnchors(
   if (!marks.length) return [];
 
   // (entity_key, fact_id) -> fact text, from the latest POV row per entity.
+  // Legacy source-index IDs are also indexed so old marks keep working.
   const factByKey = new Map<string, PovFact>();
   for (const row of povRows) {
     const entityKey = povRowEntityKey(row, args.contactId);
     for (const fact of extractPovFacts(row.result)) {
-      const key = `${entityKey}::${fact.id}`;
-      if (!factByKey.has(key)) factByKey.set(key, fact);
+      for (const id of [fact.id, fact.legacyId]) {
+        const key = `${entityKey}::${id}`;
+        if (!factByKey.has(key)) factByKey.set(key, fact);
+      }
     }
   }
 
@@ -119,7 +132,7 @@ export async function loadPriorityAnchors(
     if (!fact) continue; // fact was rewritten/dropped in a POV rerun — mark is stale
     const rankRaw = mark.rank;
     anchors.push({
-      factId,
+      factId: fact.id,
       entityKey,
       text: fact.text,
       source: fact.source,

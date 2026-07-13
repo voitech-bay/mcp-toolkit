@@ -201,6 +201,7 @@ import {
   handleSequenceStudioLead,
   handleSequenceStudioLeads,
   handleSequenceStudioPushLinkedin,
+  handleStyleSources,
 } from "./sequence-studio-handlers.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
@@ -462,6 +463,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/sequence-studio/leads") { await handleSequenceStudioLeads(req, res); return; }
     if (sequenceStudioLeadMatch) { await handleSequenceStudioLead(req, res, sequenceStudioLeadMatch[1]); return; }
     if (pathname === "/api/sequence-studio/pov-fact-marks") { await handlePovFactMarks(req, res); return; }
+    if (pathname === "/api/sequence-studio/style-sources") { await handleStyleSources(req, res); return; }
     if (pathname === "/api/sequence-studio/push-linkedin") { await handleSequenceStudioPushLinkedin(req, res); return; }
     if (pathname === "/api/users") { await handleUsers(req, res); return; }
     if (pathname === "/api/velvetech/research-csv/preview") { await handleVelvetechResearchCsvPreview(req, res); return; }

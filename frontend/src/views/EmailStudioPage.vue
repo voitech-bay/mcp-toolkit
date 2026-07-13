@@ -11,6 +11,7 @@ type Json = Record<string, any>;
 interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
 interface Annotation { id:string; text:string; start:number; end:number; purpose:string; research_point_ids:string[]; instruction_ids:string[]; explanation:string; classification:"verified"|"product_truth"|"instruction"|"inference"; confidence:string; warnings:string[] }
 interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
+interface StyleSource extends Json { id:string; name:string; technique_summary:string; prompt_block:string; tags?:string[] }
 
 const store = useProjectStore(); const toast = useMessage(); const dialog = useDialog();
 const route = useRoute();
@@ -26,6 +27,8 @@ const replyDrafts = ref<Record<string,string>>({});
 const pickerSearch = ref(""), pickerContacts = ref<PickerContact[]>([]), pickerTotal = ref(0), pickerPage = ref(1), pickerPageSize = ref(20), pickerLoading = ref(false), selectedPickerContact = ref<PickerContact|null>(null);
 const emailOptions = ref({ campaignId:"", batchName:"", persona:"", sequenceStep:1 });
 const bodyInput = ref<InstanceType<typeof NInput>|null>(null);
+const styleSources = ref<StyleSource[]>([]);
+const styleSourceId = ref<string | null>(null);
 
 const humanize = (value:string) => value.replace(/_/g, " ");
 const statusOptions = ["research_ready","ai_draft_made","needs_review","comments_made","regenerated","final_check","approved","sent","research_missing","generation_failed","changes_requested","rejected","sending_failed"].map((value) => ({ label:humanize(value), value }));
@@ -48,6 +51,11 @@ const emailResearchWorkflow = computed<LaunchableWorkflow | undefined>(() =>
   ?? workflows.value.find((w) => w.adapter === "feasible_list")
   ?? workflows.value.find((w) => /research/i.test(`${w.key} ${w.label}`) && w.adapter !== "velvetech_reply")
 );
+const styleSourceOptions = computed(() => styleSources.value.map((source) => ({
+  label: source.name,
+  value: source.id,
+})));
+const selectedStyleSource = computed(() => styleSources.value.find((source) => source.id === styleSourceId.value) ?? null);
 
 function contactLabel(c: PickerContact): string {
   return (typeof c.name === "string" && c.name.trim())
@@ -58,13 +66,26 @@ function contactLabel(c: PickerContact): string {
 function fmt(v:string|null) { return v ? new Date(v).toLocaleString() : "—"; }
 function qs() { const q = new URLSearchParams({ projectId:String(store.selectedProjectId), page:String(page.value), pageSize:String(pageSize.value) }); if(search.value.trim())q.set("search",search.value.trim()); const status = savedView.value !== "all" ? savedView.value : statusFilter.value; if(status)q.set("status",status); if(campaignFilter.value)q.set("campaign",campaignFilter.value); if(batchFilter.value)q.set("batch",batchFilter.value); if(personaFilter.value)q.set("persona",personaFilter.value); if(reviewerFilter.value)q.set("reviewer",reviewerFilter.value); if(modelFilter.value)q.set("model",modelFilter.value); if(qualityFilter.value)q.set("researchQuality",qualityFilter.value); if(dateFrom.value)q.set("dateFrom",dateFrom.value); if(dateTo.value)q.set("dateTo",dateTo.value); if(openOnly.value)q.set("hasOpenComments","true"); return q; }
 async function load() { if(!store.selectedProjectId)return; loading.value=true; error.value=""; try { const r=await fetch(`/api/email-studio/emails?${qs()}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); rows.value=j.data??[]; total.value=j.total??0; } catch(e){error.value=e instanceof Error?e.message:"Could not load emails"} finally{loading.value=false} }
+async function loadStyleSources() {
+  if (!store.selectedProjectId) return;
+  try {
+    const r = await fetch(`/api/sequence-studio/style-sources?projectId=${store.selectedProjectId}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Could not load styles");
+    styleSources.value = j.data ?? [];
+    if (styleSourceId.value && !styleSources.value.some((source) => source.id === styleSourceId.value)) styleSourceId.value = null;
+  } catch {
+    styleSources.value = [];
+    styleSourceId.value = null;
+  }
+}
 async function openQueryEmail() {
   const emailId = typeof route.query.emailId === "string" ? route.query.emailId : "";
   const projectId = typeof route.query.projectId === "string" ? route.query.projectId : "";
   if (projectId && projectId !== store.selectedProjectId) store.selectProject(projectId);
   if (emailId) await openEmail(emailId);
 }
-let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows()}); watch([page,pageSize],load); watch(()=>route.query.emailId,()=>{void openQueryEmail()}); onMounted(()=>{void load();void loadWorkflows();void openQueryEmail()});
+let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows();void loadStyleSources()}); watch([page,pageSize],load); watch(()=>route.query.emailId,()=>{void openQueryEmail()}); onMounted(()=>{void load();void loadWorkflows();void loadStyleSources();void openQueryEmail()});
 
 function shouldIgnoreRowClick(event: MouseEvent): boolean {
   const target = event.target;
@@ -179,7 +200,7 @@ async function generate(initial=false,scope="full"){
   const loadingToast = toast.loading(initial ? "Researching and drafting the email… this can take up to a minute." : "Regenerating… this can take up to a minute.", { duration: 0 });
   try{
     const selection=scope==="selection"?selectedText.value:scope==="paragraph"?paragraphSelection():null;
-    const j=await request(`/api/email-studio/emails/${selectedId.value}/${path}`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId,prompt:regenerationPrompt.value||undefined,scope,selection,includedResearchPointIds:selectedResearch.value})});
+    const j=await request(`/api/email-studio/emails/${selectedId.value}/${path}`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId,prompt:regenerationPrompt.value||undefined,scope,selection,includedResearchPointIds:selectedResearch.value,styleSourceId:styleSourceId.value||undefined})});
     loadingToast.destroy();
     if(initial){toast.success("AI draft created");await refreshDetail()}else{candidate.value=j.version;compareOpen.value=true;toast.success("Regeneration candidate ready")}
   }catch(e){
@@ -296,9 +317,11 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
           <NAlert v-if="lastGenerationFailure" type="error" style="margin-bottom:12px" :show-icon="false">
             <strong>Last attempt failed:</strong> {{lastGenerationFailure.reason || "Unknown error"}}
           </NAlert>
-          <template v-if="currentVersion"><NFormItem label="Subject"><NInput v-model:value="subject" @update:value="dirty=true"/></NFormItem><NFormItem label="Body"><NInput ref="bodyInput" v-model:value="emailBody" type="textarea" :autosize="{minRows:12,maxRows:24}" @select="captureSelection" @mouseup="captureSelection" @keyup="captureSelection" @update:value="dirty=true"/></NFormItem><NSpace><NButton type="primary" :disabled="!dirty||!!generating" @click="saveEdits">Save as new version</NButton><NButton :loading="generating==='full'" :disabled="!!generating" @click="generate(false,'full')">Regenerate all</NButton><NButton :loading="generating==='paragraph'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'paragraph')">Regenerate paragraph</NButton><NButton :loading="generating==='selection'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'selection')">Regenerate selection</NButton></NSpace><NInput v-model:value="regenerationPrompt" type="textarea" placeholder="Optional regeneration direction…" :autosize="{minRows:2,maxRows:4}" style="margin-top:10px"/><h4>Annotated preview</h4><div class="annotated"><template v-for="(s,i) in annotatedSegments" :key="i"><span v-if="s.annotation" class="annotated-span" :style="{borderBottomColor:annotationColor(s.annotation),backgroundColor:annotationColor(s.annotation)+'22'}" :title="`${s.annotation.purpose}\n${s.annotation.explanation}\nResearch: ${s.annotation.research_point_ids.join(', ')||'none'}\nRules: ${s.annotation.instruction_ids.join(', ')||'none'}\nConfidence: ${s.annotation.confidence}`">{{s.text}}</span><span v-else>{{s.text}}</span></template></div><div v-if="currentVersion.validation_results?.length"><NAlert v-for="v in currentVersion.validation_results" :key="v.code+v.message" :type="v.severity==='error'?'error':'warning'" :show-icon="false" style="margin-top:6px">{{v.message}}</NAlert></div></template>
+          <template v-if="currentVersion"><NFormItem label="Subject"><NInput v-model:value="subject" @update:value="dirty=true"/></NFormItem><NFormItem label="Body"><NInput ref="bodyInput" v-model:value="emailBody" type="textarea" :autosize="{minRows:12,maxRows:24}" @select="captureSelection" @mouseup="captureSelection" @keyup="captureSelection" @update:value="dirty=true"/></NFormItem><NFormItem label="Style technique"><NSelect v-model:value="styleSourceId" clearable :options="styleSourceOptions" placeholder="Default Velvetech style"/></NFormItem><NAlert v-if="selectedStyleSource" type="info" :show-icon="false" style="margin-bottom:10px">{{selectedStyleSource.technique_summary}}</NAlert><NSpace><NButton type="primary" :disabled="!dirty||!!generating" @click="saveEdits">Save as new version</NButton><NButton :loading="generating==='full'" :disabled="!!generating" @click="generate(false,'full')">Regenerate all</NButton><NButton :loading="generating==='paragraph'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'paragraph')">Regenerate paragraph</NButton><NButton :loading="generating==='selection'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'selection')">Regenerate selection</NButton></NSpace><NInput v-model:value="regenerationPrompt" type="textarea" placeholder="Optional regeneration direction…" :autosize="{minRows:2,maxRows:4}" style="margin-top:10px"/><h4>Annotated preview</h4><div class="annotated"><template v-for="(s,i) in annotatedSegments" :key="i"><span v-if="s.annotation" class="annotated-span" :style="{borderBottomColor:annotationColor(s.annotation),backgroundColor:annotationColor(s.annotation)+'22'}" :title="`${s.annotation.purpose}\n${s.annotation.explanation}\nResearch: ${s.annotation.research_point_ids.join(', ')||'none'}\nRules: ${s.annotation.instruction_ids.join(', ')||'none'}\nConfidence: ${s.annotation.confidence}`">{{s.text}}</span><span v-else>{{s.text}}</span></template></div><div v-if="currentVersion.validation_results?.length"><NAlert v-for="v in currentVersion.validation_results" :key="v.code+v.message" :type="v.severity==='error'?'error':'warning'" :show-icon="false" style="margin-top:6px">{{v.message}}</NAlert></div></template>
           <template v-else>
             <NEmpty :description="generating==='initial' ? 'Researching and drafting… this can take up to a minute.' : 'No draft yet'"/>
+            <NFormItem label="Style technique" style="margin-top:12px"><NSelect v-model:value="styleSourceId" clearable :options="styleSourceOptions" placeholder="Default Velvetech style"/></NFormItem>
+            <NAlert v-if="selectedStyleSource" type="info" :show-icon="false" style="margin-bottom:10px">{{selectedStyleSource.technique_summary}}</NAlert>
             <NButton type="primary" style="margin-top:12px" :loading="generating==='initial'" :disabled="!!generating" @click="generate(true)">{{lastGenerationFailure ? "Try again" : "Research and create AI draft"}}</NButton>
           </template>
         </section>

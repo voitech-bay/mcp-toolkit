@@ -1,19 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractPovFacts, loadPriorityAnchors } from "./pov-facts.js";
+import { extractPovFacts, loadPriorityAnchors, povFactId } from "./pov-facts.js";
 import { N8N_WORKFLOW_RESULTS_TABLE } from "./supabase.js";
 
-test("extractPovFacts assigns stable source-indexed ids", () => {
+test("extractPovFacts assigns content-hashed ids and keeps legacy ids", () => {
   const facts = extractPovFacts({
     headline_facts: ["Raised a Series B", { statement: "Hiring 12 backend engineers" }],
     verified_signals: [{ fact: "Migrated to AWS" }],
   });
   assert.deepEqual(
     facts.map((f) => f.id),
+    [
+      povFactId("verified_signals", "Migrated to AWS"),
+      povFactId("headline_facts", "Raised a Series B"),
+      povFactId("headline_facts", "Hiring 12 backend engineers"),
+    ]
+  );
+  assert.deepEqual(
+    facts.map((f) => f.legacyId),
     ["verified_signals:1", "headline_facts:1", "headline_facts:2"]
   );
-  assert.equal(facts.find((f) => f.id === "headline_facts:1")?.text, "Raised a Series B");
-  assert.equal(facts.find((f) => f.id === "verified_signals:1")?.text, "Migrated to AWS");
+  assert.equal(povFactId("headline_facts", "Raised   a Series B"), povFactId("headline_facts", "raised a series b"));
+  assert.equal(facts.find((f) => f.legacyId === "headline_facts:1")?.text, "Raised a Series B");
+  assert.equal(facts.find((f) => f.legacyId === "verified_signals:1")?.text, "Migrated to AWS");
 });
 
 // Minimal chainable Supabase stub: every builder method returns the awaitable
@@ -47,9 +56,9 @@ test("loadPriorityAnchors joins marks to facts, drops stale, and orders by rank"
     },
     pov_fact_marks: {
       data: [
-        { entity_key: CONTACT, fact_id: "verified_signals:2", priority: true, rank: 2, comment: null, author_id: null, updated_at: "2026-07-13T09:00:00Z" },
+        { entity_key: CONTACT, fact_id: povFactId("verified_signals", "Spoke at re:Invent"), priority: true, rank: 2, comment: null, author_id: null, updated_at: "2026-07-13T09:00:00Z" },
         { entity_key: CONTACT, fact_id: "verified_signals:1", priority: true, rank: 1, comment: "Lead with this", author_id: null, updated_at: "2026-07-13T08:00:00Z" },
-        { entity_key: COMPANY, fact_id: "headline_facts:1", priority: true, rank: null, comment: null, author_id: null, updated_at: "2026-07-13T10:00:00Z" },
+        { entity_key: COMPANY, fact_id: povFactId("headline_facts", "Company opened a Berlin office"), priority: true, rank: null, comment: null, author_id: null, updated_at: "2026-07-13T10:00:00Z" },
         { entity_key: CONTACT, fact_id: "verified_signals:9", priority: true, rank: 5, comment: null, author_id: null, updated_at: "2026-07-13T07:00:00Z" }, // stale: no such fact
       ],
       error: null,
@@ -64,7 +73,7 @@ test("loadPriorityAnchors joins marks to facts, drops stale, and orders by rank"
     ["Owns the data platform roadmap", "Spoke at re:Invent", "Company opened a Berlin office"]
   );
   assert.equal(anchors[0].comment, "Lead with this");
-  assert.equal(anchors[0].factId, "verified_signals:1");
+  assert.equal(anchors[0].factId, povFactId("verified_signals", "Owns the data platform roadmap"));
 });
 
 test("loadPriorityAnchors returns empty when there are no marks", async () => {

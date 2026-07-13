@@ -197,6 +197,7 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/sequence-studio/leads") return true;
   if (/^\/api\/sequence-studio\/leads\/[^/]+$/.test(pathname)) return true;
   if (pathname === "/api/sequence-studio/pov-fact-marks") return true;
+  if (pathname === "/api/sequence-studio/style-sources") return true;
   if (pathname === "/api/sequence-studio/push-linkedin") return true;
   return false;
 }

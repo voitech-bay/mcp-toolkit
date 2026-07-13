@@ -330,6 +330,20 @@ export async function handlePovFactMarks(req: IncomingMessage, res: ServerRespon
   return send(res, result.error ? 500 : 200, result.error ? { error: result.error.message } : { data: result.data });
 }
 
+export async function handleStyleSources(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "GET") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const projectId = str(reqUrl(req).searchParams.get("projectId"));
+  if (!validUuid(projectId)) return send(res, 400, { error: "projectId is required" });
+  const result = await client
+    .from("style_sources")
+    .select("id, project_id, name, origin_url, technique_summary, prompt_block, tags, status")
+    .eq("status", "active")
+    .or(`project_id.is.null,project_id.eq.${projectId}`)
+    .order("name", { ascending: true });
+  return send(res, result.error ? 500 : 200, result.error ? { error: result.error.message } : { data: result.data ?? [] });
+}
+
 function dmFieldName(email: Json): string {
   const target = str(email.external_target);
   const match = target.match(/^getsales:(li_msg_\d+)$/);
