@@ -151,6 +151,11 @@ import {
 import { handleLeadViewsItems, handleLeadViewsDecide } from "./lead-views-handlers.js";
 import { handleMessageLog } from "./message-log-handlers.js";
 import { handleUsers } from "./users-handlers.js";
+import { handleAuthLogin, handleAuthLogout, handleAuthSession } from "./auth-handlers.js";
+import {
+  handleVelvetechResearchCsvLaunch,
+  handleVelvetechResearchCsvPreview,
+} from "./velvetech-csv-launch-handlers.js";
 import { syncEventBus, type SyncEvent } from "./services/sync-event-bus.js";
 import {
   attachWorkerListSubscriberSocket,
@@ -161,6 +166,7 @@ import { createMcpHandler } from "./server.js";
 import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
 import { startScheduledGetSalesSync } from "./services/getsales-sync-scheduler.js";
 import { assertSupabaseConfigured } from "./services/supabase.js";
+import { assertAuthConfigured, getAuthSession, isPublicAuthPath, isVelvetechAllowedApiPath, sendAuthError } from "./services/auth.js";
 import {
   handleCreateOutreachRun,
   handleListOutreachRuns,
@@ -298,6 +304,7 @@ const server = createServer(async (req, res) => {
   if (req.method === "OPTIONS" && !pathname.startsWith("/mcp")) {
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-User-Id");
+    res.setHeader("Access-Control-Allow-Credentials", "true");
     res.writeHead(204);
     res.end();
     return;
@@ -389,6 +396,16 @@ const server = createServer(async (req, res) => {
   const emailStudioCommentMatch = !emailStudioCommentReplyMatch && pathname.match(/^\/api\/email-studio\/comments\/([^/]+)$/);
 
   try {
+    if (pathname === "/api/auth/session") { await handleAuthSession(req, res); return; }
+    if (pathname === "/api/auth/login") { await handleAuthLogin(req, res); return; }
+    if (pathname === "/api/auth/logout") { await handleAuthLogout(req, res); return; }
+    if (pathname.startsWith("/api/") && !isPublicAuthPath(pathname)) {
+      const session = getAuthSession(req);
+      if (!session) return sendAuthError(res);
+      if (session.role === "velvetech" && !isVelvetechAllowedApiPath(pathname)) {
+        return sendAuthError(res, 403, "Velvetech login cannot access this workspace route");
+      }
+    }
     if (pathname === "/api/email-studio/contact-search") { if (req.method === "GET") await handleEmailStudioContactSearch(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/emails") { if (req.method === "GET") await handleEmailStudioList(req, res); else if (req.method === "POST") await handleEmailStudioCreate(req, res); else { res.writeHead(405); res.end(); } return; }
     if (emailStudioStatusMatch) { if (req.method === "PATCH") await handleEmailStudioStatus(req, res, emailStudioStatusMatch[1]); else { res.writeHead(405); res.end(); } return; }
@@ -405,6 +422,8 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/email-studio/ingest-from-n8n") { if (req.method === "POST") await handleEmailStudioIngestFromN8n(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/users") { await handleUsers(req, res); return; }
+    if (pathname === "/api/velvetech/research-csv/preview") { await handleVelvetechResearchCsvPreview(req, res); return; }
+    if (pathname === "/api/velvetech/research-csv/launch") { await handleVelvetechResearchCsvLaunch(req, res); return; }
     if (pathname === "/api/outreach-agent/runs") {
       if (req.method === "POST") await handleCreateOutreachRun(req, res);
       else if (req.method === "GET") await handleListOutreachRuns(req, res);
@@ -1281,6 +1300,7 @@ wssSync.on("connection", (ws: WebSocket, _req: unknown, runId: string) => {
 });
 
 assertSupabaseConfigured();
+assertAuthConfigured();
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`API + static + MCP: http://localhost:${PORT}`);

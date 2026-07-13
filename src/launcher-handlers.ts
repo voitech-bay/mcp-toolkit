@@ -23,7 +23,9 @@ import {
   findWorkflow,
   triggerWorkflowByUuids,
   triggerWorkflowPayload,
+  VELVETECH_PROJECT_ID,
 } from "./services/n8n-trigger.js";
+import { getAuthSession } from "./services/auth.js";
 import { fetchAllSenders, sendLinkedInMessage } from "./services/source-api.js";
 
 const LAUNCH_RUNS_TABLE = "n8n_launch_runs";
@@ -400,7 +402,10 @@ async function buildVelvetechMessagingPayloads(
 export async function handleN8nWorkflows(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
   const url = new URL(req.url ?? "/", "http://localhost");
-  const projectId = url.searchParams.get("projectId")?.trim() ?? "";
+  const session = getAuthSession(req);
+  const projectId = session?.role === "velvetech"
+    ? VELVETECH_PROJECT_ID
+    : url.searchParams.get("projectId")?.trim() ?? "";
   const items = listLaunchableWorkflows().filter((w) => !projectId || w.project === projectId).map((w) => ({
     key: w.key,
     label: w.label,
@@ -422,6 +427,10 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
   const workflowKey = str(body, "workflowKey");
   const wf = findWorkflow(workflowKey);
   if (!wf) return sendJson(res, 400, { error: `Unknown workflowKey: ${workflowKey || "(missing)"}` });
+  const session = getAuthSession(req);
+  if (session?.role === "velvetech" && wf.project !== VELVETECH_PROJECT_ID) {
+    return sendJson(res, 403, { error: "Selected workflow is not available for this login" });
+  }
 
   const requestedProjectId = str(body, "projectId") || wf.project;
   if (requestedProjectId !== wf.project) {

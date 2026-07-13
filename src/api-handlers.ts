@@ -206,6 +206,8 @@ import {
 import { persistWorkerPresenceToSupabase } from "./services/worker-presence-db.js";
 import { getWorkersUiSnapshot } from "./services/worker-ui-snapshot.js";
 import { broadcastEnrichmentBatchStarted } from "./services/enrichment-realtime.js";
+import { getAuthSession } from "./services/auth.js";
+import { VELVETECH_PROJECT_ID } from "./services/n8n-trigger.js";
 import {
   verifyFirefliesHubSignature,
   normalizeFirefliesPayload,
@@ -2215,6 +2217,12 @@ export async function handleGetProjects(
   if (result.error) {
     res.writeHead(500);
     res.end(JSON.stringify({ data: [], error: result.error }));
+    return;
+  }
+  const session = getAuthSession(req);
+  if (session?.role === "velvetech") {
+    res.writeHead(200);
+    res.end(JSON.stringify({ data: result.data.filter((p) => p.id === VELVETECH_PROJECT_ID) }));
     return;
   }
   res.writeHead(200);

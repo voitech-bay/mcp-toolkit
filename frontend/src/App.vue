@@ -42,10 +42,12 @@ import {
   MailIcon,
   RocketIcon,
   LayersIcon,
+  LogOutIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
-import { isFeasibleProjectId } from "./project-ids";
+import { VELVETECH_PROJECT_ID, isFeasibleProjectId } from "./project-ids";
 
+type AuthSession = { role: "workspace" | "velvetech"; name: string; projectId: string | null; exp: number };
 type AppUser = { id: string; name: string; color: string };
 const USER_STORAGE_KEY = "voitech.selectedUserId";
 const selectedUserId = ref<string | null>(localStorage.getItem(USER_STORAGE_KEY));
@@ -79,6 +81,12 @@ const naiveTheme = computed(() => (isDark.value ? darkTheme : lightTheme));
 
 const route = useRoute();
 const router = useRouter();
+const authLoading = ref(true);
+const authSession = ref<AuthSession | null>(null);
+const loginForm = ref({ login: "workspace", password: "" });
+const loginLoading = ref(false);
+const loginError = ref("");
+const isVelvetechLogin = computed(() => authSession.value?.role === "velvetech");
 
 const isHome = computed(() => route.path === "/");
 const isAnalyticsGroupActive = computed(
@@ -383,8 +391,60 @@ function toggleTheme() {
   isDark.value = !isDark.value;
 }
 
-projectStore.loadProjects();
-void loadUsers();
+async function loadAppData() {
+  await projectStore.loadProjects();
+  if (isVelvetechLogin.value) {
+    projectStore.selectProject(VELVETECH_PROJECT_ID);
+    if (route.path !== "/velvetech/research-launch" && route.path !== "/n8n/workflow-results") {
+      await router.replace("/velvetech/research-launch");
+    }
+  }
+  await loadUsers();
+}
+
+async function loadAuthSession() {
+  try {
+    const r = await fetch("/api/auth/session");
+    const j = (await r.json()) as { authenticated?: boolean; session?: AuthSession | null };
+    authSession.value = j.authenticated && j.session ? j.session : null;
+    if (authSession.value) await loadAppData();
+  } catch {
+    authSession.value = null;
+  } finally {
+    authLoading.value = false;
+  }
+}
+
+async function submitLogin() {
+  loginLoading.value = true;
+  loginError.value = "";
+  try {
+    const r = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(loginForm.value),
+    });
+    const j = (await r.json()) as { error?: string };
+    if (!r.ok) {
+      loginError.value = j.error ?? "Invalid login";
+      return;
+    }
+    await loadAuthSession();
+  } catch {
+    loginError.value = "Login failed";
+  } finally {
+    loginLoading.value = false;
+  }
+}
+
+async function logout() {
+  await fetch("/api/auth/logout", { method: "POST" });
+  authSession.value = null;
+  projectStore.selectProject(null);
+  loginForm.value.password = "";
+}
+
+void loadAuthSession();
 
 /** Header chips: last sync + analytics day range (same payload as home overview). */
 interface HeaderDashboardPayload {
@@ -430,6 +490,10 @@ async function loadHeaderDashboard() {
 watch(
   () => projectStore.selectedProjectId,
   (projectId) => {
+    if (isVelvetechLogin.value && projectId !== VELVETECH_PROJECT_ID) {
+      projectStore.selectProject(VELVETECH_PROJECT_ID);
+      return;
+    }
     if (route.path === "/mssp-leaders" && !isFeasibleProjectId(projectId)) {
       router.push("/companies");
     }
@@ -584,16 +648,53 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
     <NDialogProvider>
     <NConfigProvider :theme="naiveTheme">
       <div class="app">
+        <main v-if="authLoading" class="login-shell">
+          <NCard class="login-card">
+            <NText depth="3">Checking session…</NText>
+          </NCard>
+        </main>
+        <main v-else-if="!authSession" class="login-shell">
+          <NCard class="login-card" title="Voitech">
+            <form @submit.prevent="submitLogin">
+              <NSpace vertical size="medium">
+                <NSelect
+                  v-model:value="loginForm.login"
+                  :options="[
+                    { label: 'Voitech workspace', value: 'workspace' },
+                    { label: 'Velvetech', value: 'velvetech' },
+                  ]"
+                  size="large"
+                />
+                <NInput
+                  v-model:value="loginForm.password"
+                  type="password"
+                  size="large"
+                  placeholder="Password"
+                  show-password-on="click"
+                />
+                <NAlert v-if="loginError" type="error" :show-icon="false">{{ loginError }}</NAlert>
+                <NButton type="primary" attr-type="submit" block size="large" :loading="loginLoading">
+                  Log in
+                </NButton>
+              </NSpace>
+            </form>
+          </NCard>
+        </main>
+        <template v-else>
         <NCard class="header-card">
           <header class="header">
             <div class="header-project">
-              <NSelect v-model:value="selectedProjectId" :options="projectOptions" :loading="projectStore.loading"
+              <NSelect v-if="!isVelvetechLogin" v-model:value="selectedProjectId" :options="projectOptions" :loading="projectStore.loading"
                 :render-label="renderProjectLabel" placeholder="Select project…" clearable size="small"
                 style="width: 220px" />
+              <NButton v-else quaternary size="small" @click="router.push('/velvetech/research-launch')">
+                <RocketIcon :size="14" style="margin-right: 4px" />
+                Velvetech research
+              </NButton>
               <NSelect v-model:value="selectedUserId" :options="userOptions" :loading="usersLoading"
                 :render-label="renderUserLabel" placeholder="User…" clearable size="small"
                 style="width: 150px" />
-              <template v-if="selectedProjectId">
+              <template v-if="selectedProjectId && !isVelvetechLogin">
                 <button
                   v-if="headerBrandImageUrl && !headerImageBroken"
                   type="button"
@@ -614,7 +715,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                 </NButton>
               </template>
               <NSpace
-                v-if="selectedProjectId"
+                v-if="selectedProjectId && !isVelvetechLogin"
                 size="small"
                 align="center"
                 wrap
@@ -653,6 +754,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
             </div>
             <nav class="nav-row" aria-label="Main">
               <NSpace wrap size="small" align="center">
+                <template v-if="!isVelvetechLogin">
                 <NButton quaternary :type="isHome ? 'primary' : undefined" size="small" @click="router.push('/')">
                   <LayoutDashboardIcon :size="14" style="margin-right: 4px" />
                   Home
@@ -697,6 +799,24 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                 <NButton quaternary size="small" @click="toggleTheme()" :title="isDark ? 'Light mode' : 'Dark mode'">
                   <SunIcon :size="14" v-if="isDark" />
                   <MoonIcon :size="14" v-else />
+                </NButton>
+                </template>
+                <NButton
+                  v-if="isVelvetechLogin"
+                  quaternary
+                  size="small"
+                  :type="route.path === '/n8n/workflow-results' ? 'primary' : undefined"
+                  @click="router.push('/n8n/workflow-results')"
+                >
+                  <WorkflowIcon :size="14" style="margin-right: 4px" />
+                  Results
+                </NButton>
+                <NButton v-if="isVelvetechLogin" quaternary size="small" @click="toggleTheme()" :title="isDark ? 'Light mode' : 'Dark mode'">
+                  <SunIcon :size="14" v-if="isDark" />
+                  <MoonIcon :size="14" v-else />
+                </NButton>
+                <NButton quaternary size="small" @click="logout" title="Log out">
+                  <LogOutIcon :size="14" />
                 </NButton>
               </NSpace>
             </nav>
@@ -775,6 +895,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
             <router-view />
           </template>
         </main>
+        </template>
       </div>
     </NConfigProvider>
     </NDialogProvider>
@@ -791,6 +912,17 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
   min-height: 100vh;
   display: flex;
   flex-direction: column;
+}
+
+.login-shell {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+}
+
+.login-card {
+  width: min(420px, 100%);
 }
 
 .header {
