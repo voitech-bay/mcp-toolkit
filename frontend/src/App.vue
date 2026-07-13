@@ -31,6 +31,7 @@ import {
   BookmarkIcon,
   TagsIcon,
   MessageCircleIcon,
+  SendIcon,
   Table2Icon,
   ChevronDownIcon,
   ClipboardListIcon,
@@ -123,6 +124,7 @@ const PIPELINE_PATHS = [
   "/n8n/workflow-results",
   "/inmail-review",
   "/email-studio",
+  "/sequence-studio",
   "/calls/cold-n8n",
 ] as const;
 const VELVETECH_PATHS = [
@@ -133,6 +135,7 @@ const VELVETECH_PATHS = [
   "/velvetech/research-launch",
   "/n8n/workflow-results",
   "/email-studio",
+  "/sequence-studio",
 ] as const;
 
 function pathInGroup(path: string, group: readonly string[]): boolean {
@@ -254,6 +257,11 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "Email Studio",
     key: "/email-studio",
     icon: () => h(MailIcon, { size: 14 }),
+  },
+  {
+    label: "Sequence Studio",
+    key: "/sequence-studio",
+    icon: () => h(SendIcon, { size: 14 }),
   },
   {
     label: "Cold call (n8n)",
@@ -896,6 +904,10 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   <NButton quaternary :type="route.path === '/email-studio' ? 'primary' : undefined" size="small" @click="router.push('/email-studio')">
                     <MailIcon :size="14" style="margin-right: 4px" />
                     Email Studio
+                  </NButton>
+                  <NButton quaternary :type="route.path === '/sequence-studio' ? 'primary' : undefined" size="small" @click="router.push('/sequence-studio')">
+                    <SendIcon :size="14" style="margin-right: 4px" />
+                    Sequence Studio
                   </NButton>
                 </template>
                 <NButton v-if="isVelvetechLogin" quaternary size="small" @click="toggleTheme()" :title="isDark ? 'Light mode' : 'Dark mode'">

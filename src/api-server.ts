@@ -196,6 +196,12 @@ import {
   handleSmartleadEmailEvent,
   handleEmailStudioIngestFromN8n,
 } from "./email-studio-handlers.js";
+import {
+  handlePovFactMarks,
+  handleSequenceStudioLead,
+  handleSequenceStudioLeads,
+  handleSequenceStudioPushLinkedin,
+} from "./sequence-studio-handlers.js";
 
 const PORT = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
 const mcpHandler = createMcpHandler();
@@ -411,6 +417,7 @@ const server = createServer(async (req, res) => {
   const emailStudioEmailMatch = !emailStudioStatusMatch && !emailStudioGenerateMatch && !emailStudioRegenerateMatch && !emailStudioCommentsMatch && !emailStudioApproveMatch && !emailStudioVersionsMatch && !emailStudioHumanVersionMatch && !emailStudioAdoptMatch && pathname.match(/^\/api\/email-studio\/emails\/([^/]+)$/);
   const emailStudioCommentReplyMatch = pathname.match(/^\/api\/email-studio\/comments\/([^/]+)\/replies$/);
   const emailStudioCommentMatch = !emailStudioCommentReplyMatch && pathname.match(/^\/api\/email-studio\/comments\/([^/]+)$/);
+  const sequenceStudioLeadMatch = pathname.match(/^\/api\/sequence-studio\/leads\/([^/]+)$/);
 
   try {
     if (pathname === "/api/auth/session") { await handleAuthSession(req, res); return; }
@@ -452,6 +459,10 @@ const server = createServer(async (req, res) => {
     if (emailStudioCommentMatch) { if (req.method === "PATCH") await handleEmailStudioPatchComment(req, res, emailStudioCommentMatch[1]); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/ingest-from-n8n") { if (req.method === "POST") await handleEmailStudioIngestFromN8n(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/sequence-studio/leads") { await handleSequenceStudioLeads(req, res); return; }
+    if (sequenceStudioLeadMatch) { await handleSequenceStudioLead(req, res, sequenceStudioLeadMatch[1]); return; }
+    if (pathname === "/api/sequence-studio/pov-fact-marks") { await handlePovFactMarks(req, res); return; }
+    if (pathname === "/api/sequence-studio/push-linkedin") { await handleSequenceStudioPushLinkedin(req, res); return; }
     if (pathname === "/api/users") { await handleUsers(req, res); return; }
     if (pathname === "/api/velvetech/research-csv/preview") { await handleVelvetechResearchCsvPreview(req, res); return; }
     if (pathname === "/api/velvetech/research-csv/launch") { await handleVelvetechResearchCsvLaunch(req, res); return; }

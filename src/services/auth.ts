@@ -181,6 +181,12 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (/^\/api\/email-studio\/emails\/[^/]+\/versions\/[^/]+\/adopt$/.test(pathname)) return true;
   if (/^\/api\/email-studio\/comments\/[^/]+$/.test(pathname)) return true;
   if (/^\/api\/email-studio\/comments\/[^/]+\/replies$/.test(pathname)) return true;
+
+  // Sequence Studio: channel-level review, POV fact marks, and GetSales handoff.
+  if (pathname === "/api/sequence-studio/leads") return true;
+  if (/^\/api\/sequence-studio\/leads\/[^/]+$/.test(pathname)) return true;
+  if (pathname === "/api/sequence-studio/pov-fact-marks") return true;
+  if (pathname === "/api/sequence-studio/push-linkedin") return true;
   return false;
 }
 

@@ -79,6 +79,12 @@ const router = createRouter({
       meta: { title: "Email Studio | MCP Toolkit" },
     },
     {
+      path: "/sequence-studio",
+      name: "SequenceStudio",
+      component: () => import("../views/SequenceStudioPage.vue"),
+      meta: { title: "Sequence Studio | Voitech" },
+    },
+    {
       path: "/calls/cold-n8n",
       name: "ColdCallN8n",
       component: () => import("../views/ColdCallN8nPage.vue"),
