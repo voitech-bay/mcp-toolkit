@@ -10,6 +10,7 @@ import {
   NEmpty,
   NInput,
   NPagination,
+  NSelect,
   NSpace,
   NSpin,
   NTag,
@@ -47,6 +48,21 @@ const total = ref(0);
 const page = ref(1);
 const pageSize = ref(25);
 const search = ref("");
+const companySearch = ref("");
+const statusFilter = ref<string[]>([]);
+const channelFilter = ref<string[]>([]);
+const draftState = ref("all");
+const sendState = ref("all");
+const campaignFilter = ref("");
+const batchFilter = ref("");
+const sequenceIdFilter = ref("");
+const hypothesisIdFilter = ref("");
+const createdFrom = ref("");
+const createdTo = ref("");
+const sentFrom = ref("");
+const sentTo = ref("");
+const sortBy = ref("latest_draft");
+const sortDir = ref("desc");
 const loading = ref(false);
 const error = ref("");
 const detailOpen = ref(false);
@@ -61,6 +77,55 @@ const messages = computed<Json[]>(() => detail.value?.messages ?? []);
 const facts = computed<Json[]>(() => detail.value?.facts ?? []);
 const marks = computed<Json[]>(() => detail.value?.marks ?? []);
 const markKeys = computed(() => new Set(marks.value.filter((m) => m.priority !== false).map((m) => `${m.entity_key}:${m.fact_id}`)));
+const statusOptions = [
+  "needs_attention",
+  "research_ready",
+  "ai_draft_made",
+  "needs_review",
+  "comments_made",
+  "regenerated",
+  "final_check",
+  "approved",
+  "sent",
+  "research_missing",
+  "generation_failed",
+  "changes_requested",
+  "rejected",
+  "sending_failed",
+].map((value) => ({ label: humanize(value), value }));
+const channelOptions = [
+  { label: "Email", value: "email" },
+  { label: "LinkedIn", value: "linkedin_dm" },
+  { label: "InMail", value: "linkedin_inmail" },
+  { label: "Replies", value: "reply" },
+];
+const draftStateOptions = [
+  { label: "All", value: "all" },
+  { label: "Has drafts", value: "has_drafts" },
+  { label: "No drafts", value: "no_drafts" },
+  { label: "Needs attention", value: "needs_attention" },
+  { label: "Approved", value: "approved" },
+  { label: "Sent", value: "sent" },
+];
+const sendStateOptions = [
+  { label: "All", value: "all" },
+  { label: "Sent", value: "sent" },
+  { label: "Unsent", value: "unsent" },
+  { label: "Pushed to GetSales", value: "pushed" },
+  { label: "Not pushed", value: "not_pushed" },
+];
+const sortOptions = [
+  { label: "Latest draft activity", value: "latest_draft" },
+  { label: "Contact created", value: "contact_created" },
+  { label: "Contact name", value: "contact_name" },
+  { label: "Company name", value: "company_name" },
+  { label: "Email created", value: "email_created" },
+  { label: "Sent date", value: "sent_at" },
+];
+const sortDirOptions = [
+  { label: "Newest / Z-A", value: "desc" },
+  { label: "Oldest / A-Z", value: "asc" },
+];
 
 function humanize(value: string | null | undefined) {
   return String(value || "none").replace(/_/g, " ");
@@ -158,8 +223,23 @@ function qs() {
     projectId: String(store.selectedProjectId),
     page: String(page.value),
     pageSize: String(pageSize.value),
+    draftState: draftState.value,
+    sendState: sendState.value,
+    sortBy: sortBy.value,
+    sortDir: sortDir.value,
   });
   if (search.value.trim()) q.set("search", search.value.trim());
+  if (companySearch.value.trim()) q.set("company", companySearch.value.trim());
+  if (statusFilter.value.length) q.set("status", statusFilter.value.join(","));
+  if (channelFilter.value.length) q.set("channel", channelFilter.value.join(","));
+  if (campaignFilter.value.trim()) q.set("campaign", campaignFilter.value.trim());
+  if (batchFilter.value.trim()) q.set("batch", batchFilter.value.trim());
+  if (sequenceIdFilter.value.trim()) q.set("sequenceId", sequenceIdFilter.value.trim());
+  if (hypothesisIdFilter.value.trim()) q.set("hypothesisId", hypothesisIdFilter.value.trim());
+  if (createdFrom.value.trim()) q.set("createdFrom", createdFrom.value.trim());
+  if (createdTo.value.trim()) q.set("createdTo", createdTo.value.trim());
+  if (sentFrom.value.trim()) q.set("sentFrom", sentFrom.value.trim());
+  if (sentTo.value.trim()) q.set("sentTo", sentTo.value.trim());
   return q;
 }
 
@@ -297,7 +377,7 @@ function openEmailMessage(message: Json) {
 }
 
 let timer: number | undefined;
-watch(search, () => {
+watch([search, companySearch, statusFilter, channelFilter, draftState, sendState, campaignFilter, batchFilter, sequenceIdFilter, hypothesisIdFilter, createdFrom, createdTo, sentFrom, sentTo, sortBy, sortDir], () => {
   page.value = 1;
   window.clearTimeout(timer);
   timer = window.setTimeout(load, 250);
@@ -324,7 +404,22 @@ onMounted(load);
     </div>
 
     <div class="toolbar">
-      <NInput v-model:value="search" clearable placeholder="Search contacts, companies, roles..." />
+      <NInput v-model:value="search" clearable placeholder="Contact, role, email..." />
+      <NInput v-model:value="companySearch" clearable placeholder="Company" />
+      <NSelect v-model:value="statusFilter" multiple clearable filterable :options="statusOptions" placeholder="Statuses" />
+      <NSelect v-model:value="channelFilter" multiple clearable :options="channelOptions" placeholder="Channels" />
+      <NSelect v-model:value="draftState" :options="draftStateOptions" placeholder="Draft state" />
+      <NSelect v-model:value="sendState" :options="sendStateOptions" placeholder="Send/push state" />
+      <NInput v-model:value="campaignFilter" clearable placeholder="Campaign / flow" />
+      <NInput v-model:value="batchFilter" clearable placeholder="Batch / launch" />
+      <NInput v-model:value="sequenceIdFilter" clearable placeholder="Sequence ID" />
+      <NInput v-model:value="hypothesisIdFilter" clearable placeholder="Hypothesis ID" />
+      <NInput v-model:value="createdFrom" clearable placeholder="Created from YYYY-MM-DD" />
+      <NInput v-model:value="createdTo" clearable placeholder="Created to YYYY-MM-DD" />
+      <NInput v-model:value="sentFrom" clearable placeholder="Sent from YYYY-MM-DD" />
+      <NInput v-model:value="sentTo" clearable placeholder="Sent to YYYY-MM-DD" />
+      <NSelect v-model:value="sortBy" :options="sortOptions" placeholder="Sort by" />
+      <NSelect v-model:value="sortDir" :options="sortDirOptions" placeholder="Direction" />
       <NButton :loading="loading" @click="load">Refresh</NButton>
     </div>
 
@@ -508,7 +603,8 @@ onMounted(load);
 .sequence-studio{max-width:1760px;margin:auto;color:#f8fafc}
 .header-row{display:flex;justify-content:space-between;gap:16px;align-items:flex-start;margin-bottom:14px}
 .header-row h1{margin:0}
-.toolbar{display:grid;grid-template-columns:minmax(260px,520px) auto;gap:10px;align-items:center;margin-bottom:12px}
+.toolbar{display:grid;grid-template-columns:repeat(6,minmax(150px,1fr)) auto;gap:10px;align-items:center;margin-bottom:12px}
+.toolbar :deep(.n-input),.toolbar :deep(.n-base-selection){min-height:34px}
 .muted{color:#cbd5e1;font-size:.86em}
 .lead-stack{display:flex;flex-direction:column;gap:10px}
 .lead-card{border:1px solid #334155;border-radius:8px;background:#111827;overflow:hidden}
@@ -551,5 +647,6 @@ onMounted(load);
 .field-preview pre{white-space:pre-wrap;word-break:break-word;padding:8px;border-radius:6px;background:rgba(128,128,128,.12)}
 @media(max-width:1280px){.tracks-grid{grid-template-columns:1fr}.lead-expanded{grid-template-columns:minmax(0,1fr) minmax(280px,360px)}}
 @media(max-width:1180px){.lead-header{grid-template-columns:28px 38px minmax(180px,1fr) auto}.channel-pills{grid-column:1/-1}.lead-expanded{grid-template-columns:1fr}.tracks-grid{grid-template-columns:1fr}.side-fact-list{max-height:none}}
+@media(max-width:1400px){.toolbar{grid-template-columns:repeat(4,minmax(150px,1fr)) auto}}
 @media(max-width:960px){.header-row,.message-head{flex-direction:column}.toolbar,.detail-grid{grid-template-columns:1fr}.lead-header{grid-template-columns:28px 38px 1fr}.lead-header>.n-button{grid-column:1/-1}.channel-pills{grid-template-columns:1fr}}
 </style>

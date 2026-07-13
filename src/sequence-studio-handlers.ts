@@ -8,6 +8,7 @@ type Json = Record<string, unknown>;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LINKEDIN_CHANNELS = ["linkedin_dm", "linkedin_inmail"] as const;
+const NEEDS_ATTENTION_STATUSES = new Set(["ai_draft_made", "needs_review", "comments_made", "regenerated", "final_check", "changes_requested", "research_missing", "generation_failed", "sending_failed"]);
 
 function send(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -37,6 +38,25 @@ function validUuid(value: unknown): value is string {
   return typeof value === "string" && UUID_RE.test(value);
 }
 
+function csv(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  return value.split(",").map((part) => part.trim()).filter(Boolean);
+}
+
+function dayStart(value: string): string | null {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00.000Z` : null;
+}
+
+function dayEnd(value: string): string | null {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T23:59:59.999Z` : null;
+}
+
+function dateMs(value: unknown): number {
+  const raw = str(value);
+  const ms = raw ? Date.parse(raw) : NaN;
+  return Number.isFinite(ms) ? ms : 0;
+}
+
 function actorUserId(req: IncomingMessage): string | null {
   const value = String(req.headers["x-user-id"] ?? "").trim();
   return UUID_RE.test(value) ? value : null;
@@ -64,6 +84,29 @@ function statusSummary(messages: Json[]) {
     if (!item.latestStatus) item.latestStatus = status || null;
   }
   return byChannel;
+}
+
+async function hypothesisScope(client: NonNullable<ReturnType<typeof getSupabase>>, hypothesisId: string) {
+  const out = { sequenceIds: new Set<string>(), companyIds: new Set<string>() };
+  if (!validUuid(hypothesisId)) return out;
+  const [sequences, targets] = await Promise.all([
+    client.from("outreach_sequences").select("id").eq("hypothesis_id", hypothesisId).limit(1000),
+    client
+      .from("hypothesis_targets")
+      .select("project_companies(company_id)")
+      .eq("hypothesis_id", hypothesisId)
+      .limit(2000),
+  ]);
+  for (const row of (sequences.data ?? []) as Json[]) {
+    const id = str(row.id);
+    if (id) out.sequenceIds.add(id);
+  }
+  for (const row of (targets.data ?? []) as Json[]) {
+    const pc = row.project_companies as Json | Json[] | null | undefined;
+    const companyId = Array.isArray(pc) ? str(pc[0]?.company_id) : str(pc?.company_id);
+    if (companyId) out.companyIds.add(companyId);
+  }
+  return out;
 }
 
 function factText(value: unknown): string {
@@ -119,6 +162,23 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
   const pageSize = Math.min(100, Math.max(1, Number(q.get("pageSize") ?? 25)));
   const from = (page - 1) * pageSize;
   const search = str(q.get("search"));
+  const companySearch = str(q.get("company"));
+  const statuses = csv(q.get("status"));
+  const channels = csv(q.get("channel")).map((channel) => normalizeOutreachMessageChannel(channel, "email"));
+  const draftState = str(q.get("draftState")) || "all";
+  const sendState = str(q.get("sendState")) || "all";
+  const campaign = str(q.get("campaign"));
+  const batch = str(q.get("batch"));
+  const sequenceId = str(q.get("sequenceId"));
+  const hypothesisId = str(q.get("hypothesisId"));
+  const createdFrom = dayStart(str(q.get("createdFrom")));
+  const createdTo = dayEnd(str(q.get("createdTo")));
+  const sentFrom = dayStart(str(q.get("sentFrom")));
+  const sentTo = dayEnd(str(q.get("sentTo")));
+  const sortBy = str(q.get("sortBy")) || "latest_draft";
+  const sortDir = str(q.get("sortDir")) === "asc" ? "asc" : "desc";
+  const requiresMessageScan = Boolean(statuses.length || channels.length || draftState !== "all" || sendState !== "all" || campaign || batch || validUuid(sequenceId) || validUuid(hypothesisId) || createdFrom || createdTo || sentFrom || sentTo || ["latest_draft", "email_created", "sent_at"].includes(sortBy));
+  const hypothesis = await hypothesisScope(client, hypothesisId);
 
   let contactsQuery = client
     .from(CONTACTS_TABLE)
@@ -128,18 +188,43 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
     const safe = search.replace(/[%_,()]/g, "");
     contactsQuery = contactsQuery.or(`name.ilike.%${safe}%,first_name.ilike.%${safe}%,last_name.ilike.%${safe}%,company_name.ilike.%${safe}%,position.ilike.%${safe}%`);
   }
-  const contacts = await contactsQuery.order("created_at", { ascending: false }).range(from, from + pageSize - 1);
+  if (companySearch) contactsQuery = contactsQuery.ilike("company_name", `%${companySearch.replace(/[%_]/g, "")}%`);
+  if (hypothesis.companyIds.size) contactsQuery = contactsQuery.in("company_uuid", [...hypothesis.companyIds]);
+  const contactSort =
+    sortBy === "contact_name" ? "first_name" :
+    sortBy === "company_name" ? "company_name" :
+    "created_at";
+  const contacts = await contactsQuery
+    .order(contactSort, { ascending: sortDir === "asc", nullsFirst: false })
+    .range(requiresMessageScan ? 0 : from, requiresMessageScan ? 2499 : from + pageSize - 1);
   if (contacts.error) return send(res, 500, { error: contacts.error.message });
   const rows = (contacts.data ?? []) as Json[];
   const contactIds = rows.map((row) => String(row.uuid));
 
-  const messages = contactIds.length
-    ? await client
+  let messageQuery = contactIds.length
+    ? client
       .from("outreach_emails")
-      .select("id, contact_id, channel, step_number, sequence_step, status, current_subject, current_body, external_target, external_pushed_at, updated_at")
+      .select("id, contact_id, channel, step_number, sequence_step, status, current_subject, current_body, campaign_id, batch_name, sequence_id, external_target, external_pushed_at, created_at, sent_at, updated_at")
       .eq("project_id", projectId)
       .in("contact_id", contactIds)
-      .order("updated_at", { ascending: false })
+    : null;
+  if (messageQuery && statuses.length) {
+    const expanded = statuses.includes("needs_attention")
+      ? [...new Set([...statuses.filter((s) => s !== "needs_attention"), ...NEEDS_ATTENTION_STATUSES])]
+      : statuses;
+    messageQuery = messageQuery.in("status", expanded);
+  }
+  if (messageQuery && channels.length) messageQuery = messageQuery.in("channel", [...new Set(channels)]);
+  if (messageQuery && campaign) messageQuery = messageQuery.ilike("campaign_id", `%${campaign.replace(/[%_]/g, "")}%`);
+  if (messageQuery && batch) messageQuery = messageQuery.ilike("batch_name", `%${batch.replace(/[%_]/g, "")}%`);
+  if (messageQuery && validUuid(sequenceId)) messageQuery = messageQuery.eq("sequence_id", sequenceId);
+  if (messageQuery && hypothesis.sequenceIds.size) messageQuery = messageQuery.in("sequence_id", [...hypothesis.sequenceIds]);
+  if (messageQuery && createdFrom) messageQuery = messageQuery.gte("created_at", createdFrom);
+  if (messageQuery && createdTo) messageQuery = messageQuery.lte("created_at", createdTo);
+  if (messageQuery && sentFrom) messageQuery = messageQuery.gte("sent_at", sentFrom);
+  if (messageQuery && sentTo) messageQuery = messageQuery.lte("sent_at", sentTo);
+  const messages = messageQuery
+    ? await messageQuery.order("updated_at", { ascending: false }).limit(5000)
     : { data: [], error: null };
   if (messages.error) return send(res, 500, { error: messages.error.message });
 
@@ -149,7 +234,7 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
     byContact.set(id, [...(byContact.get(id) ?? []), msg]);
   }
 
-  const data = rows.map((row) => {
+  let data = rows.map((row) => {
     const drafts = byContact.get(String(row.uuid)) ?? [];
     return {
       contact: { ...row, display_name: contactName(row) },
@@ -159,7 +244,43 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
       messages: drafts,
     };
   });
-  return send(res, 200, { data, total: contacts.count ?? 0, page, pageSize });
+  if (requiresMessageScan) {
+    data = data.filter((row) => {
+      const drafts = row.messages;
+      if (draftState === "has_drafts" && drafts.length === 0) return false;
+      if (draftState === "no_drafts" && drafts.length > 0) return false;
+      if (draftState === "needs_attention" && !drafts.some((m) => NEEDS_ATTENTION_STATUSES.has(str(m.status)))) return false;
+      if (draftState === "approved" && !drafts.some((m) => str(m.status) === "approved")) return false;
+      if (draftState === "sent" && !drafts.some((m) => str(m.status) === "sent" || m.sent_at)) return false;
+      if (sendState === "sent" && !drafts.some((m) => str(m.status) === "sent" || m.sent_at)) return false;
+      if (sendState === "unsent" && drafts.some((m) => str(m.status) === "sent" || m.sent_at)) return false;
+      if (sendState === "pushed" && !drafts.some((m) => m.external_pushed_at)) return false;
+      if (sendState === "not_pushed" && drafts.some((m) => m.external_pushed_at)) return false;
+      if ((statuses.length || channels.length || campaign || batch || validUuid(sequenceId) || createdFrom || createdTo || sentFrom || sentTo || hypothesis.sequenceIds.size) && drafts.length === 0) return false;
+      return true;
+    });
+  }
+  data.sort((a, b) => {
+    const dir = sortDir === "asc" ? 1 : -1;
+    if (sortBy === "contact_name") return dir * String(a.contact.display_name ?? "").localeCompare(String(b.contact.display_name ?? ""));
+    if (sortBy === "company_name") return dir * String((a.contact as Json).company_name ?? "").localeCompare(String((b.contact as Json).company_name ?? ""));
+    const aDrafts = a.messages ?? [];
+    const bDrafts = b.messages ?? [];
+    const aTime =
+      sortBy === "email_created" ? Math.max(0, ...aDrafts.map((m) => dateMs(m.created_at))) :
+      sortBy === "sent_at" ? Math.max(0, ...aDrafts.map((m) => dateMs(m.sent_at))) :
+      sortBy === "contact_created" ? dateMs((a.contact as Json).created_at) :
+      Math.max(0, ...aDrafts.map((m) => dateMs(m.updated_at)), dateMs((a.contact as Json).created_at));
+    const bTime =
+      sortBy === "email_created" ? Math.max(0, ...bDrafts.map((m) => dateMs(m.created_at))) :
+      sortBy === "sent_at" ? Math.max(0, ...bDrafts.map((m) => dateMs(m.sent_at))) :
+      sortBy === "contact_created" ? dateMs((b.contact as Json).created_at) :
+      Math.max(0, ...bDrafts.map((m) => dateMs(m.updated_at)), dateMs((b.contact as Json).created_at));
+    return dir * (aTime - bTime);
+  });
+  const total = requiresMessageScan ? data.length : contacts.count ?? data.length;
+  const pageData = requiresMessageScan ? data.slice(from, from + pageSize) : data;
+  return send(res, 200, { data: pageData, total, page, pageSize });
 }
 
 export async function handleSequenceStudioLead(req: IncomingMessage, res: ServerResponse, contactId: string) {
