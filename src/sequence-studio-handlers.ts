@@ -1,8 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
-import { CONTACTS_TABLE, N8N_WORKFLOW_RESULTS_TABLE, getGetSalesCredentials, getSupabase } from "./services/supabase.js";
+import { CONTACTS_TABLE, getGetSalesCredentials, getSupabase } from "./services/supabase.js";
 import { createLeadCustomField, listLeadCustomFields, updateLeadCustomFields } from "./services/source-api.js";
 import { GETSALES_INMAIL_FIELD_NAMES, arrangeGetSalesFields } from "./services/inmail-review.js";
 import { normalizeOutreachMessageChannel } from "./services/email-studio.js";
+import { extractPovFacts, loadLatestPovRows } from "./services/pov-facts.js";
 
 type Json = Record<string, unknown>;
 
@@ -109,48 +110,6 @@ async function hypothesisScope(client: NonNullable<ReturnType<typeof getSupabase
   return out;
 }
 
-function factText(value: unknown): string {
-  if (typeof value === "string") return value.trim();
-  if (!value || typeof value !== "object") return "";
-  const row = value as Json;
-  return str(row.statement) || str(row.fact) || str(row.text) || str(row.summary) || str(row.title);
-}
-
-function extractFacts(result: unknown): Array<{ id: string; text: string; source: string }> {
-  const root = result && typeof result === "object" ? result as Json : {};
-  const candidates: Array<{ source: string; value: unknown }> = [
-    { source: "verified_signals", value: root.verified_signals },
-    { source: "headline_facts", value: root.headline_facts },
-    { source: "facts", value: root.facts },
-    { source: "signals", value: root.signals },
-    { source: "pov_points", value: root.pov_points },
-    { source: "structured_research.verified_signals", value: (root.structured_research as Json | undefined)?.verified_signals },
-  ];
-  const out: Array<{ id: string; text: string; source: string }> = [];
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate.value)) continue;
-    candidate.value.forEach((item, index) => {
-      const text = factText(item);
-      if (!text) return;
-      out.push({ id: `${candidate.source}:${index + 1}`, text, source: candidate.source });
-    });
-  }
-  return out;
-}
-
-async function latestPovRows(client: NonNullable<ReturnType<typeof getSupabase>>, ids: string[]) {
-  const unique = [...new Set(ids.filter(Boolean))];
-  if (!unique.length) return [];
-  const { data, error } = await client
-    .from(N8N_WORKFLOW_RESULTS_TABLE)
-    .select("id, workflow_name, contact_id, company_id, result, created_at")
-    .eq("workflow_name", "velvetech-pov")
-    .or(`contact_id.in.(${unique.join(",")}),company_id.in.(${unique.join(",")})`)
-    .order("created_at", { ascending: false })
-    .limit(100);
-  if (error) throw new Error(error.message);
-  return (data ?? []) as Json[];
-}
 
 export async function handleSequenceStudioLeads(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== "GET") return send(res, 405, { error: "Method not allowed" });
@@ -307,7 +266,7 @@ export async function handleSequenceStudioLead(req: IncomingMessage, res: Server
       .eq("contact_id", contactId)
       .order("channel", { ascending: true })
       .order("step_number", { ascending: true }),
-    latestPovRows(client, [contactId, str(contactRow.company_uuid)]),
+    loadLatestPovRows(client, [contactId, str(contactRow.company_uuid)]),
     client
       .from("pov_fact_marks")
       .select("*")
@@ -319,7 +278,7 @@ export async function handleSequenceStudioLead(req: IncomingMessage, res: Server
   if (marks.error) return send(res, 500, { error: marks.error.message });
 
   const facts = povRows.flatMap((row) =>
-    extractFacts(row.result).map((fact) => ({
+    extractPovFacts(row.result).map((fact) => ({
       ...fact,
       rowId: row.id,
       entityKey: str(row.contact_id) || str(row.company_id) || contactId,
