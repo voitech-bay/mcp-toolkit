@@ -115,11 +115,21 @@ const BACKLOG_PATHS = [
 const PIPELINE_PATHS = [
   "/sync",
   "/n8n/launch",
+  "/velvetech/research-launch",
   "/n8n/lead-views",
   "/n8n/workflow-results",
   "/inmail-review",
   "/email-studio",
   "/calls/cold-n8n",
+] as const;
+const VELVETECH_PATHS = [
+  "/companies",
+  "/contacts",
+  "/conversations",
+  "/sync",
+  "/velvetech/research-launch",
+  "/n8n/workflow-results",
+  "/email-studio",
 ] as const;
 
 function pathInGroup(path: string, group: readonly string[]): boolean {
@@ -401,7 +411,7 @@ async function loadAppData() {
   await projectStore.loadProjects();
   if (isVelvetechLogin.value) {
     projectStore.selectProject(VELVETECH_PROJECT_ID);
-    if (route.path !== "/velvetech/research-launch" && route.path !== "/n8n/workflow-results") {
+    if (!VELVETECH_PATHS.includes(route.path as typeof VELVETECH_PATHS[number])) {
       await router.replace("/velvetech/research-launch");
     }
   }
@@ -465,7 +475,7 @@ const headerDashboardLoading = ref(false);
 
 async function loadHeaderDashboard() {
   const projectId = projectStore.selectedProjectId;
-  if (!projectId) {
+  if (!projectId || isVelvetechLogin.value) {
     headerDashboard.value = null;
     return;
   }
@@ -502,6 +512,15 @@ watch(
     }
     if (route.path === "/mssp-leaders" && !isFeasibleProjectId(projectId)) {
       router.push("/companies");
+    }
+  }
+);
+
+watch(
+  () => route.path,
+  (path) => {
+    if (isVelvetechLogin.value && !VELVETECH_PATHS.includes(path as typeof VELVETECH_PATHS[number])) {
+      router.replace("/velvetech/research-launch");
     }
   }
 );
@@ -696,7 +715,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                 style="width: 220px" />
               <NButton v-else quaternary size="small" @click="router.push('/velvetech/research-launch')">
                 <RocketIcon :size="14" style="margin-right: 4px" />
-                Velvetech research
+                Velvetech
               </NButton>
               <NSelect v-model:value="selectedUserId" :options="userOptions" :loading="usersLoading"
                 :render-label="renderUserLabel" placeholder="User…" clearable size="small"
@@ -808,16 +827,41 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   <MoonIcon :size="14" v-else />
                 </NButton>
                 </template>
-                <NButton
-                  v-if="isVelvetechLogin"
-                  quaternary
-                  size="small"
-                  :type="route.path === '/n8n/workflow-results' ? 'primary' : undefined"
-                  @click="router.push('/n8n/workflow-results')"
-                >
-                  <WorkflowIcon :size="14" style="margin-right: 4px" />
-                  Results
-                </NButton>
+                <template v-if="isVelvetechLogin">
+                  <NButton quaternary :type="route.path === '/companies' ? 'primary' : undefined" size="small" @click="router.push('/companies')">
+                    <BuildingIcon :size="14" style="margin-right: 4px" />
+                    Companies
+                  </NButton>
+                  <NButton quaternary :type="route.path === '/contacts' ? 'primary' : undefined" size="small" @click="router.push('/contacts')">
+                    <UsersIcon :size="14" style="margin-right: 4px" />
+                    Contacts
+                  </NButton>
+                  <NButton quaternary :type="route.path === '/conversations' ? 'primary' : undefined" size="small" @click="router.push('/conversations')">
+                    <MessageCircleIcon :size="14" style="margin-right: 4px" />
+                    Conversations
+                  </NButton>
+                  <NButton quaternary :type="route.path === '/sync' ? 'primary' : undefined" size="small" @click="router.push('/sync')">
+                    <RefreshCwIcon :size="14" style="margin-right: 4px" />
+                    Sync
+                  </NButton>
+                  <NButton quaternary :type="route.path === '/velvetech/research-launch' ? 'primary' : undefined" size="small" @click="router.push('/velvetech/research-launch')">
+                    <RocketIcon :size="14" style="margin-right: 4px" />
+                    Launch
+                  </NButton>
+                  <NButton
+                    quaternary
+                    size="small"
+                    :type="route.path === '/n8n/workflow-results' ? 'primary' : undefined"
+                    @click="router.push('/n8n/workflow-results')"
+                  >
+                    <WorkflowIcon :size="14" style="margin-right: 4px" />
+                    n8n results
+                  </NButton>
+                  <NButton quaternary :type="route.path === '/email-studio' ? 'primary' : undefined" size="small" @click="router.push('/email-studio')">
+                    <MailIcon :size="14" style="margin-right: 4px" />
+                    Email Studio
+                  </NButton>
+                </template>
                 <NButton v-if="isVelvetechLogin" quaternary size="small" @click="toggleTheme()" :title="isDark ? 'Light mode' : 'Dark mode'">
                   <SunIcon :size="14" v-if="isDark" />
                   <MoonIcon :size="14" v-else />

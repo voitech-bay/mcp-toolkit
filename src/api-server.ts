@@ -167,6 +167,7 @@ import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
 import { startScheduledGetSalesSync } from "./services/getsales-sync-scheduler.js";
 import { assertSupabaseConfigured } from "./services/supabase.js";
 import { assertAuthConfigured, getAuthSession, isPublicAuthPath, isVelvetechAllowedApiPath, sendAuthError } from "./services/auth.js";
+import { VELVETECH_PROJECT_ID } from "./services/n8n-trigger.js";
 import {
   handleCreateOutreachRun,
   handleListOutreachRuns,
@@ -215,6 +216,20 @@ const MIME_TYPES: Record<string, string> = {
   ".woff": "font/woff",
   ".woff2": "font/woff2",
 };
+
+function isVelvetechScopedTableQuery(url: URL): boolean {
+  if (url.pathname !== "/api/supabase-table-query") return true;
+  const table = url.searchParams.get("table");
+  if (table !== "contacts") return false;
+  const filtersParam = url.searchParams.get("filters");
+  if (!filtersParam) return false;
+  try {
+    const filters = JSON.parse(decodeURIComponent(filtersParam)) as Record<string, unknown>;
+    return filters?.project_id === VELVETECH_PROJECT_ID;
+  } catch {
+    return false;
+  }
+}
 
 const servesStatic = async (pathname: string, res: import("node:http").ServerResponse) => {
   const decodedPath = decodeURIComponent(pathname);
@@ -296,6 +311,7 @@ async function serveChartsPublicFile(
 
 const server = createServer(async (req, res) => {
   const url = req.url ?? "";
+  const requestUrl = new URL(url || "/", "http://localhost");
   const pathname = url.includes("?") ? url.slice(0, url.indexOf("?")) : url;
 
   // Allow frontend dev server (and any origin when testing locally)
@@ -404,6 +420,19 @@ const server = createServer(async (req, res) => {
       if (!session) return sendAuthError(res);
       if (session.role === "velvetech" && !isVelvetechAllowedApiPath(pathname)) {
         return sendAuthError(res, 403, "Velvetech login cannot access this workspace route");
+      }
+      if (session.role === "velvetech") {
+        const queryProjectId = requestUrl.searchParams.get("projectId")?.trim();
+        if (queryProjectId && queryProjectId !== VELVETECH_PROJECT_ID) {
+          return sendAuthError(res, 403, "Velvetech login can only access the Velvetech project");
+        }
+        const pathProjectId = pathname.match(/^\/api\/projects\/([^/]+)\//)?.[1];
+        if (pathProjectId && decodeURIComponent(pathProjectId) !== VELVETECH_PROJECT_ID) {
+          return sendAuthError(res, 403, "Velvetech login can only access the Velvetech project");
+        }
+        if (!isVelvetechScopedTableQuery(requestUrl)) {
+          return sendAuthError(res, 403, "Velvetech table queries must be scoped to the Velvetech project");
+        }
       }
     }
     if (pathname === "/api/email-studio/contact-search") { if (req.method === "GET") await handleEmailStudioContactSearch(req, res); else { res.writeHead(405); res.end(); } return; }

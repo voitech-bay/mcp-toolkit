@@ -129,12 +129,49 @@ export function isPublicAuthPath(pathname: string): boolean {
 
 export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/auth/session" || pathname === "/api/auth/logout") return true;
-  if (pathname === "/api/projects" || pathname === "/api/users" || pathname === "/api/n8n/workflows") return true;
-  if (pathname === "/api/n8n/launch") return true;
+  if (pathname === "/api/projects" || pathname === "/api/users") return true;
+
+  // Velvetech data mini-app: Companies, Contacts, Conversations.
+  if (pathname === "/api/project-company-records" || pathname === "/api/project-contact-records") return true;
+  if (pathname === "/api/supabase-table-query") return true;
+  if (pathname === "/api/companies" || pathname === "/api/companies/by-ids" || pathname === "/api/project-companies") return true;
+  if (pathname === "/api/contact-lists" || pathname === "/api/pipeline-stages/contacts") return true;
+  if (pathname === "/api/company-context" || pathname === "/api/company-context-counts") return true;
+  if (pathname === "/api/contact-context" || pathname === "/api/contact-context-counts") return true;
+  if (pathname === "/api/conversations" || pathname === "/api/conversation" || pathname === "/api/conversations/refresh") return true;
+  if (pathname === "/api/contacts/by-company" || pathname === "/api/contacts/find-by-uuid") return true;
+  if (pathname === "/api/cards/company" || pathname === "/api/cards/contact") return true;
+  if (pathname === "/api/hypotheses") return true;
+  if (/^\/api\/hypotheses\/[^/]+\/targets$/.test(pathname)) return true;
+  if (/^\/api\/companies\/[^/]+\/hypotheses$/.test(pathname)) return true;
+  if (pathname === "/api/build-context") return true;
+  if (pathname === "/api/generated-messages" || pathname === "/api/generated-messages/generate") return true;
+  if (/^\/api\/generated-messages\/[^/]+$/.test(pathname)) return true;
+
+  // Velvetech launch and results.
+  if (pathname === "/api/n8n/workflows" || pathname === "/api/n8n/launch") return true;
   if (/^\/api\/n8n\/launch\/[^/]+\/status$/.test(pathname)) return true;
   if (pathname === "/api/n8n/launch/history") return true;
+  if (pathname === "/api/n8n/workflow-results" || pathname === "/api/n8n/workflow-results/query") return true;
+  if (pathname === "/api/n8n/workflow-results/executions") return true;
+  if (/^\/api\/n8n\/workflow-results\/executions\/[^/]+$/.test(pathname)) return true;
   if (pathname === "/api/velvetech/research-csv/preview") return true;
   if (pathname === "/api/velvetech/research-csv/launch") return true;
+
+  // Pipeline sync for Velvetech's GetSales-backed workspace.
+  if (pathname === "/api/sync-preflight" || pathname === "/api/sync-status" || pathname === "/api/sync-history") return true;
+  if (pathname === "/api/supabase-sync" || pathname === "/api/supabase-sync-cancel") return true;
+  if (pathname === "/api/source-api-check") return true;
+  if (/^\/api\/projects\/[^/]+\/integration-secrets\/meta$/.test(pathname)) return true;
+  if (/^\/api\/projects\/[^/]+\/credentials$/.test(pathname)) return true;
+
+  // Email Studio.
+  if (pathname === "/api/email-studio/contact-search" || pathname === "/api/email-studio/emails") return true;
+  if (/^\/api\/email-studio\/emails\/[^/]+$/.test(pathname)) return true;
+  if (/^\/api\/email-studio\/emails\/[^/]+\/(status|generate|regenerate|comments|approve|versions|human-version)$/.test(pathname)) return true;
+  if (/^\/api\/email-studio\/emails\/[^/]+\/versions\/[^/]+\/adopt$/.test(pathname)) return true;
+  if (/^\/api\/email-studio\/comments\/[^/]+$/.test(pathname)) return true;
+  if (/^\/api\/email-studio\/comments\/[^/]+\/replies$/.test(pathname)) return true;
   return false;
 }
 
