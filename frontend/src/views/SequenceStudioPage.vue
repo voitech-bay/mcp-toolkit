@@ -157,6 +157,14 @@ function channelMessages(row: StudioLead, channel: string) {
   return (row.messages ?? []).filter((message) => String(message.channel) === channel);
 }
 
+function approvedLinkedInCount(row: StudioLead) {
+  return (row.messages ?? []).filter((message) => ["linkedin_dm", "linkedin_inmail"].includes(String(message.channel)) && message.status === "approved").length;
+}
+
+function detailApprovedLinkedInCount() {
+  return messages.value.filter((message) => ["linkedin_dm", "linkedin_inmail"].includes(String(message.channel)) && message.status === "approved").length;
+}
+
 function messageTitle(message: Json) {
   const channel = channelLabel(String(message.channel));
   const step = message.step_number ?? message.sequence_step ?? "-";
@@ -368,6 +376,65 @@ async function pushToGetSales(message: Json) {
   });
 }
 
+async function previewSequencePush(contactId: string) {
+  if (!store.selectedProjectId) return;
+  actionLoading.value = `preview-sequence:${contactId}`;
+  try {
+    const r = await fetch("/api/sequence-studio/push-linkedin-sequence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: store.selectedProjectId, contactId, dryRun: true }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Preview failed");
+    dialog.info({
+      title: "GetSales sequence field preview",
+      content: () => h("div", { class: "preview-dialog" }, [
+        h("p", { class: "muted" }, `Lead ${j.leadUuid} · ${Object.keys(j.fields ?? {}).length} field${Object.keys(j.fields ?? {}).length === 1 ? "" : "s"}`),
+        ...Object.entries(j.fields ?? {}).map(([name, value]) => h("div", { class: "field-preview" }, [
+          h("strong", name),
+          h("pre", String(value)),
+        ])),
+        ...(j.warnings ?? []).map((warning: string) => h(NAlert, { type: "warning", showIcon: false }, { default: () => warning })),
+      ]),
+      positiveText: "Close",
+    });
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Preview failed");
+  } finally {
+    actionLoading.value = "";
+  }
+}
+
+async function pushSequenceToGetSales(contactId: string) {
+  if (!store.selectedProjectId) return;
+  dialog.warning({
+    title: "Push approved sequence to GetSales?",
+    content: "This writes all approved LinkedIn and InMail drafts for this contact to GetSales custom fields. It does not send messages.",
+    positiveText: "Push sequence",
+    negativeText: "Cancel",
+    onPositiveClick: async () => {
+      actionLoading.value = `push-sequence:${contactId}`;
+      try {
+        const r = await fetch("/api/sequence-studio/push-linkedin-sequence", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: store.selectedProjectId, contactId, dryRun: false }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error ?? "Push failed");
+        toast.success(`Pushed ${j.updatedDrafts ?? 0} approved draft${j.updatedDrafts === 1 ? "" : "s"} to GetSales`);
+        await refreshDetail();
+        await load();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Push failed", { duration: 9000 });
+      } finally {
+        actionLoading.value = "";
+      }
+    },
+  });
+}
+
 function openEmailStudio() {
   void router.push("/email-studio");
 }
@@ -447,7 +514,27 @@ onMounted(load);
                 <span v-if="!pill.empty" class="muted">{{ pill.summary.total }} draft{{ pill.summary.total === 1 ? "" : "s" }}{{ pill.summary.pushed ? ` · ${pill.summary.pushed} pushed` : "" }}</span>
               </div>
             </div>
-            <NButton size="small" secondary @click="openLead(row.contact.uuid)">Studio</NButton>
+            <NSpace size="small">
+              <NButton
+                size="small"
+                secondary
+                :disabled="!approvedLinkedInCount(row)"
+                :loading="actionLoading === `preview-sequence:${row.contact.uuid}`"
+                @click="previewSequencePush(row.contact.uuid)"
+              >
+                Preview sync
+              </NButton>
+              <NButton
+                size="small"
+                type="primary"
+                :disabled="!approvedLinkedInCount(row)"
+                :loading="actionLoading === `push-sequence:${row.contact.uuid}`"
+                @click="pushSequenceToGetSales(row.contact.uuid)"
+              >
+                Sync sequence
+              </NButton>
+              <NButton size="small" secondary @click="openLead(row.contact.uuid)">Studio</NButton>
+            </NSpace>
           </header>
 
           <div v-if="isExpanded(row.contact.uuid)" class="lead-expanded">
@@ -527,7 +614,30 @@ onMounted(load);
           <template v-if="detail">
             <div class="detail-grid">
               <section class="panel">
-                <h3>Drafts</h3>
+                <div class="panel-head">
+                  <h3>Drafts</h3>
+                  <NSpace size="small">
+                    <NButton
+                      size="small"
+                      secondary
+                      :disabled="!detailApprovedLinkedInCount() || !detail?.contact?.uuid"
+                      :loading="actionLoading === `preview-sequence:${detail?.contact?.uuid}`"
+                      @click="detail?.contact?.uuid && previewSequencePush(detail.contact.uuid)"
+                    >
+                      Preview sync
+                    </NButton>
+                    <NButton
+                      size="small"
+                      type="primary"
+                      :disabled="!detailApprovedLinkedInCount() || !detail?.contact?.uuid"
+                      :loading="actionLoading === `push-sequence:${detail?.contact?.uuid}`"
+                      @click="detail?.contact?.uuid && pushSequenceToGetSales(detail.contact.uuid)"
+                    >
+                      <template #icon><SendIcon :size="14" /></template>
+                      Sync approved sequence
+                    </NButton>
+                  </NSpace>
+                </div>
                 <div v-if="messages.length" class="message-list">
                   <article v-for="message in messages" :key="message.id" class="message-item">
                     <div class="message-head">
@@ -639,6 +749,8 @@ onMounted(load);
 .detail-grid{display:grid;grid-template-columns:minmax(420px,1.25fr) minmax(300px,.75fr);gap:14px}
 .panel{border:1px solid rgba(128,128,128,.24);border-radius:8px;padding:14px;min-height:200px}
 .panel h3{margin-top:0}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.panel-head h3{margin:0}
 .message-list,.fact-list{display:flex;flex-direction:column;gap:10px}
 .message-item,.fact-item{border:1px solid rgba(128,128,128,.2);border-radius:8px;padding:12px;background:rgba(128,128,128,.05)}
 .message-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}

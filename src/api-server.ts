@@ -202,6 +202,7 @@ import {
   handleSequenceStudioLead,
   handleSequenceStudioLeads,
   handleSequenceStudioPushLinkedin,
+  handleSequenceStudioPushLinkedinSequence,
   handleStyleSources,
 } from "./sequence-studio-handlers.js";
 
@@ -467,6 +468,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/sequence-studio/pov-fact-marks") { await handlePovFactMarks(req, res); return; }
     if (pathname === "/api/sequence-studio/style-sources") { await handleStyleSources(req, res); return; }
     if (pathname === "/api/sequence-studio/push-linkedin") { await handleSequenceStudioPushLinkedin(req, res); return; }
+    if (pathname === "/api/sequence-studio/push-linkedin-sequence") { await handleSequenceStudioPushLinkedinSequence(req, res); return; }
     if (pathname === "/api/users") { await handleUsers(req, res); return; }
     if (pathname === "/api/velvetech/research-csv/preview") { await handleVelvetechResearchCsvPreview(req, res); return; }
     if (pathname === "/api/velvetech/research-csv/launch") { await handleVelvetechResearchCsvLaunch(req, res); return; }

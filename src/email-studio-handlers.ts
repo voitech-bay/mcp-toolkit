@@ -362,6 +362,7 @@ export async function handleEmailStudioApprove(req: IncomingMessage, res: Server
 export async function handleEmailStudioVersions(req: IncomingMessage, res: ServerResponse, id: string) { const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const projectId = url(req).searchParams.get("projectId") ?? ""; const email = await getScopedEmail(client, id, projectId); if (!email) return send(res, 404, { error: "Email not found" }); const r = await client.from("outreach_email_versions").select("*").eq("email_id", id).order("version_number", { ascending: false }); return send(res, r.error ? 500 : 200, r.error ? { error: r.error.message } : { data: r.data }); }
 
 type IngestTouch = { step?: unknown; subject?: unknown; body?: unknown; message?: unknown };
+const LI_MSG_FIELD_ORDER = ["li_msg_1a", "li_msg_1b", "li_msg_2a", "li_msg_2b", "li_msg_3", "li_msg_4a", "li_msg_4b", "li_msg_4c", "li_msg_5a", "li_msg_5b"] as const;
 
 export async function handleEmailStudioIngestFromN8n(req: IncomingMessage, res: ServerResponse) {
   const client = getSupabase();
@@ -392,9 +393,17 @@ export async function handleEmailStudioIngestFromN8n(req: IncomingMessage, res: 
     const step = Math.max(1, Number(touch.step ?? rows.length + 1));
     rows.push({ channel: "email", sequence_step: step, subject: str(touch.subject), body: str(touch.body), external_target: `smartlead:body_${step}` });
   }
-  for (const touch of (Array.isArray(b.linkedinSequence) ? b.linkedinSequence : []) as IngestTouch[]) {
-    const step = Math.max(1, Number(touch.step ?? 1));
-    rows.push({ channel: "linkedin_dm", sequence_step: step, subject: "", body: str(touch.message) || str(touch.body), external_target: `getsales:li_msg_${step}` });
+  const liMsgFields = b.liMsgFields && typeof b.liMsgFields === "object" ? b.liMsgFields as Record<string, unknown> : null;
+  if (liMsgFields) {
+    LI_MSG_FIELD_ORDER.forEach((field, index) => {
+      const text = str(liMsgFields[field]);
+      if (text) rows.push({ channel: "linkedin_dm", sequence_step: index + 1, subject: "", body: text, external_target: `getsales:${field}` });
+    });
+  } else {
+    for (const touch of (Array.isArray(b.linkedinSequence) ? b.linkedinSequence : []) as IngestTouch[]) {
+      const step = Math.max(1, Number(touch.step ?? 1));
+      rows.push({ channel: "linkedin_dm", sequence_step: step, subject: "", body: str(touch.message) || str(touch.body), external_target: `getsales:li_msg_${step}` });
+    }
   }
   const inmail = b.inmailFallback && typeof b.inmailFallback === "object" ? (b.inmailFallback as Json) : null;
   if (inmail) {

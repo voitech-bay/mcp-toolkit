@@ -10,6 +10,7 @@ type Json = Record<string, unknown>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const LINKEDIN_CHANNELS = ["linkedin_dm", "linkedin_inmail"] as const;
 const NEEDS_ATTENTION_STATUSES = new Set(["ai_draft_made", "needs_review", "comments_made", "regenerated", "final_check", "changes_requested", "research_missing", "generation_failed", "sending_failed"]);
+const GETSALES_LI_MSG_RE = /^li_msg_(?:\d+|1a|1b|2a|2b|3|4a|4b|4c|5a|5b)$/;
 
 function send(res: ServerResponse, status: number, data: unknown) {
   res.writeHead(status, { "Content-Type": "application/json" });
@@ -346,7 +347,7 @@ export async function handleStyleSources(req: IncomingMessage, res: ServerRespon
 
 function dmFieldName(email: Json): string {
   const target = str(email.external_target);
-  const match = target.match(/^getsales:(li_msg_\d+)$/);
+  const match = target.match(/^getsales:(li_msg_(?:\d+|1a|1b|2a|2b|3|4a|4b|4c|5a|5b))$/);
   if (match) return match[1];
   const step = Math.max(1, Math.trunc(Number(email.step_number ?? email.sequence_step ?? 1)));
   return `li_msg_${step}`;
@@ -431,6 +432,66 @@ export async function handleSequenceStudioPushLinkedin(req: IncomingMessage, res
   }
 }
 
+export async function handleSequenceStudioPushLinkedinSequence(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const body = await readBody(req);
+  const projectId = str(body.projectId);
+  const contactId = str(body.contactId);
+  const dryRun = body.dryRun !== false;
+  if (!validUuid(projectId) || !validUuid(contactId)) return send(res, 400, { error: "projectId and contactId are required" });
+
+  const result = await client
+    .from("outreach_emails")
+    .select("*")
+    .eq("project_id", projectId)
+    .eq("contact_id", contactId)
+    .in("channel", ["linkedin_dm", "linkedin_inmail"])
+    .order("channel", { ascending: true })
+    .order("step_number", { ascending: true });
+  if (result.error) return send(res, 500, { error: result.error.message });
+
+  const drafts = ((result.data ?? []) as Json[]).filter((email) => str(email.status) === "approved");
+  if (!drafts.length) return send(res, 409, { error: "No approved LinkedIn drafts found for this contact" });
+
+  const fields: Record<string, string> = {};
+  const warnings: string[] = [];
+  for (const email of drafts) {
+    const mapped = pushFieldsForEmail(email);
+    if (mapped.warning) warnings.push(mapped.warning);
+    for (const [name, value] of Object.entries(mapped.fields)) {
+      if (GETSALES_LI_MSG_RE.test(name) || GETSALES_INMAIL_FIELD_NAMES.includes(name as typeof GETSALES_INMAIL_FIELD_NAMES[number])) {
+        fields[name] = value;
+      }
+    }
+  }
+  if (!Object.keys(fields).length) return send(res, 400, { error: "No GetSales fields could be mapped from approved drafts" });
+  if (dryRun) return send(res, 200, { dryRun: true, leadUuid: contactId, fields, warnings, draftIds: drafts.map((d) => d.id) });
+
+  try {
+    await pushLeadCustomFields(projectId, contactId, fields);
+    const at = new Date().toISOString();
+    const pushLog = {
+      at,
+      channel: "linkedin_sequence",
+      leadUuid: contactId,
+      fields,
+      fieldNames: Object.keys(fields),
+      source: "sequence-studio-human-resync",
+    };
+    const ids = drafts.map((d) => str(d.id)).filter(Boolean);
+    const update = await client
+      .from("outreach_emails")
+      .update({ external_pushed_at: at, external_push_log: pushLog, updated_at: at })
+      .in("id", ids)
+      .select("id");
+    if (update.error) return send(res, 500, { error: update.error.message });
+    return send(res, 200, { ok: true, leadUuid: contactId, fields, updatedDrafts: update.data?.length ?? 0, warnings });
+  } catch (e) {
+    return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
 export async function handleEmailStudioPushGetSalesLinkedinSequence(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
@@ -443,7 +504,7 @@ export async function handleEmailStudioPushGetSalesLinkedinSequence(req: Incomin
 
   const fields: Record<string, string> = {};
   for (const [name, value] of Object.entries(rawFields)) {
-    if (!/^li_msg_(?:1a|1b|2a|2b|3|4a|4b|4c|5a|5b)$/.test(name)) continue;
+    if (!GETSALES_LI_MSG_RE.test(name)) continue;
     fields[name] = str(value);
   }
   if (!Object.keys(fields).length) return send(res, 400, { error: "liMsgFields must include at least one li_msg_* value" });
