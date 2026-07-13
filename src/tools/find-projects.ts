@@ -17,7 +17,7 @@ export function registerFindProjectsTool(server: McpServer): void {
           content: [
             {
               type: "text" as const,
-              text: "Supabase not configured. Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_ANON_KEY).",
+              text: "Supabase not configured. Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY.",
             },
           ],
           isError: true,

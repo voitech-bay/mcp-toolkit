@@ -112,7 +112,7 @@ cp .env.example .env   # fill in keys
 1. Build: `npm run build` (required before deploy; produces `dist/`).
 2. Deploy: `vercel` (or connect the repo in Vercel dashboard).
 3. Set **Environment variables** in Vercel for the tools you use:
-   - Supabase: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_ANON_KEY`), optional `SUPABASE_MESSAGES_TABLE`
+   - Supabase: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, optional `SUPABASE_MESSAGES_TABLE`
    - Apollo: `APOLLO_API_KEY`
    - Ocean: `OCEAN_API_TOKEN`
 4. MCP endpoint: **`https://your-app.vercel.app/api/mcp`**  

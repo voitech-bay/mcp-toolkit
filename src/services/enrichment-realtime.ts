@@ -14,14 +14,12 @@ import {
   ENRICHMENT_AGENT_RESULTS_TABLE,
   ENRICHMENT_AGENT_RUNS_TABLE,
   ENRICHMENT_QUEUE_TASKS_TABLE,
+  assertSupabaseConfigured,
   getEnrichmentTableData,
   getSupabase,
   listEnrichmentAgentsForEntityType,
   type EnrichmentEntityType,
 } from "./supabase.js";
-
-const url = process.env.SUPABASE_URL;
-const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_KEY;
 
 let client: SupabaseClient | null = null;
 /** True only after Realtime reports SUBSCRIBED (not merely after .subscribe() called). */
@@ -54,9 +52,9 @@ const BROADCAST_DEBOUNCE_MS = 150;
 const pendingBroadcast = new Map<string, ReturnType<typeof setTimeout>>();
 
 function getClient(): SupabaseClient | null {
-  if (!url || !key) return null;
+  assertSupabaseConfigured();
   if (!client) {
-    client = createClient(url, key, {
+    client = createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!, {
       auth: { persistSession: false, autoRefreshToken: false },
       realtime: {
         transport: WebSocket as unknown as WebSocketLikeConstructor,
@@ -238,12 +236,14 @@ function ensureRealtimeChannel(): void {
 }
 
 export function registerEnrichmentSubscriber(projectId: string, ws: WsClient): void {
-  if (!getClient()) {
+  try {
+    getClient();
+  } catch (error) {
     try {
       ws.send(
         JSON.stringify({
           type: "error",
-          message: "Supabase not configured; realtime unavailable",
+          message: error instanceof Error ? error.message : "Supabase not configured; realtime unavailable",
         })
       );
     } catch {

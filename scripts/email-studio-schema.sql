@@ -5,6 +5,17 @@ insert into public.project_outreach_settings(project_id, enabled, email_studio_e
 select p.id, true, true from public."Projects" p where lower(p.name) = 'velvetech'
 on conflict (project_id) do update set email_studio_enabled = true, updated_at = now();
 
+create table if not exists public.outreach_sequences (
+  id uuid primary key default gen_random_uuid(),
+  project_id uuid not null references public."Projects"(id) on delete cascade,
+  contact_id uuid not null,
+  company_id uuid,
+  hypothesis_id uuid,
+  status text not null default 'draft' check (status in ('draft','in_review','approved','launched')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists public.outreach_emails (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public."Projects"(id) on delete cascade,
@@ -15,7 +26,11 @@ create table if not exists public.outreach_emails (
   campaign_id text not null default '',
   batch_name text not null default '',
   persona text not null default '',
-  sequence_step integer not null default 1 check (sequence_step > 0),
+  channel text not null default 'email' check (channel in ('email','linkedin_dm','linkedin_inmail','reply')),
+  sequence_id uuid references public.outreach_sequences(id) on delete set null,
+  sequence_step integer not null default 1 check (sequence_step >= 0),
+  step_number integer not null default 1 check (step_number >= 0),
+  external_target text,
   recipient_email text,
   current_subject text not null default '',
   current_body text not null default '',
@@ -42,7 +57,7 @@ create table if not exists public.outreach_emails (
   generation_history_available boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
-  unique(project_id, contact_id, campaign_id, batch_name, sequence_step)
+  unique(project_id, contact_id, campaign_id, batch_name, channel, step_number)
 );
 
 create table if not exists public.outreach_email_versions (
@@ -138,7 +153,10 @@ create table if not exists public.outreach_email_delivery_events (
 );
 
 create index if not exists outreach_emails_queue_idx on public.outreach_emails(project_id, status, updated_at desc);
-create index if not exists outreach_emails_contact_idx on public.outreach_emails(project_id, contact_id, sequence_step);
+create index if not exists outreach_sequences_project_contact_idx on public.outreach_sequences(project_id, contact_id, status, updated_at desc);
+create index if not exists outreach_emails_contact_idx on public.outreach_emails(project_id, contact_id, step_number);
+create index if not exists outreach_emails_sequence_idx on public.outreach_emails(project_id, sequence_id, step_number);
+create index if not exists outreach_emails_channel_idx on public.outreach_emails(project_id, contact_id, channel, step_number);
 create index if not exists outreach_emails_search_idx on public.outreach_emails(project_id, contact_name, company_name);
 create index if not exists outreach_email_versions_email_idx on public.outreach_email_versions(email_id, version_number desc);
 create index if not exists outreach_email_comments_open_idx on public.outreach_email_comments(email_id, status);

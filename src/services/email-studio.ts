@@ -9,6 +9,31 @@ export const EMAIL_STATUSES = [
 ] as const;
 export type EmailStatus = typeof EMAIL_STATUSES[number];
 
+export const OUTREACH_MESSAGE_CHANNELS = ["email", "linkedin_dm", "linkedin_inmail", "reply"] as const;
+export type OutreachMessageChannel = typeof OUTREACH_MESSAGE_CHANNELS[number];
+
+export function normalizeOutreachMessageChannel(value: unknown, fallback: OutreachMessageChannel = "email"): OutreachMessageChannel {
+  const raw = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (raw === "inmail") return "linkedin_inmail";
+  return (OUTREACH_MESSAGE_CHANNELS as readonly string[]).includes(raw) ? raw as OutreachMessageChannel : fallback;
+}
+
+export function parseEmailStudioChannelFilter(value: unknown): OutreachMessageChannel[] {
+  if (value == null || value === "") return ["email"];
+  if (typeof value !== "string") return ["email"];
+  if (value.trim().toLowerCase() === "all") return [...OUTREACH_MESSAGE_CHANNELS];
+  const channels = value
+    .split(",")
+    .map((part) => normalizeOutreachMessageChannel(part, "email"))
+    .filter((channel, index, all) => all.indexOf(channel) === index);
+  return channels.length ? channels : ["email"];
+}
+
+export function normalizeSequenceStep(value: unknown, fallback = 1): number {
+  const n = Number(value ?? fallback);
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : fallback;
+}
+
 export const EmailAnnotationSchema = z.object({
   id: z.string().min(1),
   text: z.string().min(1),
@@ -87,7 +112,12 @@ export function validateDraftForProject(
 ) {
   const generic = validateDraft(subject, body, annotations, allowedResearchIds, allowedInstructionIds);
   if (!isVelvetechProjectId(projectId)) return generic;
-  const mappedChannel = channel === "linkedin_dm" ? "linkedin_dm" : channel === "inmail" ? "inmail" : "email";
+  const normalizedChannel = normalizeOutreachMessageChannel(channel);
+  const mappedChannel =
+    normalizedChannel === "linkedin_dm" ? "linkedin_dm" :
+    normalizedChannel === "linkedin_inmail" ? "inmail" :
+    normalizedChannel === "reply" ? "reply" :
+    "email";
   return [
     ...generic,
     ...validateVelvetechDraft(mappedChannel, subject, body, { sequenceStep, sequenceMode }).map((r) => ({

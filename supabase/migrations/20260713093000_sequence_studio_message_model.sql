@@ -1,9 +1,5 @@
 begin;
 
-alter table public.outreach_emails
-  add column if not exists channel text not null default 'email'
-  check (channel in ('email', 'linkedin_dm', 'linkedin_inmail', 'reply'));
-
 create table if not exists public.outreach_sequences (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public."Projects"(id) on delete cascade,
@@ -16,6 +12,9 @@ create table if not exists public.outreach_sequences (
 );
 
 alter table public.outreach_emails
+  add column if not exists channel text not null default 'email';
+
+alter table public.outreach_emails
   add column if not exists sequence_id uuid references public.outreach_sequences(id) on delete set null,
   add column if not exists step_number integer,
   add column if not exists external_target text;
@@ -23,21 +22,34 @@ alter table public.outreach_emails
 alter table public.outreach_emails drop constraint if exists outreach_emails_channel_check;
 
 update public.outreach_emails
-set channel = case when channel = 'inmail' then 'linkedin_inmail' else channel end,
-    step_number = coalesce(step_number, sequence_step, 1)
-where channel = 'inmail' or step_number is null;
-
-alter table public.outreach_emails
-  add constraint outreach_emails_channel_check
-  check (channel in ('email', 'linkedin_dm', 'linkedin_inmail', 'reply'));
+set channel = case
+    when channel = 'inmail' then 'linkedin_inmail'
+    when channel in ('email', 'linkedin_dm', 'linkedin_inmail', 'reply') then channel
+    else 'email'
+  end,
+  step_number = coalesce(step_number, sequence_step, 1)
+where channel is distinct from case
+    when channel = 'inmail' then 'linkedin_inmail'
+    when channel in ('email', 'linkedin_dm', 'linkedin_inmail', 'reply') then channel
+    else 'email'
+  end
+  or step_number is null;
 
 alter table public.outreach_emails
   alter column step_number set default 1,
   alter column step_number set not null;
 
+alter table public.outreach_emails
+  add constraint outreach_emails_channel_check
+  check (channel in ('email', 'linkedin_dm', 'linkedin_inmail', 'reply'));
+
 alter table public.outreach_emails drop constraint if exists outreach_emails_sequence_step_check;
 alter table public.outreach_emails
   add constraint outreach_emails_sequence_step_check check (sequence_step >= 0);
+
+alter table public.outreach_emails drop constraint if exists outreach_emails_step_number_check;
+alter table public.outreach_emails
+  add constraint outreach_emails_step_number_check check (step_number >= 0);
 
 do $$
 declare
@@ -57,13 +69,17 @@ begin
   end loop;
 end $$;
 
+drop index if exists public.outreach_emails_identity_idx;
 create unique index if not exists outreach_emails_identity_idx
   on public.outreach_emails(project_id, contact_id, campaign_id, batch_name, channel, step_number);
 
-create index if not exists outreach_emails_channel_idx
-  on public.outreach_emails(project_id, contact_id, channel, step_number);
+create index if not exists outreach_sequences_project_contact_idx
+  on public.outreach_sequences(project_id, contact_id, status, updated_at desc);
 
 create index if not exists outreach_emails_sequence_idx
   on public.outreach_emails(project_id, sequence_id, step_number);
+
+create index if not exists outreach_emails_channel_idx
+  on public.outreach_emails(project_id, contact_id, channel, step_number);
 
 commit;

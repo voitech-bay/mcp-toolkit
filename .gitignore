@@ -5,7 +5,9 @@ charts-public/
 .env.local
 *.log
 .vercel/
-supabase/
+supabase/*
+!supabase/migrations/
+!supabase/migrations/*.sql
 public/assets/
 client-public/assets/
 .idea/

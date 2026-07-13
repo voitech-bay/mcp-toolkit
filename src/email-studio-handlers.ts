@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { CONTACTS_TABLE, N8N_WORKFLOW_RESULTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
 import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
-import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, reanchorQuote, stableResearchPoints, validateDraft, validateDraftForProject, type EmailStatus } from "./services/email-studio.js";
+import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, normalizeOutreachMessageChannel, normalizeSequenceStep, parseEmailStudioChannelFilter, reanchorQuote, stableResearchPoints, validateDraft, validateDraftForProject, type EmailStatus, type OutreachMessageChannel } from "./services/email-studio.js";
 import { buildVelvetechSystemPrompt } from "./services/velvetech-messaging/prompt.js";
 import { isVelvetechProjectId } from "./services/velvetech-messaging/types.js";
 
@@ -134,9 +134,12 @@ export async function handleEmailStudioList(req: IncomingMessage, res: ServerRes
   const enabled = await client.from("project_outreach_settings").select("email_studio_enabled").eq("project_id", projectId).maybeSingle(); if (!enabled.data?.email_studio_enabled) return send(res, 403, { error: "Email Studio is not enabled for this project" });
   const page = Math.max(1, Number(q.get("page") ?? 1)); const pageSize = Math.min(100, Math.max(1, Number(q.get("pageSize") ?? 25))); const from = (page - 1) * pageSize;
   let query = client.from("outreach_emails").select("*", { count: "exact" }).eq("project_id", projectId);
+  const channels = parseEmailStudioChannelFilter(q.get("channel"));
+  query = channels.length === 1 ? query.eq("channel", channels[0]) : query.in("channel", channels);
   const status = q.get("status"); if (status === "failed") query = query.in("status", ["research_missing", "generation_failed", "sending_failed"]); else if (status && EMAIL_STATUSES.includes(status as EmailStatus)) query = query.eq("status", status);
   const batch = q.get("batch"); if (batch) query = query.eq("batch_name", batch);
   const campaign = q.get("campaign"); if (campaign) query = query.eq("campaign_id", campaign);
+  const sequenceId = q.get("sequenceId"); if (sequenceId && UUID_RE.test(sequenceId)) query = query.eq("sequence_id", sequenceId);
   const persona = q.get("persona"); if (persona) query = query.eq("persona", persona);
   const reviewer = q.get("reviewer"); if (reviewer) query = query.eq("assigned_reviewer_id", reviewer);
   const quality = q.get("researchQuality"); if (quality && ["verified","partial","missing","unknown"].includes(quality)) query = query.eq("research_quality", quality);
@@ -191,6 +194,8 @@ export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerR
   if ("error" in resolved) return send(res, resolved.status, resolved.matches ? { error: resolved.error, matches: resolved.matches } : { error: resolved.error });
   const contact = resolved.contact;
 
+  const channel = normalizeOutreachMessageChannel(b.channel);
+  const stepNumber = normalizeSequenceStep(b.stepNumber ?? b.sequenceStep ?? 1);
   const row = {
     project_id: b.projectId,
     contact_id: contact.uuid,
@@ -200,8 +205,11 @@ export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerR
     campaign_id: String(b.campaignId ?? ""),
     batch_name: String(b.batchName ?? ""),
     persona: String(b.persona ?? ""),
-    channel: ["email", "linkedin_dm", "inmail", "reply"].includes(String(b.channel ?? "email")) ? String(b.channel ?? "email") : "email",
-    sequence_step: Math.max(0, Number(b.sequenceStep ?? 1)),
+    channel,
+    sequence_id: validProject(b.sequenceId) ? b.sequenceId : null,
+    sequence_step: stepNumber,
+    step_number: stepNumber,
+    external_target: str(b.externalTarget) || null,
     recipient_email: b.recipientEmail ? String(b.recipientEmail).trim().toLowerCase() : contact.work_email,
     assigned_reviewer_id: b.assignedReviewerId ? String(b.assignedReviewerId) : null,
     provenance: String(b.provenance ?? "voitech_generated"),
@@ -209,7 +217,7 @@ export async function handleEmailStudioCreate(req: IncomingMessage, res: ServerR
     research_quality: b.researchSnapshotId ? "unknown" : "missing",
     research_snapshot_id: validProject(b.researchSnapshotId) ? b.researchSnapshotId : null,
   };
-  const r = await client.from("outreach_emails").upsert(row, { onConflict: "project_id,contact_id,campaign_id,batch_name,channel,sequence_step", ignoreDuplicates: false }).select("*").single();
+  const r = await client.from("outreach_emails").upsert(row, { onConflict: "project_id,contact_id,campaign_id,batch_name,channel,step_number", ignoreDuplicates: false }).select("*").single();
   if (r.error) return send(res, 500, { error: r.error.message });
   await client.from("outreach_email_status_events").insert({ email_id: r.data.id, from_status: null, to_status: r.data.status, actor_type: "user", actor_id: actor(req), reason: "Email Studio record created" });
   return send(res, 201, { data: r.data });
@@ -253,14 +261,14 @@ async function generateDraft(client: NonNullable<ReturnType<typeof getSupabase>>
   const researchResult = email.research_snapshot_id ? await client.from("outreach_research_snapshots").select("*").eq("id", email.research_snapshot_id).single() : null;
   const research = researchResult?.data ?? (await getOrCreateResearch(client, { projectId: String(email.project_id), contactId: String(email.contact_id), companyId: email.company_id ? String(email.company_id) : null, model, ttlDays: Number(settings.data.research_ttl_days ?? 30), context, force: false })).snapshot;
   const knowledge = await loadKnowledge(client, String(email.project_id)); const points = stableResearchPoints(research as Json); const allowed = includedResearchPointIds.length ? points.filter((p) => includedResearchPointIds.includes(String(p.id))) : points;
-  const channel = String(email.channel ?? "email");
-  const sequenceStep = Number(email.sequence_step ?? 1);
+  const channel = normalizeOutreachMessageChannel(email.channel);
+  const sequenceStep = normalizeSequenceStep(email.step_number ?? email.sequence_step ?? 1);
   const systemPrompt = velvetech
-    ? buildVelvetechSystemPrompt(channel === "inmail" ? "inmail" : channel === "linkedin_dm" ? "linkedin_dm" : "email", sequenceStep, String(email.persona ?? ""), "standard")
+    ? buildVelvetechSystemPrompt(channel === "linkedin_inmail" ? "inmail" : channel === "linkedin_dm" ? "linkedin_dm" : "email", sequenceStep, String(email.persona ?? ""), "standard")
     : "Write one research-based cold email. Return JSON only matching the supplied schema. Annotations use zero-based offsets into body only and exact text. Use concise user-facing audit explanations, never hidden chain-of-thought. Verified claims must reference supplied research IDs. Follow active project knowledge. Do not send or schedule anything.";
   const call = await structuredCall({ model, schema: EmailDraftSchema, trace: { feature: "email-studio", stage: previous ? "regenerate" : "generate", project_id: email.project_id, contact_id: email.contact_id },
     system: systemPrompt,
-    user: JSON.stringify({ task: prompt, recipient_context: context, research_points: allowed, active_knowledge: knowledge.documents, previous_version: previous ?? null, unresolved_comments: comments.map((c) => ({ id: c.id, selected_quote: c.selected_quote, body: c.body })), required_comment_ids: comments.map((c) => c.id), sequence_step: email.sequence_step }) });
+    user: JSON.stringify({ task: prompt, recipient_context: context, research_points: allowed, active_knowledge: knowledge.documents, previous_version: previous ?? null, unresolved_comments: comments.map((c) => ({ id: c.id, selected_quote: c.selected_quote, body: c.body })), required_comment_ids: comments.map((c) => c.id), sequence_step: sequenceStep, step_number: sequenceStep }) });
   call.value.annotations = normalizeAnnotationRanges(call.value.body, call.value.annotations); const validation = validateDraftForProject(String(email.project_id), channel, sequenceStep, call.value.subject, call.value.body, call.value.annotations, new Set(allowed.map((x) => String(x.id))), new Set(knowledge.documents.map((x) => String(x.id)))); if (validation.some((x) => x.severity === "error")) throw new Error(`Generated draft failed validation: ${validation.filter((x) => x.severity === "error").map((x) => x.message).join("; ")}`);
   return { draft: call.value, validation, model, knowledgeManifest: knowledge.manifest, research, usage: call.usage };
 }
@@ -349,19 +357,19 @@ export async function handleEmailStudioIngestFromN8n(req: IncomingMessage, res: 
   const pass = critique.pass === true;
   const status: EmailStatus = pass ? "needs_review" : "generation_failed";
   const campaignId = str(b.campaignId) || "velvetech-proactive";
-  const rows: Array<{ channel: string; sequence_step: number; subject: string; body: string }> = [];
+  const rows: Array<{ channel: OutreachMessageChannel; sequence_step: number; subject: string; body: string; external_target: string | null }> = [];
 
   for (const touch of (Array.isArray(b.emailSequence) ? b.emailSequence : []) as IngestTouch[]) {
     const step = Math.max(1, Number(touch.step ?? rows.length + 1));
-    rows.push({ channel: "email", sequence_step: step, subject: str(touch.subject), body: str(touch.body) });
+    rows.push({ channel: "email", sequence_step: step, subject: str(touch.subject), body: str(touch.body), external_target: `smartlead:body_${step}` });
   }
   for (const touch of (Array.isArray(b.linkedinSequence) ? b.linkedinSequence : []) as IngestTouch[]) {
     const step = Math.max(1, Number(touch.step ?? 1));
-    rows.push({ channel: "linkedin_dm", sequence_step: step, subject: "", body: str(touch.message) || str(touch.body) });
+    rows.push({ channel: "linkedin_dm", sequence_step: step, subject: "", body: str(touch.message) || str(touch.body), external_target: `getsales:li_msg_${step}` });
   }
   const inmail = b.inmailFallback && typeof b.inmailFallback === "object" ? (b.inmailFallback as Json) : null;
   if (inmail) {
-    rows.push({ channel: "inmail", sequence_step: 0, subject: str(inmail.subject), body: str(inmail.body) });
+    rows.push({ channel: "linkedin_inmail", sequence_step: 0, subject: str(inmail.subject), body: str(inmail.body), external_target: "getsales:inmail" });
   }
   if (rows.length === 0) return send(res, 400, { error: "No sequence rows to ingest" });
 
@@ -379,13 +387,15 @@ export async function handleEmailStudioIngestFromN8n(req: IncomingMessage, res: 
       persona,
       channel: row.channel,
       sequence_step: row.sequence_step,
+      step_number: row.sequence_step,
+      external_target: row.external_target,
       recipient_email: contact.work_email,
       current_subject: row.subject,
       current_body: row.body,
       provenance: "voitech_generated",
       status,
       research_quality: "verified",
-    }, { onConflict: "project_id,contact_id,campaign_id,batch_name,channel,sequence_step", ignoreDuplicates: false }).select("*").single();
+    }, { onConflict: "project_id,contact_id,campaign_id,batch_name,channel,step_number", ignoreDuplicates: false }).select("*").single();
     if (upsert.error) return send(res, 500, { error: upsert.error.message, channel: row.channel, step: row.sequence_step });
     const email = upsert.data as Json;
     const version = await insertVersion(client, email, {

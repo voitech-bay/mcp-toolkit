@@ -12,8 +12,19 @@ import type { ApiCredentials } from "./source-api.js";
 import { decryptSecretPayload, encryptSecretPayload } from "./integration-secrets-crypto.js";
 import { mapCompanyForSupabase } from "./supabase-schema.js";
 
-const url = process.env.SUPABASE_URL;
-const key = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.SUPABASE_ANON_KEY;
+export const SUPABASE_SERVICE_ROLE_REQUIRED_MESSAGE =
+  "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for server Supabase access.";
+
+export function getSupabaseConfigError(env: NodeJS.ProcessEnv = process.env): string | null {
+  if (!env.SUPABASE_URL) return SUPABASE_SERVICE_ROLE_REQUIRED_MESSAGE;
+  if (!env.SUPABASE_SERVICE_ROLE_KEY) return SUPABASE_SERVICE_ROLE_REQUIRED_MESSAGE;
+  return null;
+}
+
+export function assertSupabaseConfigured(env: NodeJS.ProcessEnv = process.env): void {
+  const error = getSupabaseConfigError(env);
+  if (error) throw new Error(error);
+}
 
 export const LINKEDIN_MESSAGES_TABLE = "LinkedinMessages";
 export const SENDERS_TABLE = "Senders";
@@ -914,9 +925,8 @@ export async function insertSyncLogEntry(
 }
 
 export function getSupabase(): SupabaseClient | null {
-
-  if (!url || !key) return null;
-  return createClient(url, key);
+  assertSupabaseConfigured();
+  return createClient(process.env.SUPABASE_URL!, process.env.SUPABASE_SERVICE_ROLE_KEY!);
 }
 
 // --- LinkedIn Messages (table: LinkedinMessages) ---

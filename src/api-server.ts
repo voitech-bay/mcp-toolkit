@@ -159,6 +159,7 @@ import { attachEnrichmentTableSocket } from "./services/enrichment-realtime.js";
 import { createMcpHandler } from "./server.js";
 import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
 import { startScheduledGetSalesSync } from "./services/getsales-sync-scheduler.js";
+import { assertSupabaseConfigured } from "./services/supabase.js";
 import {
   handleCreateOutreachRun,
   handleListOutreachRuns,
@@ -1276,6 +1277,8 @@ wssSync.on("connection", (ws: WebSocket, _req: unknown, runId: string) => {
     syncEventBus.offRun(runId, listener);
   });
 });
+
+assertSupabaseConfigured();
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`API + static + MCP: http://localhost:${PORT}`);

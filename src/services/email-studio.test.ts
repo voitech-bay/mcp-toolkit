@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { canTransition, normalizeAnnotationRanges, reanchorQuote, validateDraft } from "./email-studio.js";
+import {
+  canTransition,
+  normalizeAnnotationRanges,
+  normalizeOutreachMessageChannel,
+  normalizeSequenceStep,
+  parseEmailStudioChannelFilter,
+  reanchorQuote,
+  validateDraft,
+} from "./email-studio.js";
 
 test("sent can only be reached by Smartlead", () => {
   assert.equal(canTransition("approved", "sent", "user"), false);
@@ -40,4 +48,19 @@ test("annotation ranges are normalized and unknown references are rejected", () 
   }]);
   assert.deepEqual({ start: normalized[0].start, end: normalized[0].end }, { start: 2, end: 17 });
   assert.ok(validateDraft("subject", body, normalized, new Set(["known"])).some((x) => x.code === "unknown_research"));
+});
+
+test("message channel helpers default old Email Studio views to email only", () => {
+  assert.equal(normalizeOutreachMessageChannel("inmail"), "linkedin_inmail");
+  assert.equal(normalizeOutreachMessageChannel("linkedin_dm"), "linkedin_dm");
+  assert.equal(normalizeOutreachMessageChannel("bogus"), "email");
+  assert.deepEqual(parseEmailStudioChannelFilter(null), ["email"]);
+  assert.deepEqual(parseEmailStudioChannelFilter("linkedin_dm, inmail"), ["linkedin_dm", "linkedin_inmail"]);
+  assert.deepEqual(parseEmailStudioChannelFilter("all"), ["email", "linkedin_dm", "linkedin_inmail", "reply"]);
+});
+
+test("sequence step helper accepts InMail fallback step zero", () => {
+  assert.equal(normalizeSequenceStep(0), 0);
+  assert.equal(normalizeSequenceStep("3"), 3);
+  assert.equal(normalizeSequenceStep("bad"), 1);
 });
