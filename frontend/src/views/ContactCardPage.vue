@@ -22,6 +22,7 @@ import {
 } from "naive-ui";
 import FeasibleComposer from "../components/FeasibleComposer.vue";
 import OutreachAgentDrawer from "../components/OutreachAgentDrawer.vue";
+import CompanyDossier from "../components/dossier/CompanyDossier.vue";
 import { useProjectStore } from "../stores/project";
 import { useWorkflowLaunch } from "../composables/useWorkflowLaunch";
 import { isVelvetechProjectId } from "../project-ids";
@@ -97,6 +98,11 @@ const outreachOpen = ref(false);
 const contactUuid = computed(() => String(route.params.uuid ?? ""));
 const contact = computed<Json>(() => (card.value?.contact as Json) ?? {});
 const company = computed<Json | null>(() => (card.value?.company as Json) ?? null);
+const dossier = computed<Json | null>(() => (card.value?.dossier as Json) ?? null);
+const showDossier = computed(() => isVelvetechProject.value && !!dossier.value);
+const highlightContactKey = computed(
+  () => String(contact.value.linkedin_url || contact.value.linkedin || "") || null
+);
 const latestResults = computed<Json[]>(() => (card.value?.latest_results as Json[]) ?? []);
 const executions = computed<Json[]>(() => (card.value?.executions as Json[]) ?? []);
 const threads = computed<Thread[]>(() => (card.value?.conversations as Thread[]) ?? []);
@@ -435,6 +441,9 @@ watch(contactUuid, load);
           <NButton size="small" type="primary" :loading="savingMeta" @click="saveMeta">Save</NButton>
         </NSpace>
       </NCard>
+
+      <!-- Velvetech account dossier (same POV contract as the company page) -->
+      <CompanyDossier v-if="showDossier" :dossier="(dossier as any)" :highlight-contact-key="highlightContactKey" />
 
       <!-- Profile snapshot (experience at target company) -->
       <NCard v-if="targetExperience" title="Profile" size="small">

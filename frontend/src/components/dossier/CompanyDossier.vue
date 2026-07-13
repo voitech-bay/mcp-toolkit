@@ -49,7 +49,13 @@ type Dossier = {
   run_id?: string | null;
 };
 
-const props = defineProps<{ dossier: Dossier }>();
+const props = defineProps<{
+  dossier: Dossier;
+  // Set only from the contact page: contact_key or linkedin_url of the contact
+  // currently being viewed, so their entry in the persona lanes below is
+  // tagged "this contact" instead of rendering identically to their peers.
+  highlightContactKey?: string | null;
+}>();
 
 function decodeEntities(s: string): string {
   return s
@@ -145,6 +151,15 @@ function laneLabel(lane: string): string {
 }
 function contactName(c: Record<string, unknown>): string {
   return String(c.name ?? "");
+}
+function isHighlighted(c: Record<string, unknown>): boolean {
+  const key = (props.highlightContactKey ?? "").trim().toLowerCase();
+  if (!key) return false;
+  const contactKey = String(c.contact_key ?? "").trim().toLowerCase();
+  const linkedinUrl = String(c.linkedin_url ?? "").trim().toLowerCase();
+  if (contactKey && contactKey === key) return true;
+  if (linkedinUrl && (linkedinUrl.includes(key) || key.includes(linkedinUrl))) return true;
+  return false;
 }
 </script>
 
@@ -256,8 +271,14 @@ function contactName(c: Record<string, unknown>): string {
       <!-- Persona lanes -->
       <div v-for="lane in personaLanes" :key="lane.lane" class="tile">
         <div class="tile-label">{{ laneLabel(lane.lane) }} lane</div>
-        <div v-for="(c, ci) in lane.contacts.slice(0, 3)" :key="ci" class="tile-contact">
+        <div
+          v-for="(c, ci) in lane.contacts.slice(0, 3)"
+          :key="ci"
+          class="tile-contact"
+          :class="{ 'tile-contact-self': isHighlighted(c) }"
+        >
           {{ contactName(c) }}<span class="tile-contact-title"> · {{ c.title }}</span>
+          <span v-if="isHighlighted(c)" class="self-tag">this contact</span>
         </div>
       </div>
 
@@ -420,6 +441,17 @@ function contactName(c: Record<string, unknown>): string {
 }
 .tile-contact-title {
   opacity: 0.6;
+}
+.tile-contact-self {
+  font-weight: 500;
+}
+.self-tag {
+  font-size: 10px;
+  opacity: 0.6;
+  margin-left: 6px;
+  border: 1px solid rgba(64, 128, 255, 0.4);
+  border-radius: 999px;
+  padding: 0 6px;
 }
 .detail-block {
   margin-bottom: 12px;

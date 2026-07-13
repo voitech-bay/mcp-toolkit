@@ -601,11 +601,23 @@ export async function buildContactCard(
 
   const latestResults = await supplementVelvetechContactResults(client, c, latestRes.data);
 
+  // Organic contact -> account dossier link: when the contact's employer
+  // resolved (via the existing company_id/company_uuid FK, checked reliable
+  // for processed Velvetech contacts), reuse the same domain-keyed n8n lookup
+  // and projection the company page uses, so the contact page can render the
+  // identical CompanyDossier with zero extra clicks.
+  const resolvedCompany = (companyRes as { data: Json | null }).data ?? null;
+  const companyDomain = resolvedCompany ? stringField(resolvedCompany.domain) : null;
+  const dossier = companyDomain
+    ? dossierFromLatestResults(await fetchVelvetechResultsForCompanyDomain(client, companyDomain))
+    : null;
+
   return {
     data: {
       contact: c,
-      company: (companyRes as { data: Json | null }).data ?? null,
-      company_linked: Boolean((companyRes as { data: Json | null }).data),
+      company: resolvedCompany,
+      company_linked: Boolean(resolvedCompany),
+      dossier,
       latest_results: latestResults,
       executions: (execsRes.data ?? []) as Json[],
       conversations: threads,
