@@ -383,6 +383,25 @@ function deriveFallbackHeadlineFacts(pov: Json): Json[] {
   return facts.slice(0, 5);
 }
 
+// Deterministic (no-LLM) fallback narrative for rows produced before the POV
+// agent emitted account_narrative. Concatenates the strongest stored signals so
+// the hero block is never empty; real synthesis comes from a POV-only re-run.
+function deriveFallbackNarrative(pov: Json): string {
+  const facts = jsonArray(pov.transformation_signals)
+    .map((t) => stringField(t.claim))
+    .filter(Boolean)
+    .slice(0, 3) as string[];
+  const pains = jsonArray(pov.data_integration_pain)
+    .map((p) => stringField(p.claim))
+    .filter(Boolean)
+    .slice(0, 2) as string[];
+  const parts: string[] = [];
+  if (facts.length) parts.push(facts.join(" "));
+  if (pains.length) parts.push(pains.join(" "));
+  parts.push("Derived from stored research signals. Re-run the POV for a synthesized narrative.");
+  return parts.join("\n\n");
+}
+
 // Project the latest POV row into the typed dossier the CompanyDossier tile
 // renders. Native contract fields win; fallback derives them for older rows.
 function dossierFromLatestResults(rows: Json[]): Json | null {
@@ -421,23 +440,51 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
     };
   }
 
+  const companyIntel = pov.company_intel && typeof pov.company_intel === "object" ? (pov.company_intel as Json) : {};
+  const peopleAnalysis = pov.people_analysis && typeof pov.people_analysis === "object" ? (pov.people_analysis as Json) : {};
+  const byPersona = groupFitContactsByPersona(fitContacts);
+
+  // Native account_narrative wins; otherwise a deterministic fallback.
+  let accountNarrative = stringField(pov.account_narrative);
+  const narrativeFromContract = !!accountNarrative;
+  if (!accountNarrative) accountNarrative = deriveFallbackNarrative(pov);
+
   return {
     pov_ok: pov.pov_ok === true,
     from_contract: fromContract,
+    account_narrative: accountNarrative,
+    narrative_from_contract: narrativeFromContract,
     hook,
     lead_question: leadQuestion,
     headline_facts: headlineFacts,
     target,
     tech_stack: jsonArray(pov.tech_stack),
-    fit_contacts_by_persona: groupFitContactsByPersona(fitContacts),
+    fit_contacts_by_persona: byPersona,
     fit_score: pov.fit_score ?? null,
     score_rationale: stringField(pov.score_rationale),
     vertical: stringField(pov.vertical),
     build_risk: stringField(pov.build_risk),
     pressure_points: jsonArray(pov.pressure_points),
+    data_integration_pain: jsonArray(pov.data_integration_pain),
+    transformation_signals: jsonArray(pov.transformation_signals),
     discovery_questions: discovery,
+    job_postings: jsonArray(pov.job_postings),
+    leadership_openings: jsonArray(pov.leadership_openings),
+    research_source_urls: Array.from(
+      new Set(jsonArray(pov.research_source_urls).map((u) => String(u)).filter(Boolean))
+    ),
+    team_signal: {
+      dept_headcount:
+        companyIntel.dept_headcount && typeof companyIntel.dept_headcount === "object"
+          ? companyIntel.dept_headcount
+          : {},
+      capacity_gaps: jsonArray(peopleAnalysis.capacity_gaps).map((x) => String(x)).filter(Boolean),
+      it_contact_count: (byPersona.it ?? []).length,
+    },
     brief_markdown: stringField(pov.brief_markdown),
     company_name: stringField(pov.company_name),
+    as_of: stringField(pov.persisted_at),
+    run_id: stringField(pov.run_id),
   };
 }
 
