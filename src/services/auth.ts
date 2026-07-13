@@ -136,15 +136,27 @@ export function isPublicWebhookPath(pathname: string): boolean {
   return pathname.startsWith("/api/webhooks/");
 }
 
-/** n8n POST /api/n8n/workflow-results with Bearer N8N_WORKFLOW_RESULTS_SECRET (no session cookie). */
-export function isN8nWorkflowResultsMachineAuth(req: IncomingMessage, pathname: string): boolean {
-  if (pathname !== "/api/n8n/workflow-results" || req.method !== "POST") return false;
+const N8N_MACHINE_AUTH_POST_PATHS = new Set([
+  "/api/n8n/workflow-results",
+  "/api/email-studio/ingest-from-n8n",
+  "/api/email-studio/push-getsales-linkedin-sequence",
+]);
+
+/** n8n POST endpoints with Bearer N8N_WORKFLOW_RESULTS_SECRET (no session cookie). */
+export function isN8nMachineAuth(req: IncomingMessage, pathname: string): boolean {
+  if (!N8N_MACHINE_AUTH_POST_PATHS.has(pathname) || req.method !== "POST") return false;
   const secret = process.env.N8N_WORKFLOW_RESULTS_SECRET?.trim();
   if (!secret) return false;
   const raw =
     (req.headers.authorization as string | undefined) ??
     (req.headers.Authorization as string | undefined);
-  return typeof raw === "string" && raw === `Bearer ${secret}`;
+  const expected = `Bearer ${secret}`;
+  if (typeof raw !== "string" || raw.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(raw), Buffer.from(expected));
+}
+
+export function isN8nWorkflowResultsMachineAuth(req: IncomingMessage, pathname: string): boolean {
+  return isN8nMachineAuth(req, pathname);
 }
 
 export function isVelvetechAllowedApiPath(pathname: string): boolean {

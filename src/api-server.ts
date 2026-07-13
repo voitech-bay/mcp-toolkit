@@ -167,7 +167,7 @@ import { createMcpHandler } from "./server.js";
 import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
 import { startScheduledGetSalesSync } from "./services/getsales-sync-scheduler.js";
 import { assertSupabaseConfigured } from "./services/supabase.js";
-import { assertAuthConfigured, getAuthSession, isN8nWorkflowResultsMachineAuth, isPublicAuthPath, isPublicWebhookPath, isVelvetechAllowedApiPath, sendAuthError } from "./services/auth.js";
+import { assertAuthConfigured, getAuthSession, isN8nMachineAuth, isPublicAuthPath, isPublicWebhookPath, isVelvetechAllowedApiPath, sendAuthError } from "./services/auth.js";
 import { VELVETECH_PROJECT_ID } from "./services/n8n-trigger.js";
 import {
   handleCreateOutreachRun,
@@ -197,6 +197,7 @@ import {
   handleEmailStudioIngestFromN8n,
 } from "./email-studio-handlers.js";
 import {
+  handleEmailStudioPushGetSalesLinkedinSequence,
   handlePovFactMarks,
   handleSequenceStudioLead,
   handleSequenceStudioLeads,
@@ -425,7 +426,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/auth/projects") { await handleAuthProjects(req, res); return; }
     if (pathname === "/api/auth/login") { await handleAuthLogin(req, res); return; }
     if (pathname === "/api/auth/logout") { await handleAuthLogout(req, res); return; }
-    if (pathname.startsWith("/api/") && !isPublicAuthPath(pathname) && !isPublicWebhookPath(pathname) && !isN8nWorkflowResultsMachineAuth(req, pathname)) {
+    if (pathname.startsWith("/api/") && !isPublicAuthPath(pathname) && !isPublicWebhookPath(pathname) && !isN8nMachineAuth(req, pathname)) {
       const session = getAuthSession(req);
       if (!session) return sendAuthError(res);
       if (session.role === "velvetech" && !isVelvetechAllowedApiPath(pathname)) {
@@ -459,6 +460,7 @@ const server = createServer(async (req, res) => {
     if (emailStudioCommentReplyMatch) { if (req.method === "POST") await handleEmailStudioReply(req, res, emailStudioCommentReplyMatch[1]); else { res.writeHead(405); res.end(); } return; }
     if (emailStudioCommentMatch) { if (req.method === "PATCH") await handleEmailStudioPatchComment(req, res, emailStudioCommentMatch[1]); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/ingest-from-n8n") { if (req.method === "POST") await handleEmailStudioIngestFromN8n(req, res); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/email-studio/push-getsales-linkedin-sequence") { if (req.method === "POST") await handleEmailStudioPushGetSalesLinkedinSequence(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/sequence-studio/leads") { await handleSequenceStudioLeads(req, res); return; }
     if (sequenceStudioLeadMatch) { await handleSequenceStudioLead(req, res, sequenceStudioLeadMatch[1]); return; }

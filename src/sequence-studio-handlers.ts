@@ -363,6 +363,23 @@ function pushFieldsForEmail(email: Json): { fields: Record<string, string>; prev
   return { fields: { [field]: body }, preview: body, warning: body ? null : "Draft body is empty." };
 }
 
+async function pushLeadCustomFields(projectId: string, leadUuid: string, fields: Record<string, string>) {
+  const client = getSupabase(); if (!client) throw new Error("Supabase not configured");
+  const { credentials, error: credErr } = await getGetSalesCredentials(client, projectId);
+  if (credErr) throw new Error(`GetSales credentials: ${credErr}`);
+  if (!credentials) throw new Error("GetSales credentials not configured for project");
+
+  const defs = await listLeadCustomFields(credentials);
+  const byName = new Map(defs.map((d) => [d.name, d.uuid]));
+  const fieldMap: Record<string, string> = {};
+  for (const [name, value] of Object.entries(fields)) {
+    let uuid = byName.get(name);
+    if (!uuid) uuid = await createLeadCustomField(credentials, name);
+    fieldMap[uuid] = value;
+  }
+  await updateLeadCustomFields(credentials, leadUuid, fieldMap);
+}
+
 export async function handleSequenceStudioPushLinkedin(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
@@ -392,19 +409,8 @@ export async function handleSequenceStudioPushLinkedin(req: IncomingMessage, res
     return send(res, 200, { dryRun: true, leadUuid, channel, fields: mapped.fields, preview: mapped.preview, warning: mapped.warning });
   }
 
-  const { credentials, error: credErr } = await getGetSalesCredentials(client, projectId);
-  if (credErr) return send(res, 400, { error: `GetSales credentials: ${credErr}` });
-  if (!credentials) return send(res, 400, { error: "GetSales credentials not configured for project" });
   try {
-    const defs = await listLeadCustomFields(credentials);
-    const byName = new Map(defs.map((d) => [d.name, d.uuid]));
-    const fieldMap: Record<string, string> = {};
-    for (const [name, value] of Object.entries(mapped.fields)) {
-      let uuid = byName.get(name);
-      if (!uuid) uuid = await createLeadCustomField(credentials, name);
-      fieldMap[uuid] = value;
-    }
-    await updateLeadCustomFields(credentials, leadUuid, fieldMap);
+    await pushLeadCustomFields(projectId, leadUuid, mapped.fields);
     const pushLog = {
       at: new Date().toISOString(),
       channel,
@@ -420,6 +426,51 @@ export async function handleSequenceStudioPushLinkedin(req: IncomingMessage, res
       .single();
     if (update.error) return send(res, 500, { error: update.error.message });
     return send(res, 200, { ok: true, leadUuid, fields: mapped.fields, data: update.data });
+  } catch (e) {
+    return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+export async function handleEmailStudioPushGetSalesLinkedinSequence(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const body = await readBody(req);
+  const projectId = str(body.projectId);
+  const contactId = str(body.contactId);
+  const dryRun = body.dryRun !== false;
+  const rawFields = body.liMsgFields && typeof body.liMsgFields === "object" ? body.liMsgFields as Record<string, unknown> : {};
+  if (!validUuid(projectId) || !validUuid(contactId)) return send(res, 400, { error: "projectId and contactId are required" });
+
+  const fields: Record<string, string> = {};
+  for (const [name, value] of Object.entries(rawFields)) {
+    if (!/^li_msg_(?:1a|1b|2a|2b|3|4a|4b|4c|5a|5b)$/.test(name)) continue;
+    fields[name] = str(value);
+  }
+  if (!Object.keys(fields).length) return send(res, 400, { error: "liMsgFields must include at least one li_msg_* value" });
+
+  if (dryRun) return send(res, 200, { dryRun: true, leadUuid: contactId, fields });
+
+  try {
+    await pushLeadCustomFields(projectId, contactId, fields);
+    const at = new Date().toISOString();
+    const pushLog = {
+      at,
+      channel: "linkedin_dm",
+      leadUuid: contactId,
+      fields,
+      fieldNames: Object.keys(fields),
+      source: "n8n-accept-linkedin",
+    };
+    const update = await client
+      .from("outreach_emails")
+      .update({ external_pushed_at: at, external_push_log: pushLog, updated_at: at })
+      .eq("project_id", projectId)
+      .eq("contact_id", contactId)
+      .eq("channel", "linkedin_dm")
+      .in("campaign_id", ["velvetech-accept-linkedin", "velvetech-n8n"])
+      .select("id");
+    if (update.error) return send(res, 500, { error: update.error.message });
+    return send(res, 200, { ok: true, leadUuid: contactId, fields, updatedDrafts: update.data?.length ?? 0 });
   } catch (e) {
     return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
   }
