@@ -815,12 +815,31 @@ export function deriveLaunchCompletion(input: LaunchCompletionInput): LaunchComp
 }
 
 // --- POST /api/n8n/launch/:id/complete ---------------------------------------
-// The real completion signal: the n8n workflow's final node POSTs here so the
-// run finalizes immediately and deterministically, instead of the poller
-// inferring "done" from row counts + a 90s idle-settle heuristic.
-// Body (all optional): { status?, results?: [{lead_uuid, ok, error?}],
+// The real completion signal: an n8n node POSTs here so the run finalizes
+// immediately and deterministically, instead of the poller only inferring
+// "done" from row counts + a 90s idle-settle heuristic.
+//
+// Two shapes, because Velvetech launch adapters differ in how n8n executes them:
+//  - research (one n8n execution covers the WHOLE launch, ending at a single
+//    final node): send { final: true, ... }. This is authoritative — it always
+//    finalizes the run now, even if fewer leads succeeded than requested (the
+//    pipeline legitimately filters some out and there is nothing more coming).
+//  - reply / messaging (the app fires one n8n execution PER LEAD, so no single
+//    execution can see the whole launch): send { final: false } or omit it.
+//    This is just a "nudge" — it re-checks completion using the exact same
+//    seen->=requested / idle-settle rule the status poller already applies
+//    (via refreshRun), so it can only finalize once every requested lead is
+//    actually accounted for. It can never prematurely close a multi-lead run.
+//
+// Body (all optional): { final?, status?, results?: [{lead_uuid, ok, error?}],
 //   succeeded_count?, failed_count?, error? }. Idempotent: a run that already
 // has finished_at is returned unchanged.
+
+/** Only an explicit `final: true` takes the force-finalize path; anything else nudges. */
+export function isFinalCompletionPush(body: Json): boolean {
+  return body.final === true;
+}
+
 export async function handleN8nLaunchComplete(
   req: IncomingMessage,
   res: ServerResponse,
@@ -839,6 +858,14 @@ export async function handleN8nLaunchComplete(
   if (str(run as Json, "finished_at")) return sendJson(res, 200, { run, alreadyComplete: true });
 
   const body = await readJsonBody(req);
+
+  if (!isFinalCompletionPush(body)) {
+    // Per-lead nudge: just re-run the same coverage/idle-settle check the
+    // status poller uses. Only finalizes when every requested lead is in.
+    const refreshed = await refreshRun(client, run as Json);
+    return sendJson(res, 200, { run: refreshed, finalized: str(refreshed, "status") !== "running" });
+  }
+
   const requested = Number((run as Json).requested_count) || 0;
 
   // Row aggregates remain the source of truth for what actually landed; the push

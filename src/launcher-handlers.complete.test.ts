@@ -1,6 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveLaunchCompletion } from "./launcher-handlers.js";
+import { deriveLaunchCompletion, isFinalCompletionPush } from "./launcher-handlers.js";
+
+// Guards the reply/messaging fan-out case: only an explicit final:true may
+// force-finalize a run. Omitted/false/truthy-but-not-boolean must nudge only,
+// so a per-lead ping can never prematurely close a multi-lead launch.
+test("isFinalCompletionPush: only explicit true is final", () => {
+  assert.equal(isFinalCompletionPush({ final: true }), true);
+  assert.equal(isFinalCompletionPush({}), false);
+  assert.equal(isFinalCompletionPush({ final: false }), false);
+  assert.equal(isFinalCompletionPush({ final: "true" }), false);
+  assert.equal(isFinalCompletionPush({ final: 1 }), false);
+});
 
 // Baseline: no push body → fall back to row aggregates.
 test("deriveLaunchCompletion: all leads landed clean → success", () => {
