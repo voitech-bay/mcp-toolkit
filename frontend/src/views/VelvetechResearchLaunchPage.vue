@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, h, ref } from "vue";
+import { useRouter } from "vue-router";
 import {
   NAlert,
   NButton,
   NCard,
+  NCheckbox,
   NDataTable,
   NInput,
   NSpace,
@@ -26,16 +28,26 @@ type PreviewRow = {
   errors: string[];
 };
 
+type ExistingResearchInfo = {
+  domain: string;
+  companyName: string | null;
+  lastRunAt: string;
+  runCount: number;
+  workflows: string[];
+};
+
 type PreviewResponse = {
   rows: PreviewRow[];
   rowCount: number;
   validCount: number;
   errorCount: number;
   requiredColumns: string[];
+  existingResults?: Record<string, ExistingResearchInfo>;
   error?: string;
 };
 
 const message = useMessage();
+const router = useRouter();
 const fileName = ref("");
 const csvText = ref("");
 const preview = ref<PreviewResponse | null>(null);
@@ -43,12 +55,36 @@ const loadingPreview = ref(false);
 const launching = ref(false);
 const launchId = ref("");
 const launchError = ref("");
+const skippedDomains = ref<string[]>([]);
+const rerunDomains = ref<string[]>([]);
 
 const sampleCsv = `first_name,last_name,title,company_name,company_domain,email,linkedin_url
 Maria,Chen,CFO,Example Manufacturing,example.com,maria.chen@example.com,https://www.linkedin.com/in/mariachen`;
 
 const canPreview = computed(() => csvText.value.trim().length > 0);
 const canLaunch = computed(() => Boolean(preview.value && preview.value.validCount > 0 && preview.value.errorCount === 0 && !launching.value));
+
+const duplicateCompanies = computed<ExistingResearchInfo[]>(() => {
+  const existing = preview.value?.existingResults;
+  if (!existing) return [];
+  return Object.values(existing).sort((a, b) => b.lastRunAt.localeCompare(a.lastRunAt));
+});
+
+const newCompanyCount = computed(() => {
+  if (!preview.value) return 0;
+  const domains = new Set(preview.value.rows.filter((r) => r.errors.length === 0).map((r) => r.company_domain));
+  return domains.size - duplicateCompanies.value.length;
+});
+
+function formatRunDate(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function viewExistingResults(domain: string): void {
+  const url = router.resolve({ path: "/n8n/workflow-results", query: { search: domain } }).href;
+  window.open(url, "_blank", "noopener");
+}
 
 const columns: DataTableColumns<PreviewRow> = [
   { title: "Row", key: "rowNumber", width: 64 },
@@ -79,6 +115,8 @@ async function readFile(event: Event) {
   preview.value = null;
   launchId.value = "";
   launchError.value = "";
+  skippedDomains.value = [];
+  rerunDomains.value = [];
   await previewCsv();
 }
 
@@ -87,6 +125,8 @@ async function previewCsv() {
   loadingPreview.value = true;
   launchId.value = "";
   launchError.value = "";
+  skippedDomains.value = [];
+  rerunDomains.value = [];
   try {
     const r = await fetch("/api/velvetech/research-csv/preview", {
       method: "POST",
@@ -112,16 +152,27 @@ async function launchResearch() {
     const r = await fetch("/api/velvetech/research-csv/launch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ csvText: csvText.value, filename: fileName.value || "pasted.csv" }),
+      body: JSON.stringify({
+        csvText: csvText.value,
+        filename: fileName.value || "pasted.csv",
+        rerunDomains: rerunDomains.value,
+      }),
     });
-    const j = (await r.json()) as { launchId?: string; requestedCount?: number; error?: string } & PreviewResponse;
+    const j = (await r.json()) as {
+      launchId?: string;
+      requestedCount?: number;
+      skippedDomains?: string[];
+      error?: string;
+    } & PreviewResponse;
     if (!r.ok) {
       preview.value = j.rows ? j : preview.value;
       launchError.value = j.error ?? "Launch failed";
       return;
     }
     launchId.value = j.launchId ?? "";
-    message.success(`Research launched for ${j.requestedCount ?? preview.value?.validCount ?? 0} contacts`);
+    skippedDomains.value = j.skippedDomains ?? [];
+    const skippedNote = skippedDomains.value.length ? `, ${skippedDomains.value.length} already-researched compan${skippedDomains.value.length === 1 ? "y" : "ies"} skipped` : "";
+    message.success(`Research launched for ${j.requestedCount ?? preview.value?.validCount ?? 0} contacts${skippedNote}`);
   } catch {
     launchError.value = "Launch failed";
   } finally {
@@ -135,6 +186,8 @@ function useSample() {
   preview.value = null;
   launchId.value = "";
   launchError.value = "";
+  skippedDomains.value = [];
+  rerunDomains.value = [];
 }
 </script>
 
@@ -172,16 +225,54 @@ function useSample() {
             <NButton :disabled="!canPreview" :loading="loadingPreview" @click="previewCsv">Preview</NButton>
             <NButton type="primary" :disabled="!canLaunch" :loading="launching" @click="launchResearch">
               <template #icon><RocketIcon :size="16" /></template>
-              Launch research
+              {{ duplicateCompanies.length ? `Launch research (${newCompanyCount + rerunDomains.length} of ${newCompanyCount + duplicateCompanies.length} companies)` : "Launch research" }}
             </NButton>
           </NSpace>
         </NSpace>
       </NSpace>
     </NCard>
 
+    <NCard v-if="duplicateCompanies.length" :bordered="true">
+      <NAlert type="warning" :show-icon="false" title="Some companies already have research on file">
+        <NSpace vertical size="small">
+          <NText depth="3">
+            {{ duplicateCompanies.length }} of {{ newCompanyCount + duplicateCompanies.length }} companies in this CSV already have n8n
+            results. They're skipped by default &mdash; check a company below to re-run it anyway.
+          </NText>
+          <NSpace vertical size="small" style="width: 100%">
+            <NSpace
+              v-for="c in duplicateCompanies"
+              :key="c.domain"
+              align="center"
+              justify="space-between"
+              style="width: 100%; padding: 6px 0; border-bottom: 1px solid rgba(148, 163, 184, 0.2)"
+            >
+              <NCheckbox
+                :checked="rerunDomains.includes(c.domain)"
+                @update:checked="(v: boolean) => { rerunDomains = v ? [...rerunDomains, c.domain] : rerunDomains.filter((d) => d !== c.domain); }"
+              >
+                <NSpace align="center" size="small">
+                  <NText strong>{{ c.companyName || c.domain }}</NText>
+                  <NText depth="3" style="font-size: 12px">{{ c.domain }}</NText>
+                </NSpace>
+              </NCheckbox>
+              <NSpace align="center" size="small">
+                <NText depth="3" style="font-size: 12px">
+                  last run {{ formatRunDate(c.lastRunAt) }} &middot; {{ c.runCount }} row{{ c.runCount === 1 ? "" : "s" }}
+                  <template v-if="c.workflows.length"> &middot; {{ c.workflows.join(", ") }}</template>
+                </NText>
+                <NButton size="tiny" quaternary @click="viewExistingResults(c.domain)">View results</NButton>
+              </NSpace>
+            </NSpace>
+          </NSpace>
+        </NSpace>
+      </NAlert>
+    </NCard>
+
     <NAlert v-if="launchError" type="error" :show-icon="false">{{ launchError }}</NAlert>
     <NAlert v-if="launchId" type="success" :show-icon="false">
       Research launched. Launch id: {{ launchId }}
+      <template v-if="skippedDomains.length"> &middot; {{ skippedDomains.length }} already-researched compan{{ skippedDomains.length === 1 ? "y" : "ies" }} skipped</template>
     </NAlert>
 
     <NCard v-if="preview">

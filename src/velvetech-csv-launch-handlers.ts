@@ -3,6 +3,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   COMPANIES_TABLE,
   CONTACTS_TABLE,
+  N8N_WORKFLOW_RESULTS_TABLE,
   PROJECT_COMPANIES_TABLE,
   createCompany,
   createProjectContactRecord,
@@ -13,6 +14,14 @@ import { triggerWorkflowPayload, VELVETECH_PROJECT_ID } from "./services/n8n-tri
 
 const LAUNCH_RUNS_TABLE = "n8n_launch_runs";
 const WORKFLOW_KEY = "velvetech_research";
+
+export type ExistingResearchInfo = {
+  domain: string;
+  companyName: string | null;
+  lastRunAt: string;
+  runCount: number;
+  workflows: string[];
+};
 
 type Json = Record<string, unknown>;
 
@@ -163,6 +172,50 @@ function previewCsv(csvText: string) {
   };
 }
 
+/**
+ * Looks up prior n8n research runs for a set of company domains, keyed off
+ * entity_key (the Velvetech pipeline stamps entity_key = normalized company
+ * domain on every company-grain row — see n8n_velvetech_persist_supabase.js).
+ * One query, grouped client-side; CSV batches are small enough that this is
+ * simpler and cheaper than a dedicated RPC.
+ */
+async function checkExistingResearch(
+  client: SupabaseClient,
+  domains: string[]
+): Promise<Record<string, ExistingResearchInfo>> {
+  const uniqueDomains = [...new Set(domains.filter(Boolean))];
+  if (uniqueDomains.length === 0) return {};
+
+  const { data, error } = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("entity_key, workflow_name, created_at, company_name")
+    .in("entity_key", uniqueDomains)
+    .order("created_at", { ascending: false });
+  if (error || !data) return {};
+
+  const byDomain = new Map<string, { rows: Json[] }>();
+  for (const row of data as Json[]) {
+    const key = str(row.entity_key);
+    if (!key) continue;
+    if (!byDomain.has(key)) byDomain.set(key, { rows: [] });
+    byDomain.get(key)!.rows.push(row);
+  }
+
+  const out: Record<string, ExistingResearchInfo> = {};
+  for (const [domain, { rows }] of byDomain) {
+    const workflows = [...new Set(rows.map((r) => str(r.workflow_name)).filter(Boolean))];
+    const companyName = rows.map((r) => str(r.company_name)).find(Boolean) ?? null;
+    out[domain] = {
+      domain,
+      companyName,
+      lastRunAt: str(rows[0]?.created_at),
+      runCount: rows.length,
+      workflows,
+    };
+  }
+  return out;
+}
+
 async function ensureProjectCompany(client: SupabaseClient, companyId: string): Promise<string | null> {
   const existing = await client
     .from(PROJECT_COMPANIES_TABLE)
@@ -259,7 +312,13 @@ export async function handleVelvetechResearchCsvPreview(req: IncomingMessage, re
   const body = await readJsonBody(req);
   const csvText = str(body.csvText);
   if (!csvText) return sendJson(res, 400, { error: "CSV text is required" });
-  sendJson(res, 200, previewCsv(csvText));
+  const preview = previewCsv(csvText);
+
+  const client = getSupabase();
+  const domains = preview.rows.filter((r) => r.errors.length === 0).map((r) => r.company_domain);
+  const existingResults = client ? await checkExistingResearch(client, domains) : {};
+
+  sendJson(res, 200, { ...preview, existingResults });
 }
 
 export async function handleVelvetechResearchCsvLaunch(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -270,13 +329,29 @@ export async function handleVelvetechResearchCsvLaunch(req: IncomingMessage, res
   const body = await readJsonBody(req);
   const csvText = str(body.csvText);
   const filename = str(body.filename) || "uploaded CSV";
+  const rerunDomains = new Set(
+    Array.isArray(body.rerunDomains) ? body.rerunDomains.map((d) => str(d)).filter(Boolean) : []
+  );
   if (!csvText) return sendJson(res, 400, { error: "CSV text is required" });
 
   const preview = previewCsv(csvText);
   if (preview.rowCount === 0) return sendJson(res, 400, { error: "CSV has no data rows", ...preview });
   if (preview.errorCount > 0) return sendJson(res, 400, { error: "Fix CSV row errors before launch", ...preview });
 
-  const imported = await importRows(client, preview.rows);
+  // Companies with prior research are skipped unless the caller explicitly
+  // opted back in via rerunDomains (the checkboxes on the preview alert).
+  const existingResults = await checkExistingResearch(client, preview.rows.map((r) => r.company_domain));
+  const skippedDomains = Object.keys(existingResults).filter((d) => !rerunDomains.has(d));
+  const rowsToImport = preview.rows.filter((r) => !skippedDomains.includes(r.company_domain));
+  if (rowsToImport.length === 0) {
+    return sendJson(res, 400, {
+      error: "All companies in this CSV already have research. Check a company to re-run it, or upload a different list.",
+      skippedDomains,
+      existingResults,
+    });
+  }
+
+  const imported = await importRows(client, rowsToImport);
   if (imported.error) return sendJson(res, 500, { error: imported.error });
   const leadUuids = [...new Set(imported.rows.map((r) => r.lead_uuid).filter(Boolean))];
   if (leadUuids.length === 0) return sendJson(res, 400, { error: "No contacts were imported" });
@@ -330,6 +405,7 @@ export async function handleVelvetechResearchCsvLaunch(req: IncomingMessage, res
     launchId,
     requestedCount: leadUuids.length,
     importedCount: imported.rows.length,
+    skippedDomains,
     contacts: imported.rows.map((r) => ({
       lead_uuid: r.lead_uuid,
       company_uuid: r.company_uuid,
