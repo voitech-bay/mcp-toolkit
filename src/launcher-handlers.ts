@@ -680,7 +680,11 @@ async function refreshRun(
   client: NonNullable<ReturnType<typeof getSupabase>>,
   run: Json
 ): Promise<Json> {
-  if (str(run, "status") === "success" || str(run, "status") === "failed") return run;
+  // A run is terminal once it has a finished_at — set either by a pushed n8n
+  // completion (POST /api/n8n/launch/:id/complete) or by the idle-settle path
+  // below. Never recompute a finished run: the push signal is authoritative and
+  // settled runs must not flip as late/duplicate result rows trickle in.
+  if (str(run, "finished_at") || str(run, "status") === "success" || str(run, "status") === "failed") return run;
   const agg = await computeAggregates(client, run);
   const status = statusFor(run, agg);
   const patch: Json = {
@@ -716,6 +720,166 @@ export async function handleN8nLaunchStatus(
   if (!run) return sendJson(res, 404, { error: "Launch not found" });
   const refreshed = await refreshRun(client, run as Json);
   sendJson(res, 200, { run: refreshed });
+}
+
+/** Optional shared-secret gate for n8n→app pushes; reuses the results-push secret. */
+function n8nPushAuthorized(req: IncomingMessage): boolean {
+  const secret = process.env.N8N_WORKFLOW_RESULTS_SECRET?.trim();
+  if (!secret) return true;
+  const raw =
+    (req.headers.authorization as string | undefined) ??
+    (req.headers.Authorization as string | undefined);
+  return typeof raw === "string" && raw === `Bearer ${secret}`;
+}
+
+/** Coerce a pushed status into one of the terminal states, or null if absent/invalid. */
+function parseTerminalStatus(value: unknown): "success" | "partial" | "failed" | null {
+  if (typeof value !== "string") return null;
+  const v = value.trim().toLowerCase();
+  if (v === "success" || v === "ok" || v === "succeeded" || v === "complete" || v === "completed") return "success";
+  if (v === "partial") return "partial";
+  if (v === "failed" || v === "error" || v === "failure") return "failed";
+  return null;
+}
+
+function intOrNull(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return Math.max(0, Math.trunc(value));
+  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) return Math.max(0, Math.trunc(Number(value)));
+  return null;
+}
+
+/**
+ * Count per-lead outcomes from an optional `results` array. Each entry may carry
+ * `ok`/`success` (boolean) and/or an `error` string. Returns null when no usable
+ * per-lead data was supplied so the caller falls back to row aggregates.
+ */
+function countPushedResults(value: unknown): { succeeded: number; failed: number } | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  let succeeded = 0;
+  let failed = 0;
+  for (const raw of value) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+    const row = raw as Json;
+    const err = str(row, "error");
+    const okFlag = row.ok === true || row.success === true;
+    const failFlag = row.ok === false || row.success === false || Boolean(err);
+    if (failFlag && !okFlag) failed += 1;
+    else succeeded += 1;
+  }
+  return { succeeded, failed };
+}
+
+export interface LaunchCompletionInput {
+  /** requested_count on the run. */
+  requested: number;
+  /** Counts derived from n8n_workflow_results rows (computeAggregates). */
+  aggSucceeded: number;
+  aggFailed: number;
+  aggContacts: number;
+  /** Raw values off the completion push body. */
+  statusRaw?: unknown;
+  results?: unknown;
+  succeededRaw?: unknown;
+  failedRaw?: unknown;
+}
+
+export interface LaunchCompletionDecision {
+  status: "success" | "partial" | "failed";
+  succeeded_count: number;
+  failed_count: number;
+}
+
+/**
+ * Decide a run's terminal status + counts at completion time. Precedence for
+ * counts: explicit body counts > per-lead `results` tally > row aggregates
+ * (agg.failed already folds in the requested−seen shortfall). An explicit
+ * `status` wins outright; otherwise success needs every requested lead succeeded
+ * with no failures, an all-empty run is failed, anything between is partial.
+ * Pure and exported so the decision is unit-testable without a DB.
+ */
+export function deriveLaunchCompletion(input: LaunchCompletionInput): LaunchCompletionDecision {
+  const pushed = countPushedResults(input.results);
+  const explicitSucceeded = intOrNull(input.succeededRaw);
+  const explicitFailed = intOrNull(input.failedRaw);
+  const succeeded = explicitSucceeded ?? pushed?.succeeded ?? input.aggSucceeded;
+  const failed = explicitFailed ?? pushed?.failed ?? input.aggFailed;
+  const seen = input.aggContacts;
+
+  let status = parseTerminalStatus(input.statusRaw);
+  if (!status) {
+    if (succeeded <= 0 && seen <= 0) status = "failed";
+    else if (failed > 0 || succeeded < input.requested) status = "partial";
+    else status = "success";
+  }
+  return { status, succeeded_count: Math.max(0, succeeded), failed_count: Math.max(0, failed) };
+}
+
+// --- POST /api/n8n/launch/:id/complete ---------------------------------------
+// The real completion signal: the n8n workflow's final node POSTs here so the
+// run finalizes immediately and deterministically, instead of the poller
+// inferring "done" from row counts + a 90s idle-settle heuristic.
+// Body (all optional): { status?, results?: [{lead_uuid, ok, error?}],
+//   succeeded_count?, failed_count?, error? }. Idempotent: a run that already
+// has finished_at is returned unchanged.
+export async function handleN8nLaunchComplete(
+  req: IncomingMessage,
+  res: ServerResponse,
+  launchId: string
+): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  if (!n8nPushAuthorized(req)) return sendJson(res, 401, { error: "Unauthorized" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+
+  const { data: run, error } = await client.from(LAUNCH_RUNS_TABLE).select("*").eq("id", launchId).maybeSingle();
+  if (error) return sendJson(res, 500, { error: error.message });
+  if (!run) return sendJson(res, 404, { error: "Launch not found" });
+
+  // Idempotent: already finalized (by a prior push or the settle path).
+  if (str(run as Json, "finished_at")) return sendJson(res, 200, { run, alreadyComplete: true });
+
+  const body = await readJsonBody(req);
+  const requested = Number((run as Json).requested_count) || 0;
+
+  // Row aggregates remain the source of truth for what actually landed; the push
+  // supplies the completion boundary and (optionally) explicit outcome counts.
+  const agg = await computeAggregates(client, run as Json);
+  const { status, succeeded_count, failed_count } = deriveLaunchCompletion({
+    requested,
+    aggSucceeded: agg.succeeded_count,
+    aggFailed: agg.failed_count,
+    aggContacts: agg.contacts_count,
+    statusRaw: body.status,
+    results: body.results,
+    succeededRaw: body.succeeded_count,
+    failedRaw: body.failed_count,
+  });
+
+  const errorMessage = str(body, "error") || (status === "failed" ? str(run as Json, "error_message") : "");
+  const patch: Json = {
+    contacts_count: agg.contacts_count,
+    companies_count: agg.companies_count,
+    succeeded_count,
+    failed_count,
+    status,
+    finished_at: new Date().toISOString(),
+  };
+  if (errorMessage) patch.error_message = errorMessage;
+
+  const { data: updated, error: updErr } = await client
+    .from(LAUNCH_RUNS_TABLE)
+    .update(patch)
+    .eq("id", launchId)
+    .is("finished_at", null) // guard against a concurrent settle/second push
+    .select("*")
+    .maybeSingle();
+  if (updErr) return sendJson(res, 500, { error: updErr.message });
+  if (!updated) {
+    // Lost the race: another writer finalized it first. Return the current row.
+    const { data: current } = await client.from(LAUNCH_RUNS_TABLE).select("*").eq("id", launchId).maybeSingle();
+    return sendJson(res, 200, { run: current ?? run, alreadyComplete: true });
+  }
+  sendJson(res, 200, { run: updated });
 }
 
 // --- GET /api/n8n/launch/history?projectId=&limit=&workflowKey= --------------

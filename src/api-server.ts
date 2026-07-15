@@ -144,6 +144,7 @@ import {
   handleN8nWorkflows,
   handleN8nLaunch,
   handleN8nLaunchStatus,
+  handleN8nLaunchComplete,
   handleN8nLaunchHistory,
   handleVelvetechDrafts,
   handleVelvetechDraftApprove,
@@ -403,6 +404,7 @@ const server = createServer(async (req, res) => {
     /^\/api\/n8n\/workflow-results\/executions\/([^/]+)$/
   );
   const n8nLaunchStatusMatch = pathname.match(/^\/api\/n8n\/launch\/([^/]+)\/status$/);
+  const n8nLaunchCompleteMatch = pathname.match(/^\/api\/n8n\/launch\/([^/]+)\/complete$/);
   const getSalesWebhookMatch = pathname.match(/^\/api\/webhooks\/getsales\/([^/]+)$/);
   const outreachRunPovMatch = pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)\/pov$/);
   const outreachRunVariantsMatch = pathname.match(/^\/api\/outreach-agent\/runs\/([^/]+)\/variants$/);
@@ -684,6 +686,12 @@ const server = createServer(async (req, res) => {
     if (n8nLaunchStatusMatch) {
       const launchId = decodeURIComponent(n8nLaunchStatusMatch[1]);
       await handleN8nLaunchStatus(req, res, launchId);
+      return;
+    }
+
+    if (n8nLaunchCompleteMatch) {
+      const launchId = decodeURIComponent(n8nLaunchCompleteMatch[1]);
+      await handleN8nLaunchComplete(req, res, launchId);
       return;
     }
 
