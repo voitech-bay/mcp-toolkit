@@ -4,6 +4,24 @@ Closes the "poll-not-push" gap on the Pipeline → Launch flow. Instead of the a
 only inferring a run is done from result-row counts plus a 90s idle-settle
 guess, n8n signals completion explicitly.
 
+**Status: deployed 2026-07-15.** All three live workflows carry the new node,
+added additively via direct n8n API PUT (not the stale
+`build_n8n_velvetech_research_workflow.py`) — verified by diffing the full
+before/after workflow JSON, confirming zero existing nodes/connections changed.
+Not yet exercised by a real execution (deliberately — see below).
+
+| adapter | workflow id | new node name | new node id |
+|---|---|---|---|
+| `velvetech_research` | `l9pGpKlzrQuCj4Yn` | `POST launch complete (research)` | `a64b1cb1-c2a4-44a2-abf0-57c0c582178d` |
+| `velvetech_reply` | `bMc92zIIWe0wGAbE` | `POST launch complete (reply)` | `2acf8495-3115-442d-86cd-747bfe727e00` |
+| `velvetech_messaging` | `awm0ax9fHkL1Sv3w` | `POST launch complete (messaging)` | `a32ed1c0-adee-4f39-a933-baa1c5202ecc` |
+
+Verification was structural only (JSON diff, no live trigger) to avoid burning
+Prospeo/Coresignal credits or sending a real LinkedIn reply. First real launch
+of each adapter is the actual end-to-end check — watch `n8n_launch_runs` in
+Supabase or the Pipeline history table; a run should now flip to a terminal
+status within ~5s of n8n finishing instead of waiting up to 90s.
+
 ## Two execution shapes — read this before wiring a workflow
 
 The three Velvetech launch adapters differ in how the app invokes n8n, and the
