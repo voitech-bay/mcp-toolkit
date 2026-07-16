@@ -398,6 +398,97 @@ async function buildVelvetechMessagingPayloads(
   return { ok: true, payloads };
 }
 
+/**
+ * Accept-triggered LinkedIn sequence (D0.2): assembles the full context the n8n
+ * accept parent (`velvetech-accept-linkedin-trigger`) requires — it throws on a
+ * bare GetSales event, so pov + deep_research + lead + channel_state must be
+ * pre-assembled here. Research guard mirrors buildVelvetechMessagingPayloads;
+ * thread/persona assembly mirrors buildVelvetechReplyPayloads. persona_route is
+ * derived from the lead title inside n8n, so it is not sent from here.
+ * Exported for the GetSales accept webhook receiver.
+ */
+export async function buildVelvetechAcceptLinkedinPayloads(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  args: { projectId: string; launchId: string; leadUuids: string[] }
+): Promise<{ ok: true; payloads: Json[] } | { ok: false; status: number; error: string }> {
+  const { contacts, error } = await getContactsByUuidsForProject(client, args.projectId, args.leadUuids);
+  if (error) return { ok: false, status: 500, error };
+  const contactRows = args.leadUuids.map((uuid) => contacts[uuid]).filter((row): row is Json => !!row);
+  const missing = args.leadUuids.length - contactRows.length;
+  if (missing > 0) return { ok: false, status: 400, error: `${missing} lead(s) are not synced in Contacts` };
+
+  const companyIds = contactRows.map((c) => str(c, "company_uuid")).filter(Boolean);
+  const companiesRes = await getCompaniesByIdsForProject(client, args.projectId, companyIds);
+  if (companiesRes.error) return { ok: false, status: 500, error: companiesRes.error };
+
+  const senderNameByUuid = new Map<string, string>();
+  const { credentials: gsCredentials } = await getGetSalesCredentials(client, args.projectId);
+  if (gsCredentials) {
+    const senders = await fetchAllSenders(gsCredentials);
+    for (const row of senders.data ?? []) {
+      const uuid = str(row as Json, "uuid");
+      const name = [str(row as Json, "first_name"), str(row as Json, "last_name")].filter(Boolean).join(" ");
+      if (uuid && name) senderNameByUuid.set(uuid, name);
+    }
+  }
+
+  const payloads: Json[] = [];
+  const missingResearch: string[] = [];
+  for (const c of contactRows) {
+    const leadUuid = str(c, "uuid");
+    const companyId = str(c, "company_uuid");
+    const co = companiesRes.companies[companyId] as Json | undefined;
+    const domain = domainFrom(strAny(co, "domain")) || emailDomain(str(c, "work_email"));
+    if (!domain) {
+      missingResearch.push(`${contactName(c) || leadUuid}: no company domain`);
+      continue;
+    }
+    const pov = await latestVelvetechWorkflowResult(client, "velvetech-pov", domain);
+    const deep = await latestVelvetechWorkflowResult(client, "velvetech-company-deep-research", domain);
+    if (!pov || !deep) {
+      missingResearch.push(`${contactName(c) || leadUuid}: missing ${[!pov ? "POV" : "", !deep ? "deep research" : ""].filter(Boolean).join(" and ")}`);
+      continue;
+    }
+    const conv = await getConversation(client, { leadUuid, messageLimit: 100 });
+    const messages = Array.isArray(conv.messages) ? conv.messages : [];
+    const senderProfileUuid = latestOutboundSender(messages);
+    payloads.push({
+      run_id: `${args.launchId}-${leadUuid.slice(0, 8)}`,
+      launch_id: args.launchId,
+      project_id: args.projectId,
+      batch_name: args.launchId,
+      company_domain: domain,
+      company_key: domain,
+      company_name: strAny(co, "name") || str(c, "company_name") || domain,
+      company_uuid: companyId,
+      pov,
+      deep_research: deep,
+      lead: {
+        lead_uuid: leadUuid,
+        contact_id: leadUuid,
+        company_uuid: companyId,
+        name: contactName(c),
+        first_name: firstName(c),
+        title: str(c, "position"),
+        linkedin: str(c, "linkedin"),
+        email: str(c, "work_email"),
+        sender_profile_uuid: senderProfileUuid,
+      },
+      sender_persona: senderNameByUuid.get(senderProfileUuid) || senderProfileUuid,
+      channel_state: {
+        thread: messages.map(messageLine),
+      },
+      // Cross-lead awareness lands in Phase E2; the n8n input defaults this to [].
+      prior_account_messaging: [],
+      skip_research: true,
+    });
+  }
+  if (missingResearch.length > 0) {
+    return { ok: false, status: 409, error: `Fresh Velvetech research required before accept messaging: ${missingResearch.join("; ")}` };
+  }
+  return { ok: true, payloads };
+}
+
 // --- GET /api/n8n/workflows --------------------------------------------------
 export async function handleN8nWorkflows(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
@@ -512,6 +603,21 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
     trig = failed ? { ok: false, status: 502, error: failed } : { ok: true, status: 200 };
   } else if (wf.adapter === "velvetech_reply") {
     const built = await buildVelvetechReplyPayloads(client, { projectId, launchId, leadUuids });
+    if (!built.ok) {
+      await client
+        .from(LAUNCH_RUNS_TABLE)
+        .update({ status: "failed", error_message: built.error, finished_at: new Date().toISOString() })
+        .eq("id", launchId);
+      return sendJson(res, built.status, { error: built.error, launchId });
+    }
+    let failed: string | null = null;
+    for (const payload of built.payloads) {
+      const one = await triggerWorkflowPayload(workflowKey, payload);
+      if (!one.ok) failed = one.error ?? "Trigger failed";
+    }
+    trig = failed ? { ok: false, status: 502, error: failed } : { ok: true, status: 200 };
+  } else if (wf.adapter === "velvetech_accept_linkedin") {
+    const built = await buildVelvetechAcceptLinkedinPayloads(client, { projectId, launchId, leadUuids });
     if (!built.ok) {
       await client
         .from(LAUNCH_RUNS_TABLE)

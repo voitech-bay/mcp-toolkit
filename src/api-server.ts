@@ -154,6 +154,7 @@ import { handleMessageLog } from "./message-log-handlers.js";
 import { handleUsers } from "./users-handlers.js";
 import { handleAuthLogin, handleAuthLogout, handleAuthProjects, handleAuthSession } from "./auth-handlers.js";
 import { handleGithubWebhook } from "./github-webhook-handlers.js";
+import { handleGetSalesAcceptWebhook } from "./getsales-webhook-handlers.js";
 import {
   handleVelvetechResearchCsvLaunch,
   handleVelvetechResearchCsvPreview,
@@ -779,6 +780,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/webhooks/fireflies":
         await handleFirefliesWebhook(req, res);
+        return;
+      case "/api/webhooks/getsales-accept":
+        await handleGetSalesAcceptWebhook(req, res);
         return;
       case "/api/conversations/refresh":
         await handleRefreshGetSalesConversation(req, res);
