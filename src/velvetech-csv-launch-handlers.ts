@@ -154,13 +154,21 @@ function normalizeRow(raw: Record<string, string>, index: number): CsvRow {
     linkedin_url: pick(raw, ["linkedin_url", "linkedin", "profile_url"]),
     errors: [],
   };
-  if (!row.first_name && !row.linkedin_url && !row.email) row.errors.push("Add first_name, linkedin_url, or email");
+  // Contact fields (first_name / linkedin_url / email) are optional: the research
+  // pipeline discovers contacts per company via Prospeo and dedups against any
+  // seed contacts we do pass. A company + domain is the only hard requirement,
+  // so company-only lists ("company,domain") launch the same as contact lists.
   if (!row.company_name) row.errors.push("Add company_name");
   if (!row.company_domain) row.errors.push("Add company_domain, company website, or a work email domain");
   return row;
 }
 
-function previewCsv(csvText: string) {
+/** A row carries a usable contact seed (vs. company-only). */
+function hasContactSeed(row: CsvRow): boolean {
+  return Boolean(row.first_name || row.email || row.linkedin_url);
+}
+
+export function previewCsv(csvText: string) {
   const parsed = parseCsv(csvText);
   const rows = parsed.map(normalizeRow);
   return {
@@ -300,9 +308,15 @@ async function importRows(client: SupabaseClient, rows: CsvRow[]): Promise<{ row
   for (const row of rows) {
     const company = await findOrCreateCompany(client, row);
     if (company.error) return { rows: imported, error: `Row ${row.rowNumber}: ${company.error}` };
-    const contact = await upsertContact(client, row, company.id);
-    if (contact.error || !contact.uuid) return { rows: imported, error: `Row ${row.rowNumber}: ${contact.error ?? "Contact creation failed"}` };
-    imported.push({ ...row, lead_uuid: contact.uuid, company_uuid: company.id });
+    // Only seed a contact when the row actually names one; company-only rows
+    // launch with an empty lead_uuid and rely on Prospeo discovery downstream.
+    let leadUuid = "";
+    if (hasContactSeed(row)) {
+      const contact = await upsertContact(client, row, company.id);
+      if (contact.error || !contact.uuid) return { rows: imported, error: `Row ${row.rowNumber}: ${contact.error ?? "Contact creation failed"}` };
+      leadUuid = contact.uuid;
+    }
+    imported.push({ ...row, lead_uuid: leadUuid, company_uuid: company.id });
   }
   return { rows: imported, error: null };
 }
@@ -354,7 +368,11 @@ export async function handleVelvetechResearchCsvLaunch(req: IncomingMessage, res
   const imported = await importRows(client, rowsToImport);
   if (imported.error) return sendJson(res, 500, { error: imported.error });
   const leadUuids = [...new Set(imported.rows.map((r) => r.lead_uuid).filter(Boolean))];
-  if (leadUuids.length === 0) return sendJson(res, 400, { error: "No contacts were imported" });
+  const companyUuids = [...new Set(imported.rows.map((r) => r.company_uuid).filter(Boolean))];
+  // Research is company-grain: the pipeline emits one POV per company (contacts
+  // are discovered, not required). Completion tracks companies, so a company-only
+  // upload is valid as long as at least one company imported.
+  if (companyUuids.length === 0) return sendJson(res, 400, { error: "No companies were imported" });
 
   const inserted = await client
     .from(LAUNCH_RUNS_TABLE)
@@ -364,7 +382,8 @@ export async function handleVelvetechResearchCsvLaunch(req: IncomingMessage, res
       source_list_uuid: null,
       source_list_name: `CSV upload: ${filename}`,
       lead_uuids: leadUuids,
-      requested_count: leadUuids.length,
+      company_uuids: companyUuids,
+      requested_count: companyUuids.length,
       status: "running",
     })
     .select("*")
@@ -403,7 +422,9 @@ export async function handleVelvetechResearchCsvLaunch(req: IncomingMessage, res
 
   sendJson(res, 200, {
     launchId,
-    requestedCount: leadUuids.length,
+    requestedCount: companyUuids.length,
+    companyCount: companyUuids.length,
+    seedContactCount: leadUuids.length,
     importedCount: imported.rows.length,
     skippedDomains,
     contacts: imported.rows.map((r) => ({

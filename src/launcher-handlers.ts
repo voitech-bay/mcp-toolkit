@@ -562,6 +562,18 @@ function rowMatchesLaunchId(result: Json, launchId: string): boolean {
  * Correlate result rows for a launch: rows for the launched contacts created at/after
  * the run started. When some rows carry `result.launch_id` or `result.run_id`, restrict to those.
  */
+/**
+ * A run is company-grain when it carries company_uuids (CSV company-only research
+ * launches). Its completion is measured in companies, not contacts, because the
+ * research pipeline emits one POV per company and discovers contacts itself.
+ */
+function runCompanyUuids(run: Json): string[] {
+  return Array.isArray(run.company_uuids) ? (run.company_uuids as unknown[]).map(String).filter(Boolean) : [];
+}
+export function isCompanyGrainRun(run: Json): boolean {
+  return runCompanyUuids(run).length > 0;
+}
+
 async function computeAggregates(
   client: NonNullable<ReturnType<typeof getSupabase>>,
   run: Json
@@ -569,36 +581,45 @@ async function computeAggregates(
   const launchId = String(run.id);
   const createdAt = str(run, "created_at");
   const leadUuids = Array.isArray(run.lead_uuids) ? (run.lead_uuids as unknown[]).map(String) : [];
+  const companyUuids = runCompanyUuids(run);
+  const companyGrain = companyUuids.length > 0;
   const empty: RunAggregates = {
     contacts_count: 0,
     companies_count: 0,
     succeeded_count: 0,
-    failed_count: Number(run.requested_count) || leadUuids.length,
+    failed_count: Number(run.requested_count) || (companyGrain ? companyUuids.length : leadUuids.length),
     latest_row_at: null,
   };
-  if (leadUuids.length === 0) return empty;
+  if (leadUuids.length === 0 && companyUuids.length === 0) return empty;
 
   const projectId = str(run, "project_id");
-  const { contacts: contactRows } = projectId
+  const { contacts: contactRows } = projectId && leadUuids.length > 0
     ? await getContactsByUuidsForProject(client, projectId, leadUuids)
     : { contacts: {} as Record<string, Json> };
+  // Companies to match on: those explicitly launched (company-grain) plus any
+  // resolved from the seed contacts (contact-grain, or the seeds on a mixed CSV).
   const launchedCompanyIds = [
-    ...new Set(
-      leadUuids
-        .map((uuid) => str(contactRows[uuid], "company_uuid"))
-        .filter(Boolean)
-    ),
+    ...new Set([
+      ...companyUuids,
+      ...leadUuids.map((uuid) => str(contactRows[uuid], "company_uuid")).filter(Boolean),
+    ]),
   ];
 
   type RowPick = { contact_id: string | null; company_id: string | null; created_at: string | null; result: unknown };
   const rowKey = (r: RowPick) => `${str(r as Json, "contact_id")}|${str(r as Json, "company_id")}|${str(r as Json, "created_at")}`;
 
-  let byContactQuery = client
-    .from(N8N_WORKFLOW_RESULTS_TABLE)
-    .select("contact_id,company_id,created_at,result")
-    .in("contact_id", leadUuids);
-  if (createdAt) byContactQuery = byContactQuery.gte("created_at", createdAt);
-  const { data: byContact, error: contactErr } = await byContactQuery.limit(2000);
+  let byContact: RowPick[] | null = [];
+  let contactErr: unknown = null;
+  if (leadUuids.length > 0) {
+    let byContactQuery = client
+      .from(N8N_WORKFLOW_RESULTS_TABLE)
+      .select("contact_id,company_id,created_at,result")
+      .in("contact_id", leadUuids);
+    if (createdAt) byContactQuery = byContactQuery.gte("created_at", createdAt);
+    const res = await byContactQuery.limit(2000);
+    byContact = res.data as RowPick[] | null;
+    contactErr = res.error;
+  }
 
   let byLaunchQuery = client
     .from(N8N_WORKFLOW_RESULTS_TABLE)
@@ -645,12 +666,14 @@ async function computeAggregates(
     const at = str(r as Json, "created_at");
     if (at && (!latest || at > latest)) latest = at;
   }
-  const requested = Number(run.requested_count) || leadUuids.length;
-  const seen = contacts.size;
+  const requested = Number(run.requested_count) || (companyGrain ? companyUuids.length : leadUuids.length);
+  // Company-grain runs measure progress in distinct companies seen; contact-grain
+  // in distinct contacts. contacts_count/companies_count stay raw for display.
+  const seen = companyGrain ? companies.size : contacts.size;
   const succeeded = Math.max(0, seen - failed);
   const missing = Math.max(0, requested - seen);
   return {
-    contacts_count: seen,
+    contacts_count: contacts.size,
     companies_count: companies.size,
     succeeded_count: succeeded,
     failed_count: failed + missing,
@@ -658,11 +681,11 @@ async function computeAggregates(
   };
 }
 
-function statusFor(run: Json, agg: RunAggregates): string {
+export function statusFor(run: Json, agg: RunAggregates): string {
   const current = str(run, "status");
   if (current === "failed") return "failed";
   const requested = Number(run.requested_count) || 0;
-  const seen = agg.contacts_count;
+  const seen = isCompanyGrainRun(run) ? agg.companies_count : agg.contacts_count;
   if (seen >= requested && requested > 0) {
     return agg.failed_count > 0 ? "partial" : "success";
   }
@@ -871,11 +894,13 @@ export async function handleN8nLaunchComplete(
   // Row aggregates remain the source of truth for what actually landed; the push
   // supplies the completion boundary and (optionally) explicit outcome counts.
   const agg = await computeAggregates(client, run as Json);
+  // "seen" is grain-appropriate: companies for a company-grain run, contacts otherwise.
+  const seen = isCompanyGrainRun(run as Json) ? agg.companies_count : agg.contacts_count;
   const { status, succeeded_count, failed_count } = deriveLaunchCompletion({
     requested,
     aggSucceeded: agg.succeeded_count,
     aggFailed: agg.failed_count,
-    aggContacts: agg.contacts_count,
+    aggContacts: seen,
     statusRaw: body.status,
     results: body.results,
     succeededRaw: body.succeeded_count,

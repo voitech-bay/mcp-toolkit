@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS public.n8n_launch_runs (
   source_list_uuid text,                 -- GetSales list the contacts were chosen from
   source_list_name text,                 -- resolved at launch time for display
   lead_uuids jsonb NOT NULL DEFAULT '[]'::jsonb, -- selected lead/contact uuids
+  company_uuids jsonb NOT NULL DEFAULT '[]'::jsonb, -- company-grain launches (CSV company-only research); empty for contact-grain runs
   requested_count int NOT NULL DEFAULT 0,
   contacts_count int NOT NULL DEFAULT 0,  -- distinct contacts seen in results
   companies_count int NOT NULL DEFAULT 0, -- distinct companies seen in results
@@ -27,3 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_n8n_launch_runs_workflow
   ON public.n8n_launch_runs(project_id, workflow_key, created_at DESC);
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON public.n8n_launch_runs TO service_role;
+
+-- Retrofit for tables created before company_uuids existed (applied 2026-07-16):
+-- ALTER TABLE public.n8n_launch_runs
+--   ADD COLUMN IF NOT EXISTS company_uuids jsonb NOT NULL DEFAULT '[]'::jsonb;

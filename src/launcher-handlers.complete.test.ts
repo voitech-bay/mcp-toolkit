@@ -1,6 +1,46 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { deriveLaunchCompletion, isFinalCompletionPush } from "./launcher-handlers.js";
+import { deriveLaunchCompletion, isFinalCompletionPush, isCompanyGrainRun, statusFor } from "./launcher-handlers.js";
+
+const agg = (o: Partial<{ contacts_count: number; companies_count: number; succeeded_count: number; failed_count: number; latest_row_at: string | null }>) => ({
+  contacts_count: 0,
+  companies_count: 0,
+  succeeded_count: 0,
+  failed_count: 0,
+  latest_row_at: new Date().toISOString(), // "fresh" so the idle-settle path doesn't trigger
+  ...o,
+});
+
+test("isCompanyGrainRun: true only when company_uuids is non-empty", () => {
+  assert.equal(isCompanyGrainRun({ company_uuids: ["a", "b"] }), true);
+  assert.equal(isCompanyGrainRun({ company_uuids: [] }), false);
+  assert.equal(isCompanyGrainRun({}), false);
+  assert.equal(isCompanyGrainRun({ lead_uuids: ["x"] }), false);
+});
+
+// Company-grain (CSV company-only): progress is companies seen, not contacts.
+test("statusFor: company-grain success when every company is seen", () => {
+  const run = { company_uuids: ["a", "b", "c"], requested_count: 3, status: "running" };
+  // 3 companies seen; contacts_count irrelevant to the decision here.
+  assert.equal(statusFor(run, agg({ companies_count: 3, contacts_count: 0 })), "success");
+});
+
+test("statusFor: company-grain still running when companies incomplete and fresh", () => {
+  const run = { company_uuids: ["a", "b", "c"], requested_count: 3, status: "running" };
+  assert.equal(statusFor(run, agg({ companies_count: 1, contacts_count: 40 })), "running");
+});
+
+test("statusFor: company-grain partial when a company row carried an error", () => {
+  const run = { company_uuids: ["a", "b"], requested_count: 2, status: "running" };
+  assert.equal(statusFor(run, agg({ companies_count: 2, failed_count: 1 })), "partial");
+});
+
+// Contact-grain regression: unchanged behavior (seen = contacts_count).
+test("statusFor: contact-grain unchanged (measures contacts)", () => {
+  const run = { lead_uuids: ["x", "y"], requested_count: 2, status: "running" };
+  assert.equal(statusFor(run, agg({ contacts_count: 2, companies_count: 1 })), "success");
+  assert.equal(statusFor(run, agg({ contacts_count: 1, companies_count: 1 })), "running");
+});
 
 // Guards the reply/messaging fan-out case: only an explicit final:true may
 // force-finalize a run. Omitted/false/truthy-but-not-boolean must nudge only,

@@ -161,6 +161,8 @@ async function launchResearch() {
     const j = (await r.json()) as {
       launchId?: string;
       requestedCount?: number;
+      companyCount?: number;
+      seedContactCount?: number;
       skippedDomains?: string[];
       error?: string;
     } & PreviewResponse;
@@ -172,7 +174,10 @@ async function launchResearch() {
     launchId.value = j.launchId ?? "";
     skippedDomains.value = j.skippedDomains ?? [];
     const skippedNote = skippedDomains.value.length ? `, ${skippedDomains.value.length} already-researched compan${skippedDomains.value.length === 1 ? "y" : "ies"} skipped` : "";
-    message.success(`Research launched for ${j.requestedCount ?? preview.value?.validCount ?? 0} contacts${skippedNote}`);
+    const n = j.companyCount ?? j.requestedCount ?? 0;
+    const seeds = j.seedContactCount ?? 0;
+    const seedNote = seeds ? ` (${seeds} seed contact${seeds === 1 ? "" : "s"}, more discovered via Prospeo)` : "";
+    message.success(`Research launched for ${n} compan${n === 1 ? "y" : "ies"}${seedNote}${skippedNote}`);
   } catch {
     launchError.value = "Launch failed";
   } finally {
@@ -208,8 +213,9 @@ function useSample() {
         </div>
 
         <NAlert type="info" :show-icon="false">
-          CSV columns: first_name, last_name, title, company_name, company_domain, email, linkedin_url.
-          company_domain can be replaced by a work email domain.
+          Required columns: company_name and company_domain (a work email domain works too).
+          Contact columns (first_name, last_name, title, email, linkedin_url) are optional seeds &mdash;
+          the pipeline discovers contacts per company via Prospeo. A plain company,domain list works.
         </NAlert>
 
         <NInput
