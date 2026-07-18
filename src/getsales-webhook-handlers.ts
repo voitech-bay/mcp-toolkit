@@ -80,10 +80,13 @@ async function recentAcceptLaunchExists(
   leadUuid: string
 ): Promise<boolean> {
   const since = new Date(Date.now() - DEDUPE_WINDOW_HOURS * 3600 * 1000).toISOString();
+  // Failed runs don't count: a transient n8n error must not block the lead's
+  // accept sequence for the whole dedupe window.
   const { data } = await client
     .from(LAUNCH_RUNS_TABLE)
     .select("id")
     .eq("workflow_key", WORKFLOW_KEY)
+    .neq("status", "failed")
     .gte("created_at", since)
     .contains("lead_uuids", [leadUuid])
     .limit(1);
