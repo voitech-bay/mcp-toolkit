@@ -27,6 +27,7 @@ import {
 } from "./services/n8n-trigger.js";
 import { getAuthSession } from "./services/auth.js";
 import { fetchAllSenders, sendLinkedInMessage } from "./services/source-api.js";
+import { computeAndEmitBilling, findResearchParentsMissingBilling } from "./services/velvetech-billing.js";
 
 const LAUNCH_RUNS_TABLE = "n8n_launch_runs";
 /** Mark a still-running launch as complete once no new rows have arrived for this long. */
@@ -1037,7 +1038,62 @@ export async function handleN8nLaunchComplete(
     const { data: current } = await client.from(LAUNCH_RUNS_TABLE).select("*").eq("id", launchId).maybeSingle();
     return sendJson(res, 200, { run: current ?? run, alreadyComplete: true });
   }
+
+  // Emit the run-billing summary row so the run appears in executions history
+  // right away. Research only (one execution per launch); fire-and-forget so it
+  // never blocks or breaks completion. Cost fills in when N8N_API_KEY is set;
+  // without it the row still emits instantly (status/duration/funnel).
+  if (str(run as Json, "workflow_key") === "velvetech_research") {
+    const createdAt = str(updated as Json, "created_at");
+    const finishedAt = str(updated as Json, "finished_at");
+    const durationSec =
+      createdAt && finishedAt ? Math.max(0, Math.round((Date.parse(finishedAt) - Date.parse(createdAt)) / 1000)) : null;
+    void computeAndEmitBilling({
+      client,
+      runId: String((updated as Json).id),
+      executionId: str(body, "execution_id") || null,
+      fallbackDurationSec: durationSec,
+      fallbackStatus: str(updated as Json, "status"),
+    }).catch((e) => console.error("velvetech billing emit failed:", e instanceof Error ? e.message : e));
+  }
+
   sendJson(res, 200, { run: updated });
+}
+
+// --- POST /api/n8n/velvetech/billing/backfill --------------------------------
+// One-off / maintenance: emit run-billing rows for research runs that lack one.
+// Body: { targets?: [{ executionId, runId }], limit? }. With no targets, auto-detects
+// finished research parent executions missing a billing row (needs N8N_API_KEY).
+export async function handleVelvetechBillingBackfill(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
+  if (!n8nPushAuthorized(req)) return sendJson(res, 401, { error: "Unauthorized" });
+  const client = getSupabase();
+  if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
+
+  const body = await readJsonBody(req);
+  let targets: Array<{ executionId: string; runId: string }> = [];
+  if (Array.isArray(body.targets)) {
+    targets = (body.targets as unknown[])
+      .map((t) => {
+        const o = (t && typeof t === "object" ? t : {}) as Json;
+        return { executionId: str(o, "executionId") || str(o, "execution_id"), runId: str(o, "runId") || str(o, "run_id") };
+      })
+      .filter((t) => t.executionId && t.runId);
+  } else {
+    const limit = Number(body.limit) || 100;
+    targets = await findResearchParentsMissingBilling(client, limit);
+  }
+
+  const results: Json[] = [];
+  for (const t of targets) {
+    try {
+      const r = await computeAndEmitBilling({ client, runId: t.runId, executionId: t.executionId });
+      results.push({ ...t, ok: r.ok, costed: r.costed, error: r.error ?? null });
+    } catch (e) {
+      results.push({ ...t, ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+  sendJson(res, 200, { count: results.length, results });
 }
 
 // --- GET /api/n8n/launch/history?projectId=&limit=&workflowKey= --------------

@@ -145,6 +145,7 @@ import {
   handleN8nLaunch,
   handleN8nLaunchStatus,
   handleN8nLaunchComplete,
+  handleVelvetechBillingBackfill,
   handleN8nLaunchHistory,
   handleVelvetechDrafts,
   handleVelvetechDraftApprove,
@@ -972,6 +973,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/n8n/launch/history":
         await handleN8nLaunchHistory(req, res);
+        return;
+      case "/api/n8n/velvetech/billing/backfill":
+        await handleVelvetechBillingBackfill(req, res);
         return;
       case "/api/n8n/velvetech/drafts":
         await handleVelvetechDrafts(req, res);

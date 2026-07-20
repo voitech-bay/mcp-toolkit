@@ -138,6 +138,7 @@ export function isPublicWebhookPath(pathname: string): boolean {
 
 const N8N_MACHINE_AUTH_POST_PATHS = new Set([
   "/api/n8n/workflow-results",
+  "/api/n8n/velvetech/billing/backfill",
   "/api/email-studio/ingest-from-n8n",
   "/api/email-studio/push-getsales-linkedin-sequence",
   "/api/email-studio/smartlead/events",

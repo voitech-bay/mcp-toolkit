@@ -5843,17 +5843,29 @@ export async function listVelvetechExecutionSummaries(
 ): Promise<{ rows: VelvetechExecutionSummaryRow[]; total: number; error: string | null }> {
   const limit = Math.min(Math.max(params.limit, 1), 100);
   const offset = Math.max(params.offset, 0);
-  const { data, error, count } = await client
+  // Billing rows are one-per-run and low-volume; fetch newest-first, dedup by
+  // run_id (newest wins), then paginate in memory. This keeps history from
+  // double-listing a run that was billed more than once (e.g. the app emit plus
+  // a legacy manual-script row).
+  const { data, error } = await client
     .from(N8N_WORKFLOW_RESULTS_TABLE)
-    .select("*", { count: "exact" })
+    .select("*")
     .eq("workflow_name", "velvetech-run-billing")
     .order("created_at", { ascending: false })
-    .range(offset, offset + limit - 1);
+    .limit(2000);
   if (error) {
     return { rows: [], total: 0, error: error.message };
   }
-  const rows = (data ?? []).map((raw) => mapBillingResultRow(raw as Record<string, unknown>));
-  return { rows, total: count ?? rows.length, error: null };
+  const seen = new Set<string>();
+  const deduped: VelvetechExecutionSummaryRow[] = [];
+  for (const raw of data ?? []) {
+    const mapped = mapBillingResultRow(raw as Record<string, unknown>);
+    const key = mapped.run_id || mapped.id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(mapped);
+  }
+  return { rows: deduped.slice(offset, offset + limit), total: deduped.length, error: null };
 }
 
 export type VelvetechExecutionDetail = {
