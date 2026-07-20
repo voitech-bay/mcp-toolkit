@@ -128,18 +128,35 @@ const PIPELINE_PATHS = [
   "/calls/cold-n8n",
 ] as const;
 const VELVETECH_PATHS = [
+  "/",
   "/companies",
   "/contacts",
   "/conversations",
   "/sync",
+  "/n8n/launch",
   "/velvetech/research-launch",
   "/n8n/workflow-results",
   "/email-studio",
   "/sequence-studio",
+  "/analytics",
+  "/hypotheses",
+  "/enrichment",
+  "/lists-checker",
+  "/tables",
+  "/context",
 ] as const;
 
 function pathInGroup(path: string, group: readonly string[]): boolean {
   return group.includes(path);
+}
+
+function isVelvetechAllowedPath(path: string): boolean {
+  if (VELVETECH_PATHS.includes(path as (typeof VELVETECH_PATHS)[number])) return true;
+  if (path.startsWith("/company/") || path.startsWith("/contact/")) return true;
+  if (path.startsWith("/analytics/") || path.startsWith("/enrichment/")) return true;
+  if (path.startsWith("/hypothesis-tag-contacts")) return true;
+  if (path.startsWith("/context-snapshots")) return true;
+  return false;
 }
 
 const isDataGroupActive = computed(() => pathInGroup(route.path, DATA_PATHS));
@@ -356,7 +373,13 @@ async function loadUsers() {
 
 const selectedProjectId = computed({
   get: () => projectStore.selectedProjectId,
-  set: (id: string | null) => projectStore.selectProject(id),
+  set: (id: string | null) => {
+    const previous = projectStore.selectedProjectId;
+    projectStore.selectProject(id);
+    if (id && id !== previous && route.path !== "/") {
+      void router.push("/");
+    }
+  },
 });
 
 function normalizeClientPortalHost(raw: string | undefined): string | null {
@@ -426,8 +449,8 @@ async function loadAppData(preferredProjectId?: string | null) {
   await projectStore.loadProjects();
   if (isVelvetechLogin.value) {
     projectStore.selectProject(VELVETECH_PROJECT_ID);
-    if (!VELVETECH_PATHS.includes(route.path as typeof VELVETECH_PATHS[number])) {
-      await router.replace("/velvetech/research-launch");
+    if (!isVelvetechAllowedPath(route.path)) {
+      await router.replace("/");
     }
   } else if (preferredProjectId && projectStore.projects.some((p) => p.id === preferredProjectId)) {
     projectStore.selectProject(preferredProjectId);
@@ -556,8 +579,8 @@ watch(
 watch(
   () => route.path,
   (path) => {
-    if (isVelvetechLogin.value && !VELVETECH_PATHS.includes(path as typeof VELVETECH_PATHS[number])) {
-      router.replace("/velvetech/research-launch");
+    if (isVelvetechLogin.value && !isVelvetechAllowedPath(path)) {
+      router.replace("/");
     }
   }
 );
@@ -757,7 +780,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
               <NSelect v-if="!isVelvetechLogin" v-model:value="selectedProjectId" :options="projectOptions" :loading="projectStore.loading"
                 :render-label="renderProjectLabel" placeholder="Select project…" clearable size="small"
                 style="width: 220px" />
-              <NButton v-else quaternary size="small" @click="router.push('/velvetech/research-launch')">
+              <NButton v-else quaternary size="small" @click="router.push('/')">
                 <RocketIcon :size="14" style="margin-right: 4px" />
                 Velvetech
               </NButton>
