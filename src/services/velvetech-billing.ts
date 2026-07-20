@@ -711,6 +711,7 @@ export async function emitBillingRow(
   if (!runId) return { ok: false, error: "missing run_id" };
   await client.from(N8N_WORKFLOW_RESULTS_TABLE).delete().eq("workflow_name", BILLING_WORKFLOW_NAME).eq("result->>run_id", runId);
   const insert: Json = {
+    workflow: BILLING_WORKFLOW_NAME, // NOT NULL column (no default); reader keys on workflow_name
     workflow_name: BILLING_WORKFLOW_NAME,
     execution_id: args.executionId,
     contact_id: null,
