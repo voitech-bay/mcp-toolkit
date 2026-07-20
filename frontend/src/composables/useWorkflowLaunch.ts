@@ -1,6 +1,13 @@
 import { ref, computed } from "vue";
-import { useMessage } from "naive-ui";
+import { useMessage, useDialog } from "naive-ui";
 import { useProjectStore } from "../stores/project";
+
+interface ExistingResearchInfo {
+  domain: string;
+  companyName: string | null;
+  lastRunAt: string;
+  runCount: number;
+}
 
 export interface LaunchableWorkflow {
   key: string;
@@ -16,6 +23,7 @@ const VELVETECH_REPLY = "velvetech_reply";
 export function useWorkflowLaunch() {
   const projectStore = useProjectStore();
   const message = useMessage();
+  const dialog = useDialog();
   const launching = ref(false);
   const workflows = ref<LaunchableWorkflow[]>([]);
 
@@ -40,10 +48,32 @@ export function useWorkflowLaunch() {
     return workflowByKey(key)?.configured ?? false;
   }
 
+  function confirmRerun(info: ExistingResearchInfo[]): Promise<boolean> {
+    const names = info
+      .map((c) => c.companyName || c.domain)
+      .filter(Boolean)
+      .slice(0, 5)
+      .join(", ");
+    const more = info.length > 5 ? ` and ${info.length - 5} more` : "";
+    const noun = info.length === 1 ? "company already has" : "companies already have";
+    return new Promise<boolean>((resolve) => {
+      dialog.warning({
+        title: "Already researched",
+        content: `${info.length} ${noun} research on file (${names}${more}). Running again creates a new research run with its own cost. Re-run anyway?`,
+        positiveText: "Re-run",
+        negativeText: "Cancel",
+        onPositiveClick: () => resolve(true),
+        onNegativeClick: () => resolve(false),
+        onClose: () => resolve(false),
+        onMaskClick: () => resolve(false),
+      });
+    });
+  }
+
   async function launch(
     workflowKey: string,
     leadUuids: string[],
-    options?: { sourceListUuid?: string | null; successMessage?: string }
+    options?: { sourceListUuid?: string | null; successMessage?: string; force?: boolean }
   ): Promise<string | null> {
     const pid = projectId.value;
     if (!pid) {
@@ -73,13 +103,26 @@ export function useWorkflowLaunch() {
         leadUuids: uuids,
       };
       if (options?.sourceListUuid) body.sourceListUuid = options.sourceListUuid;
+      if (options?.force) body.force = true;
 
       const r = await fetch("/api/n8n/launch", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const data = (await r.json()) as { launchId?: string; error?: string };
+      const data = (await r.json()) as {
+        launchId?: string;
+        error?: string;
+        gated?: boolean;
+        alreadyResearched?: ExistingResearchInfo[];
+      };
+      // Skip gate: the company already has research. Ask, then re-launch with force.
+      if (r.status === 409 && data.gated) {
+        launching.value = false;
+        const confirmed = await confirmRerun(data.alreadyResearched ?? []);
+        if (!confirmed) return null;
+        return await launch(workflowKey, leadUuids, { ...options, force: true });
+      }
       if (!r.ok || !data.launchId) throw new Error(data.error ?? "Launch failed");
 
       message.success(

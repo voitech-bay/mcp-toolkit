@@ -187,17 +187,21 @@ export function previewCsv(csvText: string) {
  * One query, grouped client-side; CSV batches are small enough that this is
  * simpler and cheaper than a dedicated RPC.
  */
-async function checkExistingResearch(
+export async function checkExistingResearch(
   client: SupabaseClient,
   domains: string[]
 ): Promise<Record<string, ExistingResearchInfo>> {
   const uniqueDomains = [...new Set(domains.filter(Boolean))];
   if (uniqueDomains.length === 0) return {};
 
+  // entity_key / company_name live inside the `result` jsonb (no such columns),
+  // so filter and alias via the JSON path. (A bare `.in("entity_key", …)` errors
+  // in PostgREST and silently returned {}, making this gate a no-op.)
   const { data, error } = await client
     .from(N8N_WORKFLOW_RESULTS_TABLE)
-    .select("entity_key, workflow_name, created_at, company_name")
-    .in("entity_key", uniqueDomains)
+    .select("workflow_name, created_at, entity_key:result->>entity_key, company_name:result->>company_name")
+    .in("result->>entity_key", uniqueDomains)
+    .neq("workflow_name", "velvetech-run-billing")
     .order("created_at", { ascending: false });
   if (error || !data) return {};
 

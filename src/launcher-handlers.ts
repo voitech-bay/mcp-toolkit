@@ -28,6 +28,7 @@ import {
 import { getAuthSession } from "./services/auth.js";
 import { fetchAllSenders, sendLinkedInMessage } from "./services/source-api.js";
 import { computeAndEmitBilling, findResearchParentsMissingBilling } from "./services/velvetech-billing.js";
+import { checkExistingResearch } from "./velvetech-csv-launch-handlers.js";
 
 const LAUNCH_RUNS_TABLE = "n8n_launch_runs";
 /** Mark a still-running launch as complete once no new rows have arrived for this long. */
@@ -534,6 +535,34 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
     ? [...new Set(body.leadUuids.map((u) => String(u).trim()).filter(Boolean))]
     : [];
   if (leadUuids.length === 0) return sendJson(res, 400, { error: "leadUuids must be a non-empty array" });
+
+  // Skip gate: launching research for a company that already has research on
+  // file is refused unless the caller opts in with `force`. Same rule the CSV
+  // launcher applies, now enforced on the card/launcher buttons too. Resolve the
+  // target companies' domains via the payload builder, then check for prior runs.
+  if (wf.adapter === "velvetech_research" && body.force !== true) {
+    const preview = await buildVelvetechResearchPayload(client, { projectId, launchId: "precheck", leadUuids });
+    if (preview.ok) {
+      const domains = [
+        ...new Set(
+          ((preview.payload.rows as Array<Record<string, unknown>>) ?? [])
+            .map((r) => String(r.company_domain ?? "").trim())
+            .filter(Boolean)
+        ),
+      ];
+      const existing = await checkExistingResearch(client, domains);
+      const alreadyResearched = Object.values(existing);
+      if (alreadyResearched.length > 0) {
+        return sendJson(res, 409, {
+          gated: true,
+          alreadyResearched,
+          error: `${alreadyResearched.length} compan${alreadyResearched.length === 1 ? "y" : "ies"} already ${
+            alreadyResearched.length === 1 ? "has" : "have"
+          } research on file`,
+        });
+      }
+    }
+  }
 
   // Resolve the source list name for display (best-effort).
   let sourceListName: string | null = null;
