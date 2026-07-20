@@ -352,14 +352,20 @@ function dossierFromMergedCompanyRow(row: Record<string, unknown>) {
     hook: hook || null,
     lead_question:
       (typeof row.lead_question === "string" && row.lead_question) || discovery[0] || null,
-    headline_facts: headline,
-    target: row.target && typeof row.target === "object" ? row.target : null,
+    headline_facts: headline as Array<Record<string, unknown>>,
+    target:
+      row.target && typeof row.target === "object" && !Array.isArray(row.target)
+        ? (row.target as Record<string, unknown>)
+        : null,
     tech_stack: Array.isArray(row.tech_stack) ? row.tech_stack : [],
-    fit_contacts_by_persona:
-      row.fit_contacts_by_persona && typeof row.fit_contacts_by_persona === "object"
+    fit_contacts_by_persona: (
+      row.fit_contacts_by_persona &&
+      typeof row.fit_contacts_by_persona === "object" &&
+      !Array.isArray(row.fit_contacts_by_persona)
         ? row.fit_contacts_by_persona
-        : {},
-    fit_score: row.fit_score ?? null,
+        : {}
+    ) as Record<string, Array<Record<string, unknown>>>,
+    fit_score: (row.fit_score as number | string | null | undefined) ?? null,
     score_rationale: typeof row.score_rationale === "string" ? row.score_rationale : null,
     vertical: typeof row.vertical === "string" ? row.vertical : null,
     build_risk: typeof row.build_risk === "string" ? row.build_risk : null,
@@ -369,8 +375,17 @@ function dossierFromMergedCompanyRow(row: Record<string, unknown>) {
     discovery_questions: discovery,
     job_postings: Array.isArray(row.job_postings) ? row.job_postings : [],
     leadership_openings: Array.isArray(row.leadership_openings) ? row.leadership_openings : [],
-    research_source_urls: Array.isArray(row.research_source_urls) ? row.research_source_urls : [],
-    team_signal: row.team_signal && typeof row.team_signal === "object" ? row.team_signal : undefined,
+    research_source_urls: Array.isArray(row.research_source_urls)
+      ? row.research_source_urls.map(String)
+      : [],
+    team_signal:
+      row.team_signal && typeof row.team_signal === "object" && !Array.isArray(row.team_signal)
+        ? (row.team_signal as {
+            dept_headcount?: Record<string, unknown>;
+            capacity_gaps?: string[];
+            it_contact_count?: number;
+          })
+        : undefined,
     brief_markdown: typeof row.brief_markdown === "string" ? row.brief_markdown : null,
     company_name:
       (typeof row.company_name === "string" && row.company_name) ||
