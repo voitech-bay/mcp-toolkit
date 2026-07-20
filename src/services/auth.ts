@@ -143,9 +143,18 @@ const N8N_MACHINE_AUTH_POST_PATHS = new Set([
   "/api/email-studio/smartlead/events",
 ]);
 
+/** Dynamic (id-bearing) n8n POST endpoints allowed with the machine bearer. */
+const N8N_MACHINE_AUTH_POST_PATTERNS: RegExp[] = [
+  // Launch completion push fired by the workflow's final node.
+  /^\/api\/n8n\/launch\/[^/]+\/complete$/,
+];
+
 /** n8n POST endpoints with Bearer N8N_WORKFLOW_RESULTS_SECRET (no session cookie). */
 export function isN8nMachineAuth(req: IncomingMessage, pathname: string): boolean {
-  if (!N8N_MACHINE_AUTH_POST_PATHS.has(pathname) || req.method !== "POST") return false;
+  const allowed =
+    N8N_MACHINE_AUTH_POST_PATHS.has(pathname) ||
+    N8N_MACHINE_AUTH_POST_PATTERNS.some((re) => re.test(pathname));
+  if (!allowed || req.method !== "POST") return false;
   const secret = process.env.N8N_WORKFLOW_RESULTS_SECRET?.trim();
   if (!secret) return false;
   const raw =
