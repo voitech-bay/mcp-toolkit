@@ -19,6 +19,7 @@ import {
 } from "naive-ui";
 import { ChevronDownIcon, ChevronRightIcon, ExternalLinkIcon, MailIcon, SendIcon, StarIcon } from "lucide-vue-next";
 import { useProjectStore } from "../stores/project";
+import { plaintextParagraphs } from "../utils/htmlPlaintext";
 
 type Json = Record<string, any>;
 
@@ -171,28 +172,9 @@ function messageTitle(message: Json) {
   return `${channel} ${step}`;
 }
 
-function normalizeBody(value: unknown): string {
-  return String(value ?? "")
-    .replace(/<\s*br\s*\/?>/gi, "\n")
-    .replace(/<\/\s*(p|div|li)\s*>/gi, "\n\n")
-    .replace(/<\s*li[^>]*>/gi, "- ")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&amp;/gi, "&")
-    .replace(/&lt;/gi, "<")
-    .replace(/&gt;/gi, ">")
-    .replace(/&quot;/gi, "\"")
-    .replace(/&#39;/g, "'")
-    .replace(/\r\n/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
 function messageParagraphs(value: unknown): string[] {
-  const normalized = normalizeBody(value);
-  if (!normalized) return ["No body yet"];
-  return normalized.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  const paragraphs = plaintextParagraphs(value);
+  return paragraphs.length ? paragraphs : ["No body yet"];
 }
 
 function renderChannelPill(row: StudioLead, channel: string) {
@@ -718,7 +700,7 @@ onMounted(load);
 .muted{color:#cbd5e1;font-size:.86em}
 .lead-stack{display:flex;flex-direction:column;gap:10px}
 .lead-card{border:1px solid #334155;border-radius:8px;background:#111827;overflow:hidden}
-.lead-header{display:grid;grid-template-columns:28px 38px minmax(210px,1fr) minmax(420px,1.6fr) auto;gap:10px;align-items:center;padding:12px}
+.lead-header{display:grid;grid-template-columns:28px 38px minmax(180px,1fr) minmax(280px,1.4fr) auto;gap:10px;align-items:center;padding:12px}
 .expand-button,.link-button,.message-title{border:0;background:transparent;color:#93c5fd;padding:0;cursor:pointer}
 .expand-button{display:flex;align-items:center;justify-content:center;color:inherit}
 .link-button{font-weight:700;text-align:left}
@@ -757,8 +739,8 @@ onMounted(load);
 .fact-row{display:grid;grid-template-columns:32px 1fr;gap:9px;align-items:start;line-height:1.45;margin-bottom:8px}
 .field-preview{margin:10px 0}
 .field-preview pre{white-space:pre-wrap;word-break:break-word;padding:8px;border-radius:6px;background:rgba(128,128,128,.12)}
-@media(max-width:1280px){.tracks-grid{grid-template-columns:1fr}.lead-expanded{grid-template-columns:minmax(0,1fr) minmax(280px,360px)}}
-@media(max-width:1180px){.lead-header{grid-template-columns:28px 38px minmax(180px,1fr) auto}.channel-pills{grid-column:1/-1}.lead-expanded{grid-template-columns:1fr}.tracks-grid{grid-template-columns:1fr}.side-fact-list{max-height:none}}
-@media(max-width:1400px){.toolbar{grid-template-columns:repeat(4,minmax(150px,1fr)) auto}}
+@media(max-width:1400px){.toolbar{grid-template-columns:repeat(4,minmax(150px,1fr)) auto}.lead-header{grid-template-columns:28px 38px minmax(160px,1fr) auto}.channel-pills{grid-column:1/-1}}
+@media(max-width:1280px){.tracks-grid{grid-template-columns:1fr}.lead-expanded{grid-template-columns:1fr}.side-fact-list{max-height:none}}
+@media(max-width:1180px){.lead-header{grid-template-columns:28px 38px minmax(160px,1fr) auto}.tracks-grid{grid-template-columns:1fr}}
 @media(max-width:960px){.header-row,.message-head{flex-direction:column}.toolbar,.detail-grid{grid-template-columns:1fr}.lead-header{grid-template-columns:28px 38px 1fr}.lead-header>.n-button{grid-column:1/-1}.channel-pills{grid-template-columns:1fr}}
 </style>

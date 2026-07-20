@@ -6,12 +6,14 @@ import { useProjectStore } from "../stores/project";
 import VelvetechLinkedInDraftsPanel from "../components/VelvetechLinkedInDraftsPanel.vue";
 import { isVelvetechProjectId } from "../project-ids";
 import { useWorkflowLaunch, type LaunchableWorkflow } from "../composables/useWorkflowLaunch";
+import { htmlToPlaintext } from "../utils/htmlPlaintext";
 
 type Json = Record<string, any>;
 interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
 interface Annotation { id:string; text:string; start:number; end:number; purpose:string; research_point_ids:string[]; instruction_ids:string[]; explanation:string; classification:"verified"|"product_truth"|"instruction"|"inference"; confidence:string; warnings:string[] }
 interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
 interface StyleSource extends Json { id:string; name:string; technique_summary:string; prompt_block:string; tags?:string[] }
+interface InstructionDoc { id:string; kind:string; title:string; version:number|string; priority?:number; content_markdown?:string|null }
 
 const store = useProjectStore(); const toast = useMessage(); const dialog = useDialog();
 const route = useRoute();
@@ -29,6 +31,8 @@ const emailOptions = ref({ campaignId:"", batchName:"", persona:"", sequenceStep
 const bodyInput = ref<InstanceType<typeof NInput>|null>(null);
 const styleSources = ref<StyleSource[]>([]);
 const styleSourceId = ref<string | null>(null);
+const instructionOpen = ref(false);
+const selectedInstruction = ref<InstructionDoc | null>(null);
 
 const humanize = (value:string) => value.replace(/_/g, " ");
 const statusOptions = ["research_ready","ai_draft_made","needs_review","comments_made","regenerated","final_check","approved","sent","research_missing","generation_failed","changes_requested","rejected","sending_failed"].map((value) => ({ label:humanize(value), value }));
@@ -184,11 +188,12 @@ watch([pickerSearch, pickerPage, pickerPageSize], () => {
 watch(pickerSearch, () => { pickerPage.value = 1; });
 watch(createOpen, (open) => { if (!open) resetCreateForm(); });
 
-async function openEmail(id:string) { selectedId.value=id; detailOpen.value=true; detailLoading.value=true; candidate.value=null; try { const r=await fetch(`/api/email-studio/emails/${id}?projectId=${store.selectedProjectId}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); detail.value=j; subject.value=j.currentVersion?.subject??""; emailBody.value=j.currentVersion?.body??""; selectedResearch.value=(j.researchPoints??[]).map((x:Json)=>x.id); dirty.value=false; if(j.data.status==="ai_draft_made") await setStatus("needs_review",false); } catch(e){toast.error(e instanceof Error?e.message:"Could not open email")} finally{detailLoading.value=false} }
+async function openEmail(id:string) { selectedId.value=id; detailOpen.value=true; detailLoading.value=true; candidate.value=null; try { const r=await fetch(`/api/email-studio/emails/${id}?projectId=${store.selectedProjectId}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); detail.value=j; subject.value=j.currentVersion?.subject??""; emailBody.value=htmlToPlaintext(j.currentVersion?.body??""); selectedResearch.value=(j.researchPoints??[]).map((x:Json)=>x.id); dirty.value=false; if(j.data.status==="ai_draft_made") await setStatus("needs_review",false); } catch(e){toast.error(e instanceof Error?e.message:"Could not open email")} finally{detailLoading.value=false} }
 async function refreshDetail(){if(selectedId.value)await openEmail(selectedId.value)}
 async function request(path:string, options:RequestInit={}) { actionLoading.value=path; try { const r=await fetch(path,{...options,headers:{"Content-Type":"application/json",...(options.headers??{})}}); const j=await r.json(); if(!r.ok)throw new Error(j.error??"Action failed"); return j; } finally{actionLoading.value=""} }
 async function setStatus(status:string, notify=true){try{await request(`/api/email-studio/emails/${selectedId.value}/status`,{method:"PATCH",body:JSON.stringify({projectId:store.selectedProjectId,status})});if(notify)toast.success(`Moved to ${humanize(status)}`);await refreshDetail();await load()}catch(e){if(notify)toast.error(e instanceof Error?e.message:"Status update failed")}}
 async function saveEdits(){try{await request(`/api/email-studio/emails/${selectedId.value}/human-version`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId,subject:subject.value,body:emailBody.value})});dirty.value=false;toast.success("New version saved");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Save failed")}}
+function openInstruction(i: InstructionDoc) { selectedInstruction.value = i; instructionOpen.value = true; }
 function captureSelection(){const el=(bodyInput.value as any)?.textareaElRef as HTMLTextAreaElement|undefined;if(!el)return;const start=el.selectionStart,end=el.selectionEnd;selectedText.value={start,end,quote:emailBody.value.slice(start,end)};}
 async function addComment(){if(!selectedText.value.quote||!commentDraft.value.trim())return;const {start,end,quote}=selectedText.value;try{await request(`/api/email-studio/emails/${selectedId.value}/comments`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId,selectedQuote:quote,startOffset:start,endOffset:end,contextBefore:emailBody.value.slice(Math.max(0,start-30),start),contextAfter:emailBody.value.slice(end,end+30),body:commentDraft.value})});commentDraft.value="";toast.success("Comment added");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Comment failed")}}
 async function toggleComment(c:Json){try{await request(`/api/email-studio/comments/${c.id}`,{method:"PATCH",body:JSON.stringify({projectId:store.selectedProjectId,status:c.status==="open"?"resolved":"open"})});await refreshDetail()}catch(e){toast.error(e instanceof Error?e.message:"Comment update failed")}}
@@ -213,6 +218,35 @@ async function generate(initial=false,scope="full"){
 }
 async function adopt(){if(!candidate.value)return;try{await request(`/api/email-studio/emails/${selectedId.value}/versions/${candidate.value.id}/adopt`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId})});compareOpen.value=false;candidate.value=null;toast.success("New version adopted");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Could not adopt version")}}
 async function approve(){dialog.warning({title:"Approve this email?",content:"Approval locks the current version. Only Smartlead can mark it sent.",positiveText:"Approve",negativeText:"Cancel",onPositiveClick:async()=>{try{await request(`/api/email-studio/emails/${selectedId.value}/approve`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId})});toast.success("Email approved");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Approval failed")}}})}
+
+const canSyncSmartlead = computed(() => {
+  const d = detail.value?.data;
+  if (!d) return false;
+  return Boolean(d.smartlead_campaign_id || d.campaign_id) && Boolean(d.smartlead_lead_id || d.recipient_email || d.contact_id);
+});
+async function syncFromSmartlead() {
+  const d = detail.value?.data;
+  if (!d) return;
+  try {
+    const j = await request("/api/email-studio/smartlead/reconcile", {
+      method: "POST",
+      body: JSON.stringify({
+        projectId: store.selectedProjectId,
+        campaignId: d.smartlead_campaign_id || d.campaign_id,
+        leadId: d.smartlead_lead_id || undefined,
+        recipientEmail: d.recipient_email || undefined,
+        contactId: d.contact_id || undefined,
+        batchName: d.batch_name || undefined,
+      }),
+    });
+    const data = j.data ?? {};
+    toast.success(`Smartlead sync: ${data.upserted ?? 0} updated, ${data.sentInSmartlead ?? 0} sent in Smartlead`);
+    await refreshDetail();
+    await load();
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Smartlead sync failed");
+  }
+}
 
 async function launchEmailResearch(rowLike: Json) {
   const workflow = emailResearchWorkflow.value;
@@ -265,7 +299,22 @@ async function startEmailForContact() {
 
 async function copy(){await navigator.clipboard.writeText(`${subject.value}\n\n${emailBody.value}`);toast.success("Copied")}
 function annotationColor(a:Annotation){return a.warnings?.length?"#d03050":a.classification==="verified"?"#2080f0":a.classification==="product_truth"?"#18a058":a.classification==="instruction"?"#8a2be2":"#f0a020"}
-const annotatedSegments=computed(()=>{const out:Json[]=[];let at=0;for(const a of annotations.value){if(a.start>at)out.push({text:emailBody.value.slice(at,a.start)});out.push({text:emailBody.value.slice(a.start,a.end),annotation:a});at=a.end}if(at<emailBody.value.length)out.push({text:emailBody.value.slice(at)});return out});
+const annotatedSegments=computed(()=>{
+  const body = emailBody.value;
+  const out:Json[]=[];
+  let at=0;
+  for(const a of annotations.value){
+    const slice = body.slice(a.start, a.end);
+    // Skip misaligned annotations after HTML→plaintext (offsets were against stored HTML).
+    if (a.start < at || a.end > body.length || (a.text && slice !== a.text && htmlToPlaintext(a.text) !== slice)) continue;
+    if(a.start>at)out.push({text:body.slice(at,a.start)});
+    out.push({text:slice || a.text, annotation:a});
+    at=a.end;
+  }
+  if(at<body.length)out.push({text:body.slice(at)});
+  if (!out.length && body) out.push({ text: body });
+  return out;
+});
 function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);if(i>0)openEmail(rows.value[i-1].id)} function nextRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);if(i>=0&&i<rows.value.length-1)openEmail(rows.value[i+1].id)}
 </script>
 
@@ -296,7 +345,7 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
     </NTabs>
 
     <NDrawer v-model:show="detailOpen" width="96vw"><NDrawerContent :title="`${detail?.data?.contact_name||'Email'} · step ${detail?.data?.sequence_step||''}`" closable><NSpin :show="detailLoading"><template v-if="detail">
-      <NSpace justify="space-between" align="center"><NSpace><NButton size="small" @click="previousRow">Previous</NButton><NButton size="small" @click="nextRow">Next</NButton><div class="status-cell"><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NButton v-if="detail.data.status==='research_missing'" size="tiny" secondary type="primary" :loading="launchingN8n" :disabled="!emailResearchWorkflow?.configured" @click="launchEmailResearch(detail.data)">Launch n8n</NButton></div><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>
+      <NSpace justify="space-between" align="center"><NSpace><NButton size="small" @click="previousRow">Previous</NButton><NButton size="small" @click="nextRow">Next</NButton><div class="status-cell"><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NButton v-if="detail.data.status==='research_missing'" size="tiny" secondary type="primary" :loading="launchingN8n" :disabled="!emailResearchWorkflow?.configured" @click="launchEmailResearch(detail.data)">Launch n8n</NButton></div><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton v-if="canSyncSmartlead" secondary :loading="actionLoading==='/api/email-studio/smartlead/reconcile'" @click="syncFromSmartlead">Sync from Smartlead</NButton><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>
       <div class="workspace">
         <section class="panel research"><h3>Research & instructions</h3>
           <template v-if="researchPoints.length"><div v-for="p in researchPoints" :key="p.id" class="research-point"><NCheckbox :checked="selectedResearch.includes(p.id)" @update:checked="v=>selectedResearch=v?[...selectedResearch,p.id]:selectedResearch.filter(x=>x!==p.id)">{{p.statement}}</NCheckbox><NTag size="tiny" :type="p.kind==='verified'?'info':'warning'">{{p.kind}}</NTag></div></template>
@@ -309,7 +358,18 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
             <details v-if="povResearch.brief_markdown"><summary>Full research brief</summary><pre style="white-space:pre-wrap">{{povResearch.brief_markdown}}</pre></details>
           </template>
           <NEmpty v-else description="No structured research attached"/>
-          <h4>Active instructions</h4><div v-for="i in detail.instructions" :key="i.id" class="instruction"><NTag size="small" type="info">{{i.kind}}</NTag> {{i.title}} v{{i.version}}</div>
+          <h4>Active instructions</h4>
+          <button
+            v-for="i in detail.instructions"
+            :key="i.id"
+            type="button"
+            class="instruction instruction-btn"
+            @click="openInstruction(i)"
+          >
+            <NTag size="small" type="info">{{ i.kind }}</NTag>
+            <span>{{ i.title }} v{{ i.version }}</span>
+          </button>
+          <NEmpty v-if="!detail.instructions?.length" description="No active instructions" size="small" />
           <details v-if="detail.research"><summary>Citations and raw research</summary><pre>{{JSON.stringify(detail.research,null,2)}}</pre></details>
           <details v-else-if="rawN8nResearch.length"><summary>All raw n8n research ({{rawN8nResearch.length}})</summary><pre>{{JSON.stringify(rawN8nResearch,null,2)}}</pre></details>
         </section>
@@ -328,7 +388,18 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
         <section class="panel comments"><h3>Comments</h3><NAlert v-if="selectedText.quote" type="info" :show-icon="false"><strong>Selected:</strong> “{{selectedText.quote}}”</NAlert><NInput v-model:value="commentDraft" type="textarea" placeholder="Comment on the selected text…" :disabled="!selectedText.quote" style="margin-top:8px"/><NButton type="primary" secondary :disabled="!selectedText.quote||!commentDraft.trim()" style="margin-top:8px" @click="addComment">Add comment</NButton><div v-for="c in comments" :key="c.id" class="comment" :class="{resolved:c.status==='resolved'}"><NTag size="tiny" :type="c.status==='open'?'warning':'success'">{{c.status}}</NTag><blockquote>“{{c.selected_quote}}”</blockquote><p>{{c.body}}</p><NText v-if="c.mapped_version_id&&c.mapped_start_offset==null" type="error">Not mapped to current version</NText><div v-for="r in c.outreach_email_comment_replies" :key="r.id" class="reply">{{r.body}}</div><NInput v-model:value="replyDrafts[c.id]" size="small" placeholder="Reply…" style="margin:7px 0"/><NSpace><NButton text type="primary" size="tiny" @click="reply(c)">Reply</NButton><NButton text type="primary" size="tiny" @click="toggleComment(c)">{{c.status==='open'?'Resolve':'Reopen'}}</NButton></NSpace></div><NEmpty v-if="!comments.length" description="No comments"/><h4>Versions</h4><div v-for="v in detail.versions" :key="v.id" class="version"><NTag size="tiny" :type="v.state==='current'?'success':'default'">v{{v.version_number}} · {{v.state}}</NTag> {{v.author_type}} · {{fmt(v.created_at)}}</div></section>
       </div></template></NSpin></NDrawerContent></NDrawer>
 
-    <NModal v-model:show="compareOpen" preset="card" title="Review regenerated candidate" style="width:min(1200px,95vw)"><div class="compare"><div><h3>Current version</h3><strong>{{currentVersion?.subject}}</strong><pre>{{currentVersion?.body}}</pre></div><div><h3>Candidate v{{candidate?.version_number}}</h3><strong>{{candidate?.subject}}</strong><pre>{{candidate?.body}}</pre></div></div><template #footer><NSpace justify="end"><NButton @click="compareOpen=false">Keep current</NButton><NButton type="primary" @click="adopt">Adopt candidate</NButton></NSpace></template></NModal>
+    <NModal v-model:show="compareOpen" preset="card" title="Review regenerated candidate" style="width:min(1200px,95vw)"><div class="compare"><div><h3>Current version</h3><strong>{{currentVersion?.subject}}</strong><pre>{{ htmlToPlaintext(currentVersion?.body) }}</pre></div><div><h3>Candidate v{{candidate?.version_number}}</h3><strong>{{candidate?.subject}}</strong><pre>{{ htmlToPlaintext(candidate?.body) }}</pre></div></div><template #footer><NSpace justify="end"><NButton @click="compareOpen=false">Keep current</NButton><NButton type="primary" @click="adopt">Adopt candidate</NButton></NSpace></template></NModal>
+
+    <NModal v-model:show="instructionOpen" preset="card" :title="selectedInstruction?.title || 'Instruction'" style="width:min(720px,94vw)">
+      <NSpace v-if="selectedInstruction" style="margin-bottom:12px">
+        <NTag size="small" type="info">{{ selectedInstruction.kind }}</NTag>
+        <NText depth="3">v{{ selectedInstruction.version }}</NText>
+      </NSpace>
+      <pre class="instruction-body">{{ selectedInstruction?.content_markdown || "No content for this instruction." }}</pre>
+      <template #footer>
+        <NSpace justify="end"><NButton @click="instructionOpen=false">Close</NButton></NSpace>
+      </template>
+    </NModal>
 
     <NModal v-model:show="createOpen" preset="card" title="Write email for contact" style="width:min(860px,96vw)">
       <NText depth="3">Pick someone from your project contacts. You’ll land straight in the email workspace to research and draft.</NText>
@@ -378,4 +449,4 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
   </div>
 </template>
 
-<style scoped>.email-studio-link{color:#2080f0;text-decoration:none;font-weight:600}.email-studio-link:hover{text-decoration:underline}.status-cell{display:flex;flex-direction:column;align-items:flex-start;gap:6px}:deep(.clickable-email-row){cursor:pointer}:deep(.clickable-email-row:hover td){background:rgba(32,128,240,.06)}.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 180px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.instruction{margin:7px 0}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.muted{opacity:.55;font-size:.8em}:deep(.picker-row-selected td){background:rgba(32,128,240,.12)!important}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>
+<style scoped>.email-studio-link{color:#2080f0;text-decoration:none;font-weight:600}.email-studio-link:hover{text-decoration:underline}.status-cell{display:flex;flex-direction:column;align-items:flex-start;gap:6px}:deep(.clickable-email-row){cursor:pointer}:deep(.clickable-email-row:hover td){background:rgba(32,128,240,.06)}.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 180px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.instruction{margin:7px 0}.instruction-btn{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:1px solid transparent;border-radius:8px;padding:8px 10px;background:transparent;color:inherit;cursor:pointer}.instruction-btn:hover{border-color:rgba(32,128,240,.35);background:rgba(32,128,240,.08)}.instruction-body{white-space:pre-wrap;word-break:break-word;margin:0;padding:12px;border-radius:8px;background:rgba(128,128,128,.08);max-height:60vh;overflow:auto}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.muted{opacity:.55;font-size:.8em}:deep(.picker-row-selected td){background:rgba(32,128,240,.12)!important}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>
