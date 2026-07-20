@@ -449,6 +449,23 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
   const narrativeFromContract = !!accountNarrative;
   if (!accountNarrative) accountNarrative = deriveFallbackNarrative(pov);
 
+  const rosterAbsent =
+    pov.roster_absent === true ||
+    (Array.isArray(pov.fit_contacts) &&
+      (pov.fit_contacts as unknown[]).length === 0 &&
+      Array.isArray(pov.all_contacts) &&
+      (pov.all_contacts as unknown[]).length === 0 &&
+      Number(pov.eligible_contact_count ?? 0) === 0);
+
+  const employeesCount =
+    typeof companyIntel.employees_count === "number" ? companyIntel.employees_count : null;
+  const activeJobCount =
+    typeof pov.active_job_postings_count === "number"
+      ? pov.active_job_postings_count
+      : typeof companyIntel.active_job_postings_count === "number"
+        ? companyIntel.active_job_postings_count
+        : jsonArray(pov.job_postings).length;
+
   return {
     pov_ok: pov.pov_ok === true,
     from_contract: fromContract,
@@ -470,6 +487,13 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
     discovery_questions: discovery,
     job_postings: jsonArray(pov.job_postings),
     leadership_openings: jsonArray(pov.leadership_openings),
+    jobs_error: stringField(pov.jobs_error) ?? "",
+    active_job_postings_count: activeJobCount,
+    eligible_contact_count:
+      typeof pov.eligible_contact_count === "number"
+        ? pov.eligible_contact_count
+        : fitContacts.length,
+    discovery_error: stringField(pov.discovery_error) ?? "",
     research_source_urls: Array.from(
       new Set(jsonArray(pov.research_source_urls).map((u) => String(u)).filter(Boolean))
     ),
@@ -478,8 +502,10 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
         companyIntel.dept_headcount && typeof companyIntel.dept_headcount === "object"
           ? companyIntel.dept_headcount
           : {},
+      employees_count: employeesCount,
       capacity_gaps: jsonArray(peopleAnalysis.capacity_gaps).map((x) => String(x)).filter(Boolean),
       it_contact_count: (byPersona.it ?? []).length,
+      roster_absent: rosterAbsent,
     },
     brief_markdown: stringField(pov.brief_markdown),
     company_name: stringField(pov.company_name),

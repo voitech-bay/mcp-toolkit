@@ -17,8 +17,10 @@ type Target = {
 };
 type TeamSignal = {
   dept_headcount?: Record<string, unknown>;
+  employees_count?: number | null;
   capacity_gaps?: string[];
   it_contact_count?: number;
+  roster_absent?: boolean;
 };
 type Dossier = {
   pov_ok?: boolean;
@@ -41,6 +43,10 @@ type Dossier = {
   discovery_questions?: string[];
   job_postings?: JobItem[];
   leadership_openings?: JobItem[];
+  jobs_error?: string | null;
+  active_job_postings_count?: number | null;
+  eligible_contact_count?: number | null;
+  discovery_error?: string | null;
   research_source_urls?: string[];
   team_signal?: TeamSignal;
   brief_markdown?: string | null;
@@ -48,6 +54,9 @@ type Dossier = {
   as_of?: string | null;
   run_id?: string | null;
 };
+
+const META_PAIN_RE = /no public evidence of a data or integration problem/i;
+const ROSTER_CAVEAT_RE = /roster was not sampled|not in the sample|roster_absent/i;
 
 const props = defineProps<{
   dossier: Dossier;
@@ -85,7 +94,9 @@ const supportingFacts = computed(() =>
   facts.value.filter((f) => Number(f.tier) >= 2 && f.type !== "systems" && f.type !== "pain")
 );
 const painItems = computed<PainItem[]>(() =>
-  (props.dossier.data_integration_pain ?? []).filter((p) => p && p.claim)
+  (props.dossier.data_integration_pain ?? []).filter(
+    (p) => p && p.claim && !META_PAIN_RE.test(String(p.claim))
+  )
 );
 const tech = computed(() => (props.dossier.tech_stack ?? []).map((t) => String(t)).filter(Boolean));
 const narrativeParas = computed(() =>
@@ -98,21 +109,78 @@ const jobs = computed<JobItem[]>(() => props.dossier.job_postings ?? []);
 const leadOpenings = computed<JobItem[]>(() => props.dossier.leadership_openings ?? []);
 const sourceUrls = computed<string[]>(() => props.dossier.research_source_urls ?? []);
 const teamSignal = computed<TeamSignal>(() => props.dossier.team_signal ?? {});
+const rosterAbsent = computed(() => teamSignal.value.roster_absent === true);
+
 const deptSummary = computed(() => {
   const d = (teamSignal.value.dept_headcount ?? {}) as Record<string, unknown>;
   const bits: string[] = [];
-  const tech = Number(d.technical ?? 0);
+  const techN = Number(d.technical ?? 0);
   const ops = Number(d.operations ?? 0);
   const fin = Number(d.finance ?? 0);
-  if (tech) bits.push(`Technical ${tech}`);
-  if (ops) bits.push(`Operations ${ops}`);
-  if (fin) bits.push(`Finance ${fin}`);
+  const admin = Number(d.administrative ?? 0);
+  if (techN) bits.push(`Technical: ${techN}`);
+  if (ops) bits.push(`Operations: ${ops}`);
+  if (fin) bits.push(`Finance: ${fin}`);
+  if (admin) bits.push(`Administrative: ${admin}`);
+  const total = Number(teamSignal.value.employees_count ?? 0);
+  if (total > 0) bits.push(`Employees: ${total}`);
   return bits.join(" · ");
 });
-const noItLeader = computed(() => Number(teamSignal.value.it_contact_count ?? 0) === 0);
-const hasTeamSignal = computed(
-  () => !!deptSummary.value || (teamSignal.value.capacity_gaps ?? []).length > 0 || noItLeader.value
+
+const capacityGaps = computed(() => {
+  const raw = (teamSignal.value.capacity_gaps ?? []).map(String).filter(Boolean);
+  const observations = raw.filter((g) => !ROSTER_CAVEAT_RE.test(g)).slice(0, 2);
+  const caveat = raw.find((g) => ROSTER_CAVEAT_RE.test(g)) ?? null;
+  return { observations, caveat };
+});
+
+// Only claim "no IT leader in sampled roster" when a roster was actually sampled.
+const noItLeader = computed(
+  () => !rosterAbsent.value && Number(teamSignal.value.it_contact_count ?? 0) === 0
 );
+const hasOrgSnapshot = computed(
+  () =>
+    !!deptSummary.value ||
+    capacityGaps.value.observations.length > 0 ||
+    !!capacityGaps.value.caveat ||
+    noItLeader.value ||
+    rosterAbsent.value
+);
+
+const jobsError = computed(() => String(props.dossier.jobs_error ?? "").trim());
+const hasHiringList = computed(() => jobs.value.length > 0 || leadOpenings.value.length > 0);
+const activeJobCount = computed(() => {
+  const n = Number(props.dossier.active_job_postings_count);
+  return Number.isFinite(n) ? n : jobs.value.length;
+});
+
+const personaLanes = computed(() => {
+  const g = props.dossier.fit_contacts_by_persona ?? {};
+  return (["it", "ops", "finance"] as const)
+    .map((lane) => ({ lane, contacts: g[lane] ?? [] }))
+    .filter((x) => x.contacts.length);
+});
+
+const eligibleContactCount = computed(() => {
+  const n = Number(props.dossier.eligible_contact_count);
+  if (Number.isFinite(n)) return n;
+  return personaLanes.value.reduce((sum, lane) => sum + lane.contacts.length, 0);
+});
+const discoveryError = computed(() => String(props.dossier.discovery_error ?? "").trim());
+const contactCoverageNote = computed(() => {
+  if (personaLanes.value.length) return "";
+  if (discoveryError.value) {
+    const short =
+      /504|timeout|timed out/i.test(discoveryError.value)
+        ? "discovery timed out"
+        : discoveryError.value.slice(0, 120);
+    return `No eligible contacts — ${short}`;
+  }
+  if (eligibleContactCount.value === 0 || rosterAbsent.value) {
+    return "No eligible contacts after scoring";
+  }
+  return "";
+});
 
 const fitScore = computed(() => {
   const n = Number(props.dossier.fit_score);
@@ -132,12 +200,6 @@ const buildRiskMetaClass = computed(() => {
   if (r === "high") return "meta-chip--warn";
   return "";
 });
-const personaLanes = computed(() => {
-  const g = props.dossier.fit_contacts_by_persona ?? {};
-  return (["it", "ops", "finance"] as const)
-    .map((lane) => ({ lane, contacts: g[lane] ?? [] }))
-    .filter((x) => x.contacts.length);
-});
 const asOf = computed(() => {
   const d = props.dossier.as_of;
   if (!d) return "";
@@ -145,13 +207,13 @@ const asOf = computed(() => {
   return Number.isNaN(dt.getTime()) ? String(d) : dt.toISOString().slice(0, 10);
 });
 const factTypeLabel: Record<string, string> = {
-  trigger: "why now",
-  systems: "systems",
-  leadership: "leadership",
-  growth: "hiring",
-  pain: "pain",
+  trigger: "Why now",
+  systems: "Systems",
+  leadership: "Leadership",
+  growth: "Hiring",
+  pain: "Pain",
   ma: "M&A",
-  profile: "profile",
+  profile: "Profile",
 };
 function laneLabel(lane: string): string {
   return lane === "it" ? "IT / Data" : lane === "ops" ? "Operations" : "Finance";
@@ -196,24 +258,24 @@ function isHighlighted(c: Record<string, unknown>): boolean {
       </div>
     </template>
 
-    <!-- Account narrative (hero) -->
-    <div v-if="narrativeParas.length" class="narrative">
-      <div class="tile-label">
-        account narrative<template v-if="!dossier.narrative_from_contract"> · derived, re-run for synthesis</template>
-      </div>
-      <p v-for="(para, pi) in narrativeParas" :key="pi" class="narrative-p">{{ para }}</p>
-    </div>
-
     <div class="dossier-grid">
+      <!-- Account narrative (primary analyst block) -->
+      <div v-if="narrativeParas.length" class="tile tile-accent tile-wide">
+        <div class="tile-label">
+          Account narrative<template v-if="!dossier.narrative_from_contract"> · derived, re-run for synthesis</template>
+        </div>
+        <p v-for="(para, pi) in narrativeParas" :key="pi" class="narrative-p">{{ para }}</p>
+      </div>
+
       <!-- Hook (tier 1, outreach) -->
       <div v-if="dossier.hook" class="tile tile-accent tile-wide">
-        <div class="tile-label">why now · used in outreach</div>
+        <div class="tile-label">Why now · used in outreach</div>
         <div class="tile-hook">{{ dossier.hook }}</div>
       </div>
 
       <!-- Problem hypothesis / pain (prominent) -->
       <div v-if="painItems.length" class="tile tile-warn tile-wide">
-        <div class="tile-label">problem hypothesis</div>
+        <div class="tile-label">Problem hypothesis</div>
         <div v-for="(p, pi) in painItems" :key="pi" class="pain-item">
           <span class="tile-fact">{{ p.claim }}</span>
           <a
@@ -224,19 +286,19 @@ function isHighlighted(c: Record<string, unknown>): boolean {
             class="src-link"
             >{{ sourceHost(String(p.source)) }}</a
           >
-          <span v-else-if="p.source" class="tile-source">{{ p.source }}</span>
+          <span v-else-if="p.source && p.source !== 'people_analysis'" class="tile-source">{{ p.source }}</span>
         </div>
       </div>
 
       <!-- Lead question -->
       <div v-if="dossier.lead_question" class="tile tile-accent tile-wide">
-        <div class="tile-label">lead question · used in outreach</div>
+        <div class="tile-label">Lead question · used in outreach</div>
         <div class="tile-lead-q">{{ dossier.lead_question }}</div>
       </div>
 
       <!-- Systems fingerprint -->
       <div v-if="tech.length" class="tile tile-wide">
-        <div class="tile-label">systems fingerprint · the integration surface</div>
+        <div class="tile-label">Systems fingerprint · the integration surface</div>
         <NSpace size="small" style="margin-top: 6px">
           <NTag v-for="t in tech" :key="t" size="small" :bordered="true">{{ t }}</NTag>
         </NSpace>
@@ -259,7 +321,7 @@ function isHighlighted(c: Record<string, unknown>): boolean {
 
       <!-- Target -->
       <div v-if="dossier.target" class="tile tile-accent tile-wide">
-        <div class="tile-label">primary target · {{ dossier.target.persona }}</div>
+        <div class="tile-label">Primary target · {{ dossier.target.persona }}</div>
         <div class="tile-target-name">
           {{ dossier.target.name }} — {{ dossier.target.title }}
           <a
@@ -277,14 +339,16 @@ function isHighlighted(c: Record<string, unknown>): boolean {
         </div>
       </div>
 
-      <!-- Team signal -->
-      <div v-if="hasTeamSignal" class="tile tile-wide">
-        <div class="tile-label">team signal</div>
+      <!-- Org snapshot -->
+      <div v-if="hasOrgSnapshot" class="tile tile-wide">
+        <div class="tile-label">Org snapshot</div>
         <div v-if="deptSummary" class="tile-fact">{{ deptSummary }}</div>
         <div v-if="noItLeader" class="tile-fact team-flag">No verified IT leader in the sampled roster.</div>
-        <ul v-if="(teamSignal.capacity_gaps ?? []).length" class="detail-list">
-          <li v-for="(g, gi) in teamSignal.capacity_gaps" :key="gi">{{ g }}</li>
+        <div v-if="rosterAbsent" class="tile-fact tile-muted">Contact roster was not sampled for this run.</div>
+        <ul v-if="capacityGaps.observations.length" class="detail-list">
+          <li v-for="(g, gi) in capacityGaps.observations" :key="gi">{{ g }}</li>
         </ul>
+        <div v-if="capacityGaps.caveat" class="tile-muted">{{ capacityGaps.caveat }}</div>
       </div>
 
       <!-- Persona lanes -->
@@ -301,24 +365,36 @@ function isHighlighted(c: Record<string, unknown>): boolean {
         </div>
       </div>
 
-      <!-- Job postings + leadership openings -->
-      <div v-if="jobs.length || leadOpenings.length" class="tile tile-wide">
-        <div class="tile-label">hiring signals</div>
-        <div v-for="(j, ji) in jobs" :key="'j' + ji" class="job-item">
-          {{ decodeEntities(String(j.title ?? "")) }}
-          <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
-          <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
+      <!-- Contact coverage when lanes are empty -->
+      <div v-if="contactCoverageNote" class="tile tile-wide">
+        <div class="tile-label">Contacts</div>
+        <div class="tile-fact">{{ contactCoverageNote }}</div>
+      </div>
+
+      <!-- Hiring (always shown) -->
+      <div class="tile tile-wide">
+        <div class="tile-label">Hiring</div>
+        <template v-if="hasHiringList">
+          <div v-for="(j, ji) in jobs" :key="'j' + ji" class="job-item">
+            {{ decodeEntities(String(j.title ?? "")) }}
+            <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
+            <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
+          </div>
+          <div v-for="(j, ji) in leadOpenings" :key="'l' + ji" class="job-item">
+            {{ decodeEntities(String(j.title ?? "")) }}
+            <span class="tile-contact-title"> · open seat</span>
+            <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
+          </div>
+        </template>
+        <div v-else class="tile-fact">
+          Jobs checked — none open<template v-if="activeJobCount === 0"> ({{ activeJobCount }})</template>
         </div>
-        <div v-for="(j, ji) in leadOpenings" :key="'l' + ji" class="job-item">
-          {{ decodeEntities(String(j.title ?? "")) }}
-          <span class="tile-contact-title"> · open seat</span>
-          <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
-        </div>
+        <div v-if="jobsError" class="tile-muted">Jobs lookup: {{ jobsError.slice(0, 160) }}</div>
       </div>
 
       <!-- Sources -->
       <div v-if="sourceUrls.length" class="tile tile-wide">
-        <div class="tile-label">sources ({{ sourceUrls.length }})</div>
+        <div class="tile-label">Sources ({{ sourceUrls.length }})</div>
         <div class="src-list">
           <a
             v-for="(u, ui) in sourceUrls"
@@ -337,17 +413,17 @@ function isHighlighted(c: Record<string, unknown>): boolean {
     <NCollapse style="margin-top: 12px">
       <NCollapseItem title="Full brief, discovery questions, and rationale" name="details">
         <div v-if="dossier.score_rationale" class="detail-block">
-          <div class="tile-label">why this score</div>
+          <div class="tile-label">Why this score</div>
           <NText>{{ dossier.score_rationale }}</NText>
         </div>
         <div v-if="(dossier.discovery_questions ?? []).length" class="detail-block">
-          <div class="tile-label">discovery questions</div>
+          <div class="tile-label">Discovery questions</div>
           <ul class="detail-list">
             <li v-for="(q, qi) in dossier.discovery_questions" :key="qi">{{ q }}</li>
           </ul>
         </div>
         <div v-if="dossier.brief_markdown" class="detail-block">
-          <div class="tile-label">outreach brief</div>
+          <div class="tile-label">Outreach brief</div>
           <pre class="detail-brief">{{ dossier.brief_markdown }}</pre>
         </div>
       </NCollapseItem>
@@ -411,13 +487,13 @@ function isHighlighted(c: Record<string, unknown>): boolean {
   border-color: rgba(255, 69, 58, 0.4);
   background: rgba(255, 69, 58, 0.1);
 }
-.narrative {
-  margin-bottom: 12px;
-}
 .narrative-p {
-  font-size: 14px;
+  font-size: 15px;
   line-height: 1.55;
   margin: 4px 0 8px;
+}
+.narrative-p:last-child {
+  margin-bottom: 0;
 }
 .dossier-grid {
   display: grid;
@@ -441,10 +517,11 @@ function isHighlighted(c: Record<string, unknown>): boolean {
   border-color: rgba(240, 160, 40, 0.3);
 }
 .tile-label {
-  font-size: 11px;
-  text-transform: none;
-  opacity: 0.6;
-  margin-bottom: 3px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  opacity: 0.85;
+  margin-bottom: 6px;
 }
 .tile-hook {
   font-size: 17px;
@@ -458,6 +535,12 @@ function isHighlighted(c: Record<string, unknown>): boolean {
 .tile-fact {
   font-size: 14px;
   line-height: 1.35;
+}
+.tile-muted {
+  font-size: 12px;
+  opacity: 0.6;
+  margin-top: 6px;
+  line-height: 1.4;
 }
 .pain-item {
   margin-bottom: 6px;
