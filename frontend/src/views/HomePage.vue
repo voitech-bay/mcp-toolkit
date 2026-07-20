@@ -494,9 +494,13 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
 
 <style scoped>
 .home {
+  --home-fg: #e8edf4;
+  --home-fg-muted: #a8b3c2;
+  --home-fg-soft: #c5ced9;
   max-width: 1280px;
   margin: 0 auto;
   padding: 1.25rem 1.25rem 2.75rem;
+  color: var(--home-fg);
 }
 
 .home-hero {
@@ -513,6 +517,7 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
     linear-gradient(135deg, rgba(18, 140, 126, 0.22), rgba(21, 24, 29, 0.92) 55%, rgba(180, 128, 44, 0.12)),
     #15181d;
   overflow: hidden;
+  color: var(--home-fg);
 }
 
 .home-hero__copy {
@@ -526,6 +531,12 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   line-height: 0.95;
   font-weight: 750;
   letter-spacing: -0.02em;
+  color: #f5f7fa;
+}
+
+.home-hero__title :deep(.n-h),
+.home-hero__title :deep(h1) {
+  color: inherit !important;
 }
 
 .home-hero__text {
@@ -533,7 +544,7 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   margin: 0;
   font-size: 1rem;
   line-height: 1.55;
-  opacity: 0.82;
+  color: var(--home-fg-soft);
 }
 
 .home-hero__visual {
@@ -612,6 +623,7 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
+  color: var(--home-fg);
   animation: band-in 0.45s ease both;
 }
 
@@ -648,19 +660,21 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
 .section-head h2,
 .hub-tile h3 {
   margin: 0;
+  color: #f2f5f8;
 }
 
 .launch-band p,
 .section-head p,
 .hub-tile p {
   margin: 0.25rem 0 0;
-  opacity: 0.72;
+  color: var(--home-fg-muted);
   line-height: 1.45;
 }
 
 .launch-band__meta {
   text-align: right;
   min-width: 190px;
+  color: var(--home-fg);
 }
 
 .launch-band__meta span {
@@ -668,13 +682,15 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  opacity: 0.58;
+  color: var(--home-fg-muted);
 }
 
 .launch-band__meta strong {
   display: block;
   margin-top: 0.2rem;
   font-size: 0.92rem;
+  color: var(--home-fg-soft);
+  font-weight: 600;
 }
 
 .home__grid {
@@ -687,6 +703,7 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   justify-content: space-between;
   gap: 1rem;
   margin: 1.45rem 0 0.8rem;
+  color: var(--home-fg);
 }
 
 .section-head--spaced {
@@ -699,10 +716,21 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   border-radius: 8px;
   overflow: hidden;
   outline: none;
+  color: var(--home-fg);
   transition:
     transform 0.14s ease,
     border-color 0.14s ease,
     background 0.14s ease;
+}
+
+.hub-tile :deep(.n-card),
+.hub-tile :deep(.n-card__content) {
+  color: inherit;
+}
+
+.hub-tile :deep(.n-card-header__main),
+.hub-tile :deep(.n-button) {
+  color: var(--home-fg-soft);
 }
 
 .hub-tile:hover,
@@ -747,7 +775,7 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   font-size: 0.72rem;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  opacity: 0.78;
+  color: var(--home-fg-muted);
 }
 
 .hub-tile__icon {
@@ -772,8 +800,10 @@ function onTileKeydown(event: KeyboardEvent, path: string) {
   text-align: right;
 }
 
-.hub-tile__metric :deep(.n-statistic-value) {
+.hub-tile__metric :deep(.n-statistic-value),
+.hub-tile__metric :deep(.n-statistic-value__content) {
   font-size: 1.1rem;
+  color: var(--home-fg) !important;
 }
 
 .hub-tile--large :deep(.n-card__content) {
