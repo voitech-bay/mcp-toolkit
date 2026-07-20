@@ -21,8 +21,12 @@ import {
   NSelect,
   NDatePicker,
   NAvatar,
+  NTabs,
+  NTabPane,
+  NEmpty,
 } from "naive-ui";
 import type { DataTableColumns, SelectOption } from "naive-ui";
+import CompanyDossier from "../components/dossier/CompanyDossier.vue";
 
 use([CanvasRenderer, BarChart, GridComponent, TooltipComponent, LegendComponent]);
 
@@ -286,6 +290,149 @@ const execPage = computed({
 const detailLoading = ref(false);
 const detailError = ref("");
 const detail = ref<ExecutionDetail | null>(null);
+const expandedCompanyKey = ref<string | null>(null);
+const expandedContactKey = ref<string | null>(null);
+
+type DetailTab = "research" | "credit" | "health";
+const detailTab = computed<DetailTab>({
+  get() {
+    const t = String(route.query.tab ?? "research");
+    if (t === "credit" || t === "health" || t === "research") return t;
+    return "research";
+  },
+  set(tab: DetailTab) {
+    const q = queryToRecord();
+    if (tab === "research") delete q.tab;
+    else q.tab = tab;
+    router.replace({ path: "/n8n/workflow-results", query: q });
+  },
+});
+
+function entityRowKey(entityType: "company" | "contact", row: Record<string, unknown>): string {
+  if (entityType === "company") {
+    return String(row.company_id || row.company_key || row.company_name || JSON.stringify(row).slice(0, 40));
+  }
+  return String(row.contact_id || row.contact_key || row.contact_label || JSON.stringify(row).slice(0, 40));
+}
+
+function toggleExpandRow(entityType: "company" | "contact", row: Record<string, unknown>) {
+  const key = entityRowKey(entityType, row);
+  if (entityType === "company") {
+    expandedCompanyKey.value = expandedCompanyKey.value === key ? null : key;
+  } else {
+    expandedContactKey.value = expandedContactKey.value === key ? null : key;
+  }
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((x) => (typeof x === "string" ? x : String((x as Record<string, unknown>)?.claim ?? (x as Record<string, unknown>)?.fact ?? (x as Record<string, unknown>)?.question ?? ""))).filter(Boolean);
+}
+
+/** Map a merged execution company row into CompanyDossier props. */
+function dossierFromMergedCompanyRow(row: Record<string, unknown>) {
+  const pressure = Array.isArray(row.pressure_points) ? row.pressure_points : [];
+  const headline = Array.isArray(row.headline_facts) ? row.headline_facts : [];
+  const discovery = asStringArray(row.discovery_questions);
+  const hook =
+    (typeof row.hook === "string" && row.hook) ||
+    (typeof headline[0] === "object" && headline[0] && "fact" in (headline[0] as object)
+      ? String((headline[0] as { fact?: string }).fact ?? "")
+      : typeof headline[0] === "string"
+        ? headline[0]
+        : "") ||
+    (typeof pressure[0] === "string" ? pressure[0] : "");
+  return {
+    pov_ok: row.pov_ok === true,
+    from_contract: headline.length > 0,
+    account_narrative:
+      (typeof row.account_narrative === "string" && row.account_narrative) ||
+      (typeof row.brief_markdown === "string" ? row.brief_markdown.slice(0, 600) : null),
+    narrative_from_contract: typeof row.account_narrative === "string" && !!row.account_narrative,
+    hook: hook || null,
+    lead_question:
+      (typeof row.lead_question === "string" && row.lead_question) || discovery[0] || null,
+    headline_facts: headline,
+    target: row.target && typeof row.target === "object" ? row.target : null,
+    tech_stack: Array.isArray(row.tech_stack) ? row.tech_stack : [],
+    fit_contacts_by_persona:
+      row.fit_contacts_by_persona && typeof row.fit_contacts_by_persona === "object"
+        ? row.fit_contacts_by_persona
+        : {},
+    fit_score: row.fit_score ?? null,
+    score_rationale: typeof row.score_rationale === "string" ? row.score_rationale : null,
+    vertical: typeof row.vertical === "string" ? row.vertical : null,
+    build_risk: typeof row.build_risk === "string" ? row.build_risk : null,
+    pressure_points: pressure,
+    data_integration_pain: Array.isArray(row.data_integration_pain) ? row.data_integration_pain : [],
+    transformation_signals: Array.isArray(row.transformation_signals) ? row.transformation_signals : [],
+    discovery_questions: discovery,
+    job_postings: Array.isArray(row.job_postings) ? row.job_postings : [],
+    leadership_openings: Array.isArray(row.leadership_openings) ? row.leadership_openings : [],
+    research_source_urls: Array.isArray(row.research_source_urls) ? row.research_source_urls : [],
+    team_signal: row.team_signal && typeof row.team_signal === "object" ? row.team_signal : undefined,
+    brief_markdown: typeof row.brief_markdown === "string" ? row.brief_markdown : null,
+    company_name:
+      (typeof row.company_name === "string" && row.company_name) ||
+      (typeof row.company_key === "string" ? row.company_key : null),
+    as_of: null,
+    run_id: detail.value?.summary?.run_id ?? null,
+  };
+}
+
+const expandedCompanyRow = computed(() => {
+  if (!expandedCompanyKey.value || !detail.value?.companies) return null;
+  return (
+    detail.value.companies.find(
+      (r) => entityRowKey("company", r) === expandedCompanyKey.value
+    ) ?? null
+  );
+});
+
+const expandedContactRow = computed(() => {
+  if (!expandedContactKey.value || !detail.value?.contacts) return null;
+  return (
+    detail.value.contacts.find(
+      (r) => entityRowKey("contact", r) === expandedContactKey.value
+    ) ?? null
+  );
+});
+
+const expandedCompanyDossier = computed(() => {
+  const row = expandedCompanyRow.value;
+  return row ? dossierFromMergedCompanyRow(row) : null;
+});
+
+const healthMetrics = computed(() => {
+  const funnel = detail.value?.summary?.funnel ?? {};
+  const pov = Number(funnel.companies_pov ?? 0);
+  const povOk = Number(funnel.companies_pov_ok ?? 0);
+  const scored = Number(funnel.contacts_fit_scored ?? 0);
+  const hm = Number(funnel.contacts_high_medium ?? 0);
+  const icp = Number(funnel.companies_icp ?? 0);
+  return [
+    {
+      label: "POV completeness",
+      value: pov > 0 ? `${Math.round((povOk / pov) * 100)}%` : "—",
+      hint: `${povOk} OK / ${pov} POV generated`,
+    },
+    {
+      label: "High/medium fit rate",
+      value: scored > 0 ? `${Math.round((hm / scored) * 100)}%` : "—",
+      hint: `${hm} HM / ${scored} scored`,
+    },
+    {
+      label: "ICP → POV",
+      value: icp > 0 && pov > 0 ? `${pov} / ${icp}` : "—",
+      hint: "Companies that reached POV vs ICP",
+    },
+    {
+      label: "Run status",
+      value: detail.value?.summary?.status ?? "—",
+      hint: formatDuration(detail.value?.summary?.duration_sec),
+    },
+  ];
+});
 
 async function loadExecutions() {
   execLoading.value = true;
@@ -314,6 +461,8 @@ async function loadExecutionDetail() {
   }
   detailLoading.value = true;
   detailError.value = "";
+  expandedCompanyKey.value = null;
+  expandedContactKey.value = null;
   try {
     const r = await fetch(`/api/n8n/workflow-results/executions/${encodeURIComponent(key)}`);
     const data = (await r.json()) as ExecutionDetail & { error?: string };
@@ -465,7 +614,8 @@ function velvetechContactLabelFromRow(row: Record<string, unknown>): string {
 function renderEntityCardLink(
   entityType: "company" | "contact",
   row: Record<string, unknown>,
-  label: string
+  label: string,
+  mode: "navigate" | "expand" = "navigate"
 ) {
   const id =
     entityType === "company"
@@ -475,26 +625,76 @@ function renderEntityCardLink(
       : typeof row.contact_id === "string"
         ? row.contact_id
         : null;
-  if (!id) return formatCellValue(label);
   const avatarUrl =
     entityType === "company"
       ? (typeof row.company_logo_url === "string" ? row.company_logo_url : null)
       : (typeof row.contact_avatar_url === "string" ? row.contact_avatar_url : null);
+  const avatar = h(
+    NAvatar,
+    {
+      round: entityType === "contact",
+      size: 28,
+      src: avatarUrl || undefined,
+      style: { flexShrink: "0" },
+    },
+    { default: () => avatarFallback(label) }
+  );
+
+  if (mode === "expand") {
+    const key = entityRowKey(entityType, row);
+    const active =
+      entityType === "company"
+        ? expandedCompanyKey.value === key
+        : expandedContactKey.value === key;
+    return h(
+      NSpace,
+      { align: "center", size: 8, wrap: false },
+      {
+        default: () => [
+          avatar,
+          h(
+            "button",
+            {
+              type: "button",
+              class: "entity-expand-btn",
+              style: {
+                color: "#2080f0",
+                background: "transparent",
+                border: "none",
+                padding: 0,
+                cursor: "pointer",
+                fontSize: "0.85rem",
+                fontWeight: active ? "700" : "500",
+                textAlign: "left",
+              },
+              onClick: () => toggleExpandRow(entityType, row),
+            },
+            active ? `${label} ▾` : `${label} ▸`
+          ),
+          id
+            ? h(
+                RouterLink,
+                {
+                  to: entityType === "company" ? `/company/${id}` : `/contact/${id}`,
+                  class: "entity-card-link",
+                  style: "color:#94a3b8;text-decoration:none;font-size:0.75rem",
+                  onClick: (e: Event) => e.stopPropagation(),
+                },
+                { default: () => "Open card" }
+              )
+            : null,
+        ],
+      }
+    );
+  }
+
+  if (!id) return formatCellValue(label);
   return h(
     NSpace,
     { align: "center", size: 8, wrap: false },
     {
       default: () => [
-        h(
-          NAvatar,
-          {
-            round: entityType === "contact",
-            size: 28,
-            src: avatarUrl || undefined,
-            style: { flexShrink: "0" },
-          },
-          { default: () => avatarFallback(label) }
-        ),
+        avatar,
         h(
           RouterLink,
           {
@@ -511,20 +711,21 @@ function renderEntityCardLink(
 function buildEntityColumns(
   fieldKeys: string[],
   entityType: "company" | "contact",
-  onOpenJson: (row: Record<string, unknown>) => void
+  onOpenJson: (row: Record<string, unknown>) => void,
+  linkMode: "navigate" | "expand" = "navigate"
 ): DataTableColumns<Record<string, unknown>> {
   const cols: DataTableColumns<Record<string, unknown>> = [
     {
       title: entityType === "company" ? "Company" : "Contact",
       key: "_entity_card",
       fixed: "left",
-      minWidth: 220,
+      minWidth: linkMode === "expand" ? 280 : 220,
       render(row) {
         const label =
           entityType === "company"
             ? velvetechCompanyLabelFromRow(row)
             : velvetechContactLabelFromRow(row);
-        return renderEntityCardLink(entityType, row, label);
+        return renderEntityCardLink(entityType, row, label, linkMode);
       },
     },
   ];
@@ -536,14 +737,14 @@ function buildEntityColumns(
       minWidth: key.length > 16 ? 180 : 120,
       ellipsis: { tooltip: true },
       render(row) {
-        if (entityType === "company" && key === "company_key" && row.company_id) {
-          return renderEntityCardLink(entityType, row, formatCellValue(row[key]));
+        if (entityType === "company" && key === "company_key" && (row.company_id || linkMode === "expand")) {
+          return renderEntityCardLink(entityType, row, formatCellValue(row[key]), linkMode);
         }
-        if (entityType === "company" && key === "company_name" && row.company_id) {
-          return renderEntityCardLink(entityType, row, formatCellValue(row[key]));
+        if (entityType === "company" && key === "company_name" && (row.company_id || linkMode === "expand")) {
+          return renderEntityCardLink(entityType, row, formatCellValue(row[key]), linkMode);
         }
-        if (entityType === "contact" && key === "contact_key" && row.contact_id) {
-          return renderEntityCardLink(entityType, row, velvetechContactLabelFromRow(row));
+        if (entityType === "contact" && key === "contact_key" && (row.contact_id || linkMode === "expand")) {
+          return renderEntityCardLink(entityType, row, velvetechContactLabelFromRow(row), linkMode);
         }
         if (entityType === "contact" && key === "company_key" && row.company_id) {
           return h(
@@ -1023,14 +1224,20 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
 });
 
 const companyDetailColumns = computed(() =>
-  buildEntityColumns(detail.value?.company_field_keys ?? [], "company", (row) =>
-    openEntityDetail(row, velvetechCompanyLabelFromRow(row))
+  buildEntityColumns(
+    detail.value?.company_field_keys ?? [],
+    "company",
+    (row) => openEntityDetail(row, velvetechCompanyLabelFromRow(row)),
+    "expand"
   )
 );
 
 const contactDetailColumns = computed(() =>
-  buildEntityColumns(detail.value?.contact_field_keys ?? [], "contact", (row) =>
-    openEntityDetail(row, velvetechContactLabelFromRow(row))
+  buildEntityColumns(
+    detail.value?.contact_field_keys ?? [],
+    "contact",
+    (row) => openEntityDetail(row, velvetechContactLabelFromRow(row)),
+    "expand"
   )
 );
 
@@ -1222,17 +1429,6 @@ const detailVendorMetrics = computed(() => {
     <NSpace v-else-if="pageMode === 'detail'" vertical size="medium" style="width: 100%">
       <NButton size="small" quaternary @click="backToExecutions">← Back to executions</NButton>
       <NAlert v-if="detailError" type="error">{{ detailError }}</NAlert>
-      <NAlert v-if="detail?.summary?.warnings?.includes('no_billing_row')" type="warning">
-        No billing row yet for this run — funnel counts are computed from stage rows. Re-run with
-        <code>--billing</code> on future batches for cost snapshots.
-      </NAlert>
-      <NAlert
-        v-if="detail?.summary?.warnings?.some((w) => w.startsWith('funnel_fetch_failed'))"
-        type="warning"
-      >
-        Billing funnel fetch failed during post-run — pipeline funnel below is computed from persisted
-        stage rows.
-      </NAlert>
       <template v-if="detail?.summary">
         <NSpace wrap>
           <NTag type="info">{{ detail.summary.run_id }}</NTag>
@@ -1243,114 +1439,191 @@ const detailVendorMetrics = computed(() => {
           <NTag>{{ formatDuration(detail.summary.duration_sec) }}</NTag>
           <NTag type="warning">{{ formatUsd(detail.summary.cost_usd) }}</NTag>
         </NSpace>
-        <div v-if="detailCostMetrics.length" class="funnel-section">
-          <h4 class="section-title">Cost summary</h4>
-          <div class="funnel-grid">
-            <div v-for="m in detailCostMetrics" :key="m.label" class="funnel-cell">
-              <div class="funnel-label">{{ m.label }}</div>
-              <div class="funnel-value metric-value">{{ m.value }}</div>
-            </div>
-          </div>
-        </div>
-        <div v-if="detailVendorMetrics.length" class="funnel-section">
-          <h4 class="section-title">Vendor usage</h4>
-          <div class="vendor-grid">
-            <div v-for="m in detailVendorMetrics" :key="m.label" class="vendor-cell">
-              <div class="funnel-label">{{ m.label }}</div>
-              <div class="funnel-value metric-value">{{ m.value }}</div>
-              <div v-if="m.hint" class="vendor-hint">{{ m.hint }}</div>
-            </div>
-          </div>
-        </div>
-        <div v-if="detailFunnelEntries.length" class="funnel-section">
-          <h4 class="section-title">Pipeline funnel</h4>
-          <div class="funnel-grid">
-            <div v-for="entry in detailFunnelEntries" :key="entry.key" class="funnel-cell">
-              <div class="funnel-label">{{ entry.label }}</div>
-              <div class="funnel-value">{{ entry.value }}</div>
-            </div>
-          </div>
-        </div>
       </template>
-      <template v-if="llmBreakdown">
-        <div class="billing-section">
-          <div class="billing-section-header">
-            <h4 class="section-title">LLM cost breakdown</h4>
-            <NSpace wrap size="small">
-              <NButton
-                size="tiny"
-                :type="llmChartMode === 'usd' ? 'primary' : 'default'"
-                @click="llmChartMode = 'usd'"
-              >
-                USD
-              </NButton>
-              <NButton
-                size="tiny"
-                :type="llmChartMode === 'tokens' ? 'primary' : 'default'"
-                @click="llmChartMode = 'tokens'"
-              >
-                Tokens
-              </NButton>
-            </NSpace>
-          </div>
-          <p class="muted billing-note">
-            Bar values use OpenRouter list price × tokens per call. Wallet spend can differ (cache, concurrent usage).
+
+      <NTabs v-model:value="detailTab" type="segment" animated style="margin-top: 4px">
+        <NTabPane name="research" tab="Research">
+          <p class="muted">
+            Click a company or contact to expand POV / research on this page. Use “Open card” for the full CRM page.
           </p>
-          <div class="billing-charts">
-            <div v-if="llmStageChartRows.length" class="billing-chart-card">
-              <div class="billing-chart-title">By pipeline stage</div>
-              <VChart :option="llmStageChartOption" autoresize class="billing-chart" />
-            </div>
-            <div v-if="llmModelChartRows.length" class="billing-chart-card">
-              <div class="billing-chart-title">By model</div>
-              <VChart :option="llmModelChartOption" autoresize class="billing-chart" />
-            </div>
-            <div v-if="llmCompanyChartRows.length" class="billing-chart-card">
-              <div class="billing-chart-title">By company</div>
-              <VChart :option="llmCompanyChartOption" autoresize class="billing-chart" />
-            </div>
-          </div>
-          <template v-if="llmLineItemRows.length">
-            <h4 class="section-title">Per call (stage · model · row)</h4>
+          <template v-if="detail?.companies?.length">
+            <h4 class="section-title">Companies ({{ detail.companies.length }})</h4>
             <NDataTable
-              :columns="llmLineItemColumns"
-              :data="llmLineItemRows"
+              :columns="companyDetailColumns"
+              :data="detail.companies"
+              :loading="detailLoading"
               size="small"
-              :max-height="320"
+              :scroll-x="Math.min(4800, 400 + (detail.company_field_keys?.length ?? 0) * 150)"
+              :max-height="360"
+              :row-key="(row) => entityRowKey('company', row)"
+            />
+            <div v-if="expandedCompanyDossier" class="inline-dossier">
+              <CompanyDossier :dossier="expandedCompanyDossier" />
+            </div>
+            <NEmpty
+              v-else-if="expandedCompanyRow && !expandedCompanyDossier"
+              description="No POV fields on this company row yet"
+              style="margin: 12px 0"
             />
           </template>
-        </div>
-      </template>
-      <NAlert v-else-if="detail?.summary && !detail.summary.warnings?.includes('no_billing_row')" type="info">
-        No LLM breakdown on this billing row — re-run with <code>--billing</code> or backfill after updating the billing script.
-      </NAlert>
-      <template v-if="detail?.companies?.length">
-        <h4 class="section-title">Companies ({{ detail.companies.length }})</h4>
-        <p class="muted">Merged fields from ICP, discovery, deep research, and POV stages.</p>
-        <NDataTable
-          :columns="companyDetailColumns"
-          :data="detail.companies"
-          :loading="detailLoading"
-          size="small"
-          :scroll-x="Math.min(4800, 400 + (detail.company_field_keys?.length ?? 0) * 150)"
-          :max-height="360"
-        />
-      </template>
-      <template v-if="detail?.contacts?.length">
-        <h4 class="section-title">Contacts ({{ detail.contacts.length }})</h4>
-        <p class="muted">Merged fields from enrichment and fit stages.</p>
-        <NDataTable
-          :columns="contactDetailColumns"
-          :data="detail.contacts"
-          :loading="detailLoading"
-          size="small"
-          :scroll-x="Math.min(5600, 400 + (detail.contact_field_keys?.length ?? 0) * 150)"
-          :max-height="480"
-        />
-      </template>
-      <NAlert v-else-if="detail && !detailLoading && !detail.contacts?.length" type="info">
-        No contact rows found for this run.
-      </NAlert>
+          <template v-if="detail?.contacts?.length">
+            <h4 class="section-title">Contacts ({{ detail.contacts.length }})</h4>
+            <NDataTable
+              :columns="contactDetailColumns"
+              :data="detail.contacts"
+              :loading="detailLoading"
+              size="small"
+              :scroll-x="Math.min(5600, 400 + (detail.contact_field_keys?.length ?? 0) * 150)"
+              :max-height="480"
+              :row-key="(row) => entityRowKey('contact', row)"
+            />
+            <div v-if="expandedContactRow" class="inline-contact-detail">
+              <h4 class="section-title">
+                {{ velvetechContactLabelFromRow(expandedContactRow) }}
+              </h4>
+              <div class="funnel-grid">
+                <div
+                  v-for="key in ['fit', 'fit_score', 'persona', 'title', 'company_key', 'contact_key']"
+                  :key="key"
+                  class="funnel-cell"
+                >
+                  <div class="funnel-label">{{ key }}</div>
+                  <div class="funnel-value metric-value">
+                    {{ formatCellValue(expandedContactRow[key]) }}
+                  </div>
+                </div>
+              </div>
+              <RouterLink
+                v-if="expandedContactRow.contact_id"
+                :to="`/contact/${expandedContactRow.contact_id}`"
+                class="entity-card-link"
+                style="display:inline-block;margin-top:10px;color:#2080f0;text-decoration:none;font-size:0.85rem"
+              >
+                Open contact card
+              </RouterLink>
+            </div>
+          </template>
+          <NAlert v-else-if="detail && !detailLoading && !detail.contacts?.length" type="info">
+            No contact rows found for this run.
+          </NAlert>
+        </NTabPane>
+
+        <NTabPane name="credit" tab="Credit usage">
+          <NAlert v-if="detail?.summary?.warnings?.includes('no_billing_row')" type="warning">
+            No billing row yet for this run — re-run with <code>--billing</code> on future batches for cost snapshots.
+          </NAlert>
+          <div v-if="detailCostMetrics.length" class="funnel-section">
+            <h4 class="section-title">Cost summary</h4>
+            <div class="funnel-grid">
+              <div v-for="m in detailCostMetrics" :key="m.label" class="funnel-cell">
+                <div class="funnel-label">{{ m.label }}</div>
+                <div class="funnel-value metric-value">{{ m.value }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-if="detailVendorMetrics.length" class="funnel-section">
+            <h4 class="section-title">Vendor usage</h4>
+            <div class="vendor-grid">
+              <div v-for="m in detailVendorMetrics" :key="m.label" class="vendor-cell">
+                <div class="funnel-label">{{ m.label }}</div>
+                <div class="funnel-value metric-value">{{ m.value }}</div>
+                <div v-if="m.hint" class="vendor-hint">{{ m.hint }}</div>
+              </div>
+            </div>
+          </div>
+          <template v-if="llmBreakdown">
+            <div class="billing-section">
+              <div class="billing-section-header">
+                <h4 class="section-title">LLM cost breakdown</h4>
+                <NSpace wrap size="small">
+                  <NButton
+                    size="tiny"
+                    :type="llmChartMode === 'usd' ? 'primary' : 'default'"
+                    @click="llmChartMode = 'usd'"
+                  >
+                    USD
+                  </NButton>
+                  <NButton
+                    size="tiny"
+                    :type="llmChartMode === 'tokens' ? 'primary' : 'default'"
+                    @click="llmChartMode = 'tokens'"
+                  >
+                    Tokens
+                  </NButton>
+                </NSpace>
+              </div>
+              <p class="muted billing-note">
+                Bar values use OpenRouter list price × tokens per call. Wallet spend can differ (cache, concurrent usage).
+              </p>
+              <div class="billing-charts">
+                <div v-if="llmStageChartRows.length" class="billing-chart-card">
+                  <div class="billing-chart-title">By pipeline stage</div>
+                  <VChart :option="llmStageChartOption" autoresize class="billing-chart" />
+                </div>
+                <div v-if="llmModelChartRows.length" class="billing-chart-card">
+                  <div class="billing-chart-title">By model</div>
+                  <VChart :option="llmModelChartOption" autoresize class="billing-chart" />
+                </div>
+                <div v-if="llmCompanyChartRows.length" class="billing-chart-card">
+                  <div class="billing-chart-title">By company</div>
+                  <VChart :option="llmCompanyChartOption" autoresize class="billing-chart" />
+                </div>
+              </div>
+              <template v-if="llmLineItemRows.length">
+                <h4 class="section-title">Per call (stage · model · row)</h4>
+                <NDataTable
+                  :columns="llmLineItemColumns"
+                  :data="llmLineItemRows"
+                  size="small"
+                  :max-height="320"
+                />
+              </template>
+            </div>
+          </template>
+          <NAlert
+            v-else-if="detail?.summary && !detail.summary.warnings?.includes('no_billing_row')"
+            type="info"
+          >
+            No LLM breakdown on this billing row — re-run with <code>--billing</code> or backfill after updating the billing script.
+          </NAlert>
+        </NTabPane>
+
+        <NTabPane name="health" tab="Workflow Health">
+          <NAlert
+            v-if="detail?.summary?.warnings?.some((w) => w.startsWith('funnel_fetch_failed'))"
+            type="warning"
+          >
+            Billing funnel fetch failed during post-run — pipeline funnel below is computed from persisted stage rows.
+          </NAlert>
+          <NAlert v-if="detail?.summary?.warnings?.includes('no_billing_row')" type="warning">
+            No billing row yet — completeness metrics still use stage-row funnel counts.
+          </NAlert>
+          <div v-if="healthMetrics.length" class="funnel-section">
+            <h4 class="section-title">Completeness</h4>
+            <div class="vendor-grid">
+              <div v-for="m in healthMetrics" :key="m.label" class="vendor-cell">
+                <div class="funnel-label">{{ m.label }}</div>
+                <div class="funnel-value metric-value">{{ m.value }}</div>
+                <div v-if="m.hint" class="vendor-hint">{{ m.hint }}</div>
+              </div>
+            </div>
+          </div>
+          <div v-if="detailFunnelEntries.length" class="funnel-section">
+            <h4 class="section-title">Pipeline funnel</h4>
+            <div class="funnel-grid">
+              <div v-for="entry in detailFunnelEntries" :key="entry.key" class="funnel-cell">
+                <div class="funnel-label">{{ entry.label }}</div>
+                <div class="funnel-value">{{ entry.value }}</div>
+              </div>
+            </div>
+          </div>
+          <NEmpty
+            v-else-if="!detailLoading"
+            description="No funnel metrics for this run yet"
+            style="margin-top: 16px"
+          />
+        </NTabPane>
+      </NTabs>
     </NSpace>
 
     <NSpace v-else vertical size="medium" style="width: 100%">
@@ -1548,5 +1821,13 @@ const detailVendorMetrics = computed(() => {
 .billing-chart {
   width: 100%;
   height: 220px;
+}
+.inline-dossier,
+.inline-contact-detail {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 8px;
+  background: rgba(128, 128, 128, 0.04);
 }
 </style>
