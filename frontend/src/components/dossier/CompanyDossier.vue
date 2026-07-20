@@ -4,7 +4,13 @@ import { NCard, NSpace, NTag, NText, NCollapse, NCollapseItem } from "naive-ui";
 
 type HeadlineFact = { fact?: string; type?: string; tier?: number | string; source?: string };
 type PainItem = { claim?: string; source?: string };
-type JobItem = { title?: string; date?: string; location?: string; department?: string };
+type JobItem = {
+  title?: string;
+  date?: string;
+  location?: string;
+  department?: string;
+  status?: string;
+};
 type Target = {
   name?: string;
   title?: string;
@@ -45,6 +51,8 @@ type Dossier = {
   leadership_openings?: JobItem[];
   jobs_error?: string | null;
   active_job_postings_count?: number | null;
+  job_postings_researched_count?: number | null;
+  jobs_window_months?: number | null;
   eligible_contact_count?: number | null;
   discovery_error?: string | null;
   research_source_urls?: string[];
@@ -149,9 +157,17 @@ const hasOrgSnapshot = computed(
 
 const jobsError = computed(() => String(props.dossier.jobs_error ?? "").trim());
 const hasHiringList = computed(() => jobs.value.length > 0 || leadOpenings.value.length > 0);
+const jobsWindowMonths = computed(() => {
+  const n = Number(props.dossier.jobs_window_months);
+  return Number.isFinite(n) && n > 0 ? n : 24;
+});
+const researchedJobCount = computed(() => {
+  const n = Number(props.dossier.job_postings_researched_count);
+  return Number.isFinite(n) ? n : jobs.value.length;
+});
 const activeJobCount = computed(() => {
   const n = Number(props.dossier.active_job_postings_count);
-  return Number.isFinite(n) ? n : jobs.value.length;
+  return Number.isFinite(n) ? n : null;
 });
 
 const personaLanes = computed(() => {
@@ -375,19 +391,29 @@ function isHighlighted(c: Record<string, unknown>): boolean {
       <div class="tile tile-wide">
         <div class="tile-label">Hiring</div>
         <template v-if="hasHiringList">
+          <div class="tile-muted" style="margin-bottom: 0.35rem">
+            IT/data + leadership, last {{ jobsWindowMonths }} months (active and historical)
+          </div>
           <div v-for="(j, ji) in jobs" :key="'j' + ji" class="job-item">
             {{ decodeEntities(String(j.title ?? "")) }}
             <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
             <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
+            <span v-if="j.status" class="tile-source"> · {{ j.status }}</span>
           </div>
           <div v-for="(j, ji) in leadOpenings" :key="'l' + ji" class="job-item">
             {{ decodeEntities(String(j.title ?? "")) }}
-            <span class="tile-contact-title"> · open seat</span>
+            <span class="tile-contact-title"> · leadership</span>
             <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
+            <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
+            <span v-if="j.status" class="tile-source"> · {{ j.status }}</span>
           </div>
         </template>
         <div v-else class="tile-fact">
-          Jobs checked — none open<template v-if="activeJobCount === 0"> ({{ activeJobCount }})</template>
+          IT/data jobs checked (last {{ jobsWindowMonths }} months, active + historical) — none found
+          <template v-if="researchedJobCount === 0"> ({{ researchedJobCount }})</template>
+          <template v-if="activeJobCount !== null">
+            · currently open company-wide: {{ activeJobCount }}
+          </template>
         </div>
         <div v-if="jobsError" class="tile-muted">Jobs lookup: {{ jobsError.slice(0, 160) }}</div>
       </div>

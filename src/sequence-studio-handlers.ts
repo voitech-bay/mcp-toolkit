@@ -3,6 +3,7 @@ import { CONTACTS_TABLE, getGetSalesCredentials, getSupabase } from "./services/
 import { createLeadCustomField, listLeadCustomFields, updateLeadCustomFields } from "./services/source-api.js";
 import { GETSALES_INMAIL_FIELD_NAMES, arrangeGetSalesFields } from "./services/inmail-review.js";
 import { normalizeOutreachMessageChannel } from "./services/email-studio.js";
+import { linkedinSlugFromUrl } from "./services/n8n-entity-link.js";
 import { extractPovFacts, loadLatestPovRows, resolveCompanyKeys } from "./services/pov-facts.js";
 
 type Json = Record<string, unknown>;
@@ -111,6 +112,115 @@ async function hypothesisScope(client: NonNullable<ReturnType<typeof getSupabase
   return out;
 }
 
+type FitMeta = { persona: string; fit_score: number; contact_key: string };
+
+const PERSONA_RANK: Record<string, number> = { it: 0, ops: 1, finance: 2 };
+
+function personaRank(persona: string): number {
+  return PERSONA_RANK[persona] ?? 99;
+}
+
+function fitFromRow(row: Json): FitMeta {
+  const persona = str(row.persona).toLowerCase() || "other";
+  const fitRaw = row.fit_score ?? row.fitScore ?? row.score;
+  const fit_score = typeof fitRaw === "number" && Number.isFinite(fitRaw) ? fitRaw : Number(fitRaw) || 0;
+  return { persona, fit_score, contact_key: str(row.contact_key).toLowerCase() };
+}
+
+/** Resolve POV fit_contacts for a company to CRM Contact uuids + persona/fit meta. */
+async function resolveEligibleContactsForCompany(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  projectId: string,
+  companyId: string
+): Promise<{ companyName: string | null; metaByUuid: Map<string, FitMeta> }> {
+  const company = await client
+    .from("companies")
+    .select("id, name, domain, website")
+    .eq("id", companyId)
+    .maybeSingle();
+  if (company.error) throw new Error(company.error.message);
+  const companyName = str((company.data as Json | null)?.name) || null;
+  const allKeys = await resolveCompanyKeys(client, {
+    projectId,
+    companyId: null,
+    extraKeys: [
+      str((company.data as Json | null)?.domain),
+      str((company.data as Json | null)?.website),
+    ].filter(Boolean),
+  });
+
+  const povRows = await loadLatestPovRows(client, [companyId], allKeys);
+  const pov = povRows[0];
+  const result = (pov?.result && typeof pov.result === "object" ? pov.result : {}) as Json;
+  const fitContacts = Array.isArray(result.fit_contacts) ? (result.fit_contacts as Json[]) : [];
+  if (!fitContacts.length) return { companyName, metaByUuid: new Map() };
+
+  const directIds = new Set<string>();
+  const pending: Array<{ meta: FitMeta; contactId: string; contactKey: string; linkedin: string }> = [];
+
+  for (const raw of fitContacts) {
+    if (!raw || typeof raw !== "object") continue;
+    const row = raw as Json;
+    const meta = fitFromRow(row);
+    const contactId = str(row.contact_id || row.contactId || row.uuid);
+    const contactKey = str(row.contact_key).toLowerCase();
+    const linkedin =
+      linkedinSlugFromUrl(str(row.linkedin_url) || str(row.linkedin)) ||
+      (contactKey && !contactKey.includes(".") ? contactKey : "");
+    if (validUuid(contactId)) directIds.add(contactId);
+    pending.push({ meta, contactId, contactKey, linkedin });
+  }
+
+  const roster = await client
+    .from(CONTACTS_TABLE)
+    .select("uuid, linkedin, company_uuid")
+    .eq("project_id", projectId)
+    .eq("company_uuid", companyId)
+    .limit(500);
+  if (roster.error) throw new Error(roster.error.message);
+
+  const byUuid = new Map<string, Json>();
+  const bySlug = new Map<string, string>();
+  for (const row of (roster.data ?? []) as Json[]) {
+    const uuid = str(row.uuid);
+    if (!uuid) continue;
+    byUuid.set(uuid, row);
+    const slug = linkedinSlugFromUrl(str(row.linkedin)) || str(row.linkedin).toLowerCase();
+    if (slug) bySlug.set(slug, uuid);
+  }
+
+  // Also fetch any direct UUIDs not in the company roster (mislinked company_uuid).
+  const missingDirect = [...directIds].filter((id) => !byUuid.has(id));
+  if (missingDirect.length) {
+    const extra = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, linkedin, company_uuid")
+      .eq("project_id", projectId)
+      .in("uuid", missingDirect);
+    if (extra.error) throw new Error(extra.error.message);
+    for (const row of (extra.data ?? []) as Json[]) {
+      const uuid = str(row.uuid);
+      if (!uuid) continue;
+      byUuid.set(uuid, row);
+      const slug = linkedinSlugFromUrl(str(row.linkedin)) || str(row.linkedin).toLowerCase();
+      if (slug) bySlug.set(slug, uuid);
+    }
+  }
+
+  const metaByUuid = new Map<string, FitMeta>();
+  for (const item of pending) {
+    let uuid = "";
+    if (validUuid(item.contactId) && byUuid.has(item.contactId)) uuid = item.contactId;
+    else if (item.linkedin && bySlug.has(item.linkedin)) uuid = bySlug.get(item.linkedin) || "";
+    else if (item.contactKey && bySlug.has(item.contactKey)) uuid = bySlug.get(item.contactKey) || "";
+    if (!uuid) continue;
+    const prev = metaByUuid.get(uuid);
+    if (!prev || item.meta.fit_score > prev.fit_score) metaByUuid.set(uuid, item.meta);
+  }
+
+  return { companyName, metaByUuid };
+}
+
 
 export async function handleSequenceStudioLeads(req: IncomingMessage, res: ServerResponse) {
   if (req.method !== "GET") return send(res, 405, { error: "Method not allowed" });
@@ -137,8 +247,35 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
   const sentTo = dayEnd(str(q.get("sentTo")));
   const sortBy = str(q.get("sortBy")) || "latest_draft";
   const sortDir = str(q.get("sortDir")) === "asc" ? "asc" : "desc";
+  const companyId = str(q.get("companyId"));
+  const eligibleOnly = q.get("eligible") === "1" || q.get("eligible") === "true";
   const requiresMessageScan = Boolean(statuses.length || channels.length || draftState !== "all" || sendState !== "all" || campaign || batch || validUuid(sequenceId) || validUuid(hypothesisId) || createdFrom || createdTo || sentFrom || sentTo || ["latest_draft", "email_created", "sent_at"].includes(sortBy));
   const hypothesis = await hypothesisScope(client, hypothesisId);
+
+  let scopeCompanyName: string | null = null;
+  let eligibleMeta = new Map<string, FitMeta>();
+  if (eligibleOnly) {
+    if (!validUuid(companyId)) return send(res, 400, { error: "companyId is required when eligible=1" });
+    try {
+      const resolved = await resolveEligibleContactsForCompany(client, projectId, companyId);
+      scopeCompanyName = resolved.companyName;
+      eligibleMeta = resolved.metaByUuid;
+    } catch (e) {
+      return send(res, 500, { error: e instanceof Error ? e.message : "Failed to resolve eligible contacts" });
+    }
+    if (!eligibleMeta.size) {
+      return send(res, 200, {
+        data: [],
+        total: 0,
+        page,
+        pageSize,
+        scope: { companyId, companyName: scopeCompanyName, eligible: true, eligibleCount: 0 },
+      });
+    }
+  } else if (validUuid(companyId)) {
+    const company = await client.from("companies").select("name").eq("id", companyId).maybeSingle();
+    scopeCompanyName = str((company.data as Json | null)?.name) || null;
+  }
 
   let contactsQuery = client
     .from(CONTACTS_TABLE)
@@ -149,14 +286,18 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
     contactsQuery = contactsQuery.or(`name.ilike.%${safe}%,first_name.ilike.%${safe}%,last_name.ilike.%${safe}%,company_name.ilike.%${safe}%,position.ilike.%${safe}%`);
   }
   if (companySearch) contactsQuery = contactsQuery.ilike("company_name", `%${companySearch.replace(/[%_]/g, "")}%`);
+  if (validUuid(companyId)) contactsQuery = contactsQuery.eq("company_uuid", companyId);
+  if (eligibleOnly) contactsQuery = contactsQuery.in("uuid", [...eligibleMeta.keys()]);
   if (hypothesis.companyIds.size) contactsQuery = contactsQuery.in("company_uuid", [...hypothesis.companyIds]);
   const contactSort =
     sortBy === "contact_name" ? "first_name" :
     sortBy === "company_name" ? "company_name" :
     "created_at";
+  // Eligible / company-scoped lists are small; load the full matching set then sort/paginate in memory.
+  const companyScoped = validUuid(companyId) || eligibleOnly;
   const contacts = await contactsQuery
     .order(contactSort, { ascending: sortDir === "asc", nullsFirst: false })
-    .range(requiresMessageScan ? 0 : from, requiresMessageScan ? 2499 : from + pageSize - 1);
+    .range(requiresMessageScan || companyScoped ? 0 : from, requiresMessageScan || companyScoped ? 2499 : from + pageSize - 1);
   if (contacts.error) return send(res, 500, { error: contacts.error.message });
   const rows = (contacts.data ?? []) as Json[];
   const contactIds = rows.map((row) => String(row.uuid));
@@ -196,12 +337,16 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
 
   let data = rows.map((row) => {
     const drafts = byContact.get(String(row.uuid)) ?? [];
+    const fit = eligibleMeta.get(String(row.uuid));
     return {
       contact: { ...row, display_name: contactName(row) },
       draftCount: drafts.length,
       statusSummary: statusSummary(drafts),
       latestDraft: drafts[0] ?? null,
       messages: drafts,
+      persona: fit?.persona ?? null,
+      fit_score: fit?.fit_score ?? null,
+      contact_key: fit?.contact_key ?? null,
     };
   });
   if (requiresMessageScan) {
@@ -220,7 +365,15 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
       return true;
     });
   }
+  const useEligibleSort = eligibleOnly || (validUuid(companyId) && sortBy === "latest_draft");
   data.sort((a, b) => {
+    if (useEligibleSort) {
+      const pr = personaRank(str(a.persona)) - personaRank(str(b.persona));
+      if (pr !== 0) return pr;
+      const fitDiff = Number(b.fit_score ?? 0) - Number(a.fit_score ?? 0);
+      if (fitDiff !== 0) return fitDiff;
+      return String(a.contact.display_name ?? "").localeCompare(String(b.contact.display_name ?? ""));
+    }
     const dir = sortDir === "asc" ? 1 : -1;
     if (sortBy === "contact_name") return dir * String(a.contact.display_name ?? "").localeCompare(String(b.contact.display_name ?? ""));
     if (sortBy === "company_name") return dir * String((a.contact as Json).company_name ?? "").localeCompare(String((b.contact as Json).company_name ?? ""));
@@ -238,9 +391,22 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
       Math.max(0, ...bDrafts.map((m) => dateMs(m.updated_at)), dateMs((b.contact as Json).created_at));
     return dir * (aTime - bTime);
   });
-  const total = requiresMessageScan ? data.length : contacts.count ?? data.length;
-  const pageData = requiresMessageScan ? data.slice(from, from + pageSize) : data;
-  return send(res, 200, { data: pageData, total, page, pageSize });
+  const total = requiresMessageScan || companyScoped ? data.length : contacts.count ?? data.length;
+  const pageData = requiresMessageScan || companyScoped ? data.slice(from, from + pageSize) : data;
+  return send(res, 200, {
+    data: pageData,
+    total,
+    page,
+    pageSize,
+    scope: validUuid(companyId)
+      ? {
+          companyId,
+          companyName: scopeCompanyName || str((pageData[0]?.contact as Json | undefined)?.company_name) || null,
+          eligible: eligibleOnly,
+          eligibleCount: eligibleOnly ? eligibleMeta.size : null,
+        }
+      : null,
+  });
 }
 
 export async function handleSequenceStudioLead(req: IncomingMessage, res: ServerResponse, contactId: string) {

@@ -464,7 +464,13 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
       ? pov.active_job_postings_count
       : typeof companyIntel.active_job_postings_count === "number"
         ? companyIntel.active_job_postings_count
-        : jsonArray(pov.job_postings).length;
+        : null;
+  const researchedJobCount =
+    typeof pov.job_postings_researched_count === "number"
+      ? pov.job_postings_researched_count
+      : jsonArray(pov.job_postings).length;
+  const jobsWindowMonths =
+    typeof pov.jobs_window_months === "number" ? pov.jobs_window_months : 24;
 
   return {
     pov_ok: pov.pov_ok === true,
@@ -489,6 +495,8 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
     leadership_openings: jsonArray(pov.leadership_openings),
     jobs_error: stringField(pov.jobs_error) ?? "",
     active_job_postings_count: activeJobCount,
+    job_postings_researched_count: researchedJobCount,
+    jobs_window_months: jobsWindowMonths,
     eligible_contact_count:
       typeof pov.eligible_contact_count === "number"
         ? pov.eligible_contact_count

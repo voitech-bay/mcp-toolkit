@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, h, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import {
   NAlert,
   NAvatar,
   NButton,
+  NCheckbox,
   NDrawer,
   NDrawerContent,
   NEmpty,
@@ -19,6 +20,7 @@ import {
 } from "naive-ui";
 import { ChevronDownIcon, ChevronRightIcon, ExternalLinkIcon, MailIcon, SendIcon, StarIcon } from "lucide-vue-next";
 import { useProjectStore } from "../stores/project";
+import { useWorkflowLaunch } from "../composables/useWorkflowLaunch";
 import { plaintextParagraphs } from "../utils/htmlPlaintext";
 
 type Json = Record<string, any>;
@@ -37,12 +39,24 @@ interface StudioLead {
   statusSummary: Record<string, ChannelSummary>;
   latestDraft: Json | null;
   messages: Json[];
+  persona?: string | null;
+  fit_score?: number | null;
+  contact_key?: string | null;
+}
+
+interface StudioScope {
+  companyId: string;
+  companyName: string | null;
+  eligible: boolean;
+  eligibleCount: number | null;
 }
 
 const store = useProjectStore();
+const route = useRoute();
 const router = useRouter();
 const toast = useMessage();
 const dialog = useDialog();
+const { launching, loadWorkflows, launch: launchWorkflow } = useWorkflowLaunch();
 
 const rows = ref<StudioLead[]>([]);
 const total = ref(0);
@@ -50,6 +64,10 @@ const page = ref(1);
 const pageSize = ref(25);
 const search = ref("");
 const companySearch = ref("");
+const companyIdFilter = ref("");
+const eligibleOnly = ref(false);
+const scope = ref<StudioScope | null>(null);
+const selectedIds = ref<string[]>([]);
 const statusFilter = ref<string[]>([]);
 const channelFilter = ref<string[]>([]);
 const draftState = ref("all");
@@ -73,6 +91,11 @@ const selectedContactId = ref("");
 const actionLoading = ref("");
 const expandedIds = ref<Set<string>>(new Set());
 const factComments = ref<Record<string, string>>({});
+
+const allSelectedOnPage = computed(
+  () => rows.value.length > 0 && rows.value.every((row) => selectedIds.value.includes(row.contact.uuid))
+);
+const selectedCount = computed(() => selectedIds.value.length);
 
 const messages = computed<Json[]>(() => detail.value?.messages ?? []);
 const facts = computed<Json[]>(() => detail.value?.facts ?? []);
@@ -220,6 +243,8 @@ function qs() {
   });
   if (search.value.trim()) q.set("search", search.value.trim());
   if (companySearch.value.trim()) q.set("company", companySearch.value.trim());
+  if (companyIdFilter.value.trim()) q.set("companyId", companyIdFilter.value.trim());
+  if (eligibleOnly.value) q.set("eligible", "1");
   if (statusFilter.value.length) q.set("status", statusFilter.value.join(","));
   if (channelFilter.value.length) q.set("channel", channelFilter.value.join(","));
   if (campaignFilter.value.trim()) q.set("campaign", campaignFilter.value.trim());
@@ -233,6 +258,69 @@ function qs() {
   return q;
 }
 
+function applyRouteQuery() {
+  const q = route.query;
+  const companyId = String(q.companyId ?? "").trim();
+  const eligible = q.eligible === "1" || q.eligible === "true";
+  const projectId = String(q.projectId ?? "").trim();
+  if (projectId && projectId !== store.selectedProjectId) {
+    store.selectProject(projectId);
+  }
+  companyIdFilter.value = companyId;
+  eligibleOnly.value = eligible && Boolean(companyId);
+}
+
+function clearCompanyScope() {
+  companyIdFilter.value = "";
+  eligibleOnly.value = false;
+  scope.value = null;
+  selectedIds.value = [];
+  const nextQuery = { ...route.query };
+  delete nextQuery.companyId;
+  delete nextQuery.eligible;
+  void router.replace({ path: "/sequence-studio", query: nextQuery });
+  page.value = 1;
+  void load();
+}
+
+function toggleSelected(id: string, checked: boolean) {
+  if (checked) {
+    if (!selectedIds.value.includes(id)) selectedIds.value = [...selectedIds.value, id];
+    return;
+  }
+  selectedIds.value = selectedIds.value.filter((x) => x !== id);
+}
+
+function toggleSelectAllOnPage(checked: boolean) {
+  const pageIds = rows.value.map((row) => row.contact.uuid);
+  if (checked) {
+    selectedIds.value = [...new Set([...selectedIds.value, ...pageIds])];
+    return;
+  }
+  const drop = new Set(pageIds);
+  selectedIds.value = selectedIds.value.filter((id) => !drop.has(id));
+}
+
+function generateSequences() {
+  const leadUuids = [...selectedIds.value];
+  if (!leadUuids.length) {
+    toast.warning("Select at least one contact");
+    return;
+  }
+  dialog.warning({
+    title: "Generate sequences",
+    content: `Launch Velvetech messaging (n8n) for ${leadUuids.length} selected contact${leadUuids.length === 1 ? "" : "s"}? Full multi-step sequences will be composed and ingested into Email Studio when complete.`,
+    positiveText: "Generate",
+    negativeText: "Cancel",
+    onPositiveClick: async () => {
+      const launchId = await launchWorkflow("velvetech_messaging", leadUuids, {
+        successMessage: `Proactive sequence started for ${leadUuids.length} contact${leadUuids.length === 1 ? "" : "s"}. Results will ingest into Email Studio when n8n completes.`,
+      });
+      if (launchId) selectedIds.value = [];
+    },
+  });
+}
+
 async function load() {
   if (!store.selectedProjectId) return;
   loading.value = true;
@@ -243,6 +331,9 @@ async function load() {
     if (!r.ok) throw new Error(j.error ?? "Could not load Sequence Studio");
     rows.value = j.data ?? [];
     total.value = j.total ?? 0;
+    scope.value = j.scope ?? null;
+    const visible = new Set(rows.value.map((row) => row.contact.uuid));
+    selectedIds.value = selectedIds.value.filter((id) => visible.has(id));
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Could not load Sequence Studio";
   } finally {
@@ -432,9 +523,22 @@ watch([search, companySearch, statusFilter, channelFilter, draftState, sendState
   timer = window.setTimeout(load, 250);
 });
 watch([page, pageSize], load);
-watch(() => store.selectedProjectId, () => { page.value = 1; void load(); });
+watch(() => store.selectedProjectId, () => { page.value = 1; selectedIds.value = []; void loadWorkflows(); void load(); });
+watch(
+  () => [route.query.companyId, route.query.eligible, route.query.projectId],
+  () => {
+    applyRouteQuery();
+    page.value = 1;
+    selectedIds.value = [];
+    void load();
+  }
+);
 watch(marks, seedFactComments);
-onMounted(load);
+onMounted(async () => {
+  applyRouteQuery();
+  await loadWorkflows();
+  await load();
+});
 </script>
 
 <template>
@@ -452,9 +556,34 @@ onMounted(load);
       </NSpace>
     </div>
 
+    <NAlert
+      v-if="scope?.companyId"
+      type="info"
+      :show-icon="false"
+      style="margin-bottom: 12px"
+    >
+      <div class="scope-banner">
+        <div>
+          <strong>{{ scope.companyName || "Company" }}</strong>
+          <span class="muted">
+            ·
+            {{
+              scope.eligible
+                ? "Eligible contacts from research"
+                : "Company contacts"
+            }}
+            <template v-if="scope.eligible && scope.eligibleCount != null">
+              ({{ scope.eligibleCount }})
+            </template>
+          </span>
+        </div>
+        <NButton size="tiny" quaternary @click="clearCompanyScope">Clear filter</NButton>
+      </div>
+    </NAlert>
+
     <div class="toolbar">
       <NInput v-model:value="search" clearable placeholder="Contact, role, email..." />
-      <NInput v-model:value="companySearch" clearable placeholder="Company" />
+      <NInput v-model:value="companySearch" clearable placeholder="Company" :disabled="Boolean(companyIdFilter)" />
       <NSelect v-model:value="statusFilter" multiple clearable filterable :options="statusOptions" placeholder="Statuses" />
       <NSelect v-model:value="channelFilter" multiple clearable :options="channelOptions" placeholder="Channels" />
       <NSelect v-model:value="draftState" :options="draftStateOptions" placeholder="Draft state" />
@@ -472,11 +601,36 @@ onMounted(load);
       <NButton :loading="loading" @click="load">Refresh</NButton>
     </div>
 
+    <div v-if="rows.length || selectedCount" class="bulk-bar">
+      <NCheckbox
+        :checked="allSelectedOnPage"
+        :indeterminate="selectedCount > 0 && !allSelectedOnPage"
+        @update:checked="toggleSelectAllOnPage"
+      >
+        Select page
+      </NCheckbox>
+      <span class="muted">{{ selectedCount }} selected</span>
+      <NButton
+        type="primary"
+        size="small"
+        :disabled="!selectedCount"
+        :loading="launching"
+        @click="generateSequences"
+      >
+        Generate sequences (n8n)
+      </NButton>
+    </div>
+
     <NAlert v-if="error" type="error" :show-icon="false" style="margin-bottom: 12px">{{ error }}</NAlert>
     <NSpin :show="loading">
       <div v-if="rows.length" class="lead-stack">
         <article v-for="row in rows" :key="row.contact.uuid" class="lead-card">
           <header class="lead-header">
+            <NCheckbox
+              :checked="selectedIds.includes(row.contact.uuid)"
+              @update:checked="(v: boolean) => toggleSelected(row.contact.uuid, v)"
+              @click.stop
+            />
             <button class="expand-button" @click="toggleLead(row)">
               <ChevronDownIcon v-if="isExpanded(row.contact.uuid)" :size="16" />
               <ChevronRightIcon v-else :size="16" />
@@ -486,7 +640,11 @@ onMounted(load);
             </NAvatar>
             <div class="lead-title">
               <button class="link-button" @click="toggleLead(row)">{{ row.contact.display_name }}</button>
-              <div class="muted">{{ row.contact.position || "No role" }} · {{ row.contact.company_name || "No company" }}</div>
+              <div class="muted">
+                {{ row.contact.position || "No role" }} · {{ row.contact.company_name || "No company" }}
+                <template v-if="row.persona"> · {{ humanize(row.persona) }}</template>
+                <template v-if="row.fit_score != null"> · fit {{ row.fit_score }}</template>
+              </div>
             </div>
             <div class="channel-pills">
               <div v-for="pill in ['email','linkedin_dm','linkedin_inmail'].map((channel) => renderChannelPill(row, channel))" :key="pill.channel" class="channel-pill" :class="{ empty: pill.empty }">
@@ -584,7 +742,15 @@ onMounted(load);
           </div>
         </article>
       </div>
-      <NEmpty v-if="!loading && rows.length === 0" description="No sequence records found" style="margin-top: 28px" />
+      <NEmpty
+        v-if="!loading && rows.length === 0"
+        :description="
+          scope?.eligible
+            ? 'No eligible contacts resolved for this company (POV fit contacts not linked in CRM)'
+            : 'No sequence records found'
+        "
+        style="margin-top: 28px"
+      />
     </NSpin>
     <div class="pagination-row">
       <NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="total" show-size-picker :page-sizes="[10,25,50,100]" />
@@ -697,10 +863,12 @@ onMounted(load);
 .header-row h1{margin:0}
 .toolbar{display:grid;grid-template-columns:repeat(6,minmax(150px,1fr)) auto;gap:10px;align-items:center;margin-bottom:12px}
 .toolbar :deep(.n-input),.toolbar :deep(.n-base-selection){min-height:34px}
+.scope-banner{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.bulk-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;border:1px solid rgba(148,163,184,.25);border-radius:10px;background:rgba(15,23,42,.45);position:sticky;top:0;z-index:2}
 .muted{color:#cbd5e1;font-size:.86em}
 .lead-stack{display:flex;flex-direction:column;gap:10px}
 .lead-card{border:1px solid #334155;border-radius:8px;background:#111827;overflow:hidden}
-.lead-header{display:grid;grid-template-columns:28px 38px minmax(180px,1fr) minmax(280px,1.4fr) auto;gap:10px;align-items:center;padding:12px}
+.lead-header{display:grid;grid-template-columns:22px 28px 38px minmax(180px,1fr) minmax(280px,1.4fr) auto;gap:10px;align-items:center;padding:12px}
 .expand-button,.link-button,.message-title{border:0;background:transparent;color:#93c5fd;padding:0;cursor:pointer}
 .expand-button{display:flex;align-items:center;justify-content:center;color:inherit}
 .link-button{font-weight:700;text-align:left}
@@ -739,8 +907,8 @@ onMounted(load);
 .fact-row{display:grid;grid-template-columns:32px 1fr;gap:9px;align-items:start;line-height:1.45;margin-bottom:8px}
 .field-preview{margin:10px 0}
 .field-preview pre{white-space:pre-wrap;word-break:break-word;padding:8px;border-radius:6px;background:rgba(128,128,128,.12)}
-@media(max-width:1400px){.toolbar{grid-template-columns:repeat(4,minmax(150px,1fr)) auto}.lead-header{grid-template-columns:28px 38px minmax(160px,1fr) auto}.channel-pills{grid-column:1/-1}}
+@media(max-width:1400px){.toolbar{grid-template-columns:repeat(4,minmax(150px,1fr)) auto}.lead-header{grid-template-columns:22px 28px 38px minmax(160px,1fr) auto}.channel-pills{grid-column:1/-1}}
 @media(max-width:1280px){.tracks-grid{grid-template-columns:1fr}.lead-expanded{grid-template-columns:1fr}.side-fact-list{max-height:none}}
-@media(max-width:1180px){.lead-header{grid-template-columns:28px 38px minmax(160px,1fr) auto}.tracks-grid{grid-template-columns:1fr}}
-@media(max-width:960px){.header-row,.message-head{flex-direction:column}.toolbar,.detail-grid{grid-template-columns:1fr}.lead-header{grid-template-columns:28px 38px 1fr}.lead-header>.n-button{grid-column:1/-1}.channel-pills{grid-template-columns:1fr}}
+@media(max-width:1180px){.lead-header{grid-template-columns:22px 28px 38px minmax(160px,1fr) auto}.tracks-grid{grid-template-columns:1fr}}
+@media(max-width:960px){.header-row,.message-head{flex-direction:column}.toolbar,.detail-grid{grid-template-columns:1fr}.lead-header{grid-template-columns:22px 28px 38px 1fr}.lead-header>.n-button{grid-column:1/-1}.channel-pills{grid-template-columns:1fr}}
 </style>

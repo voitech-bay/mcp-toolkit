@@ -27,8 +27,11 @@ import {
 } from "naive-ui";
 import type { DataTableColumns, SelectOption } from "naive-ui";
 import CompanyDossier from "../components/dossier/CompanyDossier.vue";
+import { useProjectStore } from "../stores/project";
 
 use([CanvasRenderer, BarChart, GridComponent, TooltipComponent, LegendComponent]);
+
+const projectStore = useProjectStore();
 
 type LlmBucket = {
   calls: number;
@@ -1586,13 +1589,29 @@ const detailVendorMetrics = computed(() => {
                     formatCellValue(expandedCompanyRow.company_key)
                   }}</span>
                 </div>
-                <RouterLink
-                  v-if="expandedCompanyRow.company_id"
-                  :to="`/company/${expandedCompanyRow.company_id}`"
-                  class="entity-card-link"
-                >
-                  View full company card →
-                </RouterLink>
+                <div v-if="expandedCompanyRow.company_id" class="inline-dossier-actions">
+                  <RouterLink
+                    :to="`/company/${expandedCompanyRow.company_id}`"
+                    class="entity-card-link"
+                  >
+                    View full company card →
+                  </RouterLink>
+                  <RouterLink
+                    :to="{
+                      path: '/sequence-studio',
+                      query: {
+                        companyId: String(expandedCompanyRow.company_id),
+                        eligible: '1',
+                        ...(projectStore.selectedProjectId
+                          ? { projectId: projectStore.selectedProjectId }
+                          : {}),
+                      },
+                    }"
+                    class="entity-card-link"
+                  >
+                    Go to Sequence Studio →
+                  </RouterLink>
+                </div>
                 <span v-else class="muted">No CRM company linked yet</span>
               </div>
               <CompanyDossier
@@ -1997,6 +2016,12 @@ const detailVendorMetrics = computed(() => {
   font-size: 0.75rem;
   opacity: 0.55;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.inline-dossier-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 18px;
 }
 .entity-card-link {
   color: #38bdf8;
