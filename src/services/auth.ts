@@ -211,6 +211,7 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
 
   // Email Studio.
   if (pathname === "/api/email-studio/contact-search" || pathname === "/api/email-studio/emails") return true;
+  if (pathname === "/api/email-studio/smartlead/reconcile") return true;
   if (/^\/api\/email-studio\/emails\/[^/]+$/.test(pathname)) return true;
   if (/^\/api\/email-studio\/emails\/[^/]+\/(status|generate|regenerate|comments|approve|versions|human-version)$/.test(pathname)) return true;
   if (/^\/api\/email-studio\/emails\/[^/]+\/versions\/[^/]+\/adopt$/.test(pathname)) return true;

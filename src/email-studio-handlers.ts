@@ -5,6 +5,8 @@ import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRan
 import { buildVelvetechSystemPrompt } from "./services/velvetech-messaging/prompt.js";
 import { isVelvetechProjectId } from "./services/velvetech-messaging/types.js";
 import { loadPriorityAnchors, type PriorityAnchor } from "./services/pov-facts.js";
+import { plaintextToHtml } from "./services/html-plaintext.js";
+import { reconcileSmartleadLead } from "./services/smartlead-reconcile.js";
 
 type Json = Record<string, unknown>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -247,7 +249,7 @@ export async function handleEmailStudioGet(req: IncomingMessage, res: ServerResp
     client.from("outreach_email_comments").select("*,outreach_email_comment_replies(*)").eq("email_id", id).order("created_at"),
     client.from("outreach_email_status_events").select("*").eq("email_id", id).order("created_at", { ascending: false }),
     email.research_snapshot_id ? client.from("outreach_research_snapshots").select("*").eq("id", email.research_snapshot_id).maybeSingle() : Promise.resolve({ data: null }),
-    client.from("project_knowledge_documents").select("id,kind,title,version,priority").eq("project_id", projectId).eq("status", "active").order("priority"),
+    client.from("project_knowledge_documents").select("id,kind,title,version,priority,content_markdown").eq("project_id", projectId).eq("status", "active").order("priority"),
   ]);
   const current = (versions.data ?? []).find((x: Json) => x.id === email.current_version_id) ?? null;
   // No synthesized snapshot yet (e.g. imported/sent history that never ran generation):
@@ -333,7 +335,9 @@ export async function handleEmailStudioAdoptVersion(req: IncomingMessage, res: S
 }
 
 export async function handleEmailStudioHumanVersion(req: IncomingMessage, res: ServerResponse, id: string) {
-  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const subject = String(b.subject ?? "").trim(), content = String(b.body ?? "").trim(); if (!subject || !content) return send(res, 400, { error: "subject and body are required" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const subject = String(b.subject ?? "").trim(), plain = String(b.body ?? "").trim(); if (!subject || !plain) return send(res, 400, { error: "subject and body are required" });
+  // Operators edit plaintext; persist HTML so Smartlead / sequence views keep paragraph structure.
+  const content = plaintextToHtml(plain);
   try { const validation = validateDraft(subject, content, []); const version = await insertVersion(client, email, { subject, body: content, author_type: "human", author_id: actor(req), author_user_id: actorUserId(req), annotations: [], validation_results: validation, generation_reason: "manual_edit" }, true); let updated: Json = email; if (email.status === "approved" || email.status === "final_check") updated = await statusChange(client, email, "needs_review", "user", actor(req), "Content edited; prior approval invalidated", undefined, actorUserId(req)); return send(res, 201, { data: updated, version }); } catch (e) { return send(res, 500, { error: e instanceof Error ? e.message : "Save failed" }); }
 }
 
@@ -497,17 +501,24 @@ export async function handleSmartleadEmailEvent(req: IncomingMessage, res: Serve
 
   let candidates: Json[] = [];
   let matchReason = "No matching Smartlead identifiers";
+  // Prefer step-aware matches. Matching lead+campaign without step reattaches later
+  // sends to the first stamped row after step 1 succeeds.
   if (messageId) {
     const r = await client.from("outreach_emails").select("*").eq("smartlead_message_id", messageId);
     if (r.error) return send(res, 500, { error: r.error.message });
     candidates = (r.data ?? []) as Json[];
     matchReason = "Smartlead message id";
   }
-  if (!candidates.length && leadId && campaignId) {
-    const r = await client.from("outreach_emails").select("*").eq("smartlead_lead_id", leadId).eq("smartlead_campaign_id", campaignId);
+  if (!candidates.length && leadId && campaignId && step > 0) {
+    const r = await client
+      .from("outreach_emails")
+      .select("*")
+      .eq("smartlead_lead_id", leadId)
+      .eq("smartlead_campaign_id", campaignId)
+      .eq("sequence_step", step);
     if (r.error) return send(res, 500, { error: r.error.message });
     candidates = (r.data ?? []) as Json[];
-    matchReason = "Smartlead lead id and campaign id";
+    matchReason = "Smartlead lead id, campaign id, and sequence step";
   }
   if (!candidates.length && recipient && campaignId && step > 0) {
     const r = await client.from("outreach_emails").select("*").eq("recipient_email", recipient).eq("smartlead_campaign_id", campaignId).eq("sequence_step", step);
@@ -520,6 +531,24 @@ export async function handleSmartleadEmailEvent(req: IncomingMessage, res: Serve
     if (r.error) return send(res, 500, { error: r.error.message });
     candidates = (r.data ?? []) as Json[];
     matchReason = "Recipient email and sequence number";
+  }
+  if (!candidates.length && leadId && campaignId) {
+    // Last resort: lead+campaign without step — only accept a single unsent row.
+    const r = await client
+      .from("outreach_emails")
+      .select("*")
+      .eq("smartlead_lead_id", leadId)
+      .eq("smartlead_campaign_id", campaignId)
+      .neq("status", "sent");
+    if (r.error) return send(res, 500, { error: r.error.message });
+    const rows = (r.data ?? []) as Json[];
+    if (rows.length === 1) {
+      candidates = rows;
+      matchReason = "Smartlead lead id and campaign id (single unsent)";
+    } else {
+      candidates = rows;
+      matchReason = "Smartlead lead id and campaign id (unsent)";
+    }
   }
 
   const matchStatus = candidates.length === 1 ? "matched" : candidates.length > 1 ? "ambiguous" : "unmatched";
@@ -550,4 +579,53 @@ export async function handleSmartleadEmailEvent(req: IncomingMessage, res: Serve
     }
   }
   return send(res, 202, { data: ins.data, matchStatus, matchedEmailId: candidates.length === 1 ? candidates[0].id : null });
+}
+
+/** Pull Smartlead SENT history and upsert missing outreach_emails sequence steps. */
+export async function handleSmartleadReconcile(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const b = await body(req);
+  const projectId = str(b.projectId);
+  const campaignId = str(b.campaignId ?? b.smartleadCampaignId);
+  let leadId = str(b.leadId ?? b.smartleadLeadId);
+  const recipientEmail = str(b.recipientEmail).toLowerCase() || null;
+  const contactId = str(b.contactId) || null;
+  const batchName = str(b.batchName) || undefined;
+  if (!validProject(projectId) || !campaignId) {
+    return send(res, 400, { error: "projectId and campaignId are required" });
+  }
+
+  const client = getSupabase();
+  if (!client) return send(res, 500, { error: "Supabase not configured" });
+
+  // Resolve leadId from an existing outreach row when only recipient/contact is provided.
+  if (!leadId && (recipientEmail || contactId)) {
+    let q = client
+      .from("outreach_emails")
+      .select("smartlead_lead_id")
+      .eq("project_id", projectId)
+      .or(`campaign_id.eq.${campaignId},smartlead_campaign_id.eq.${campaignId}`)
+      .not("smartlead_lead_id", "is", null)
+      .limit(1);
+    if (contactId) q = q.eq("contact_id", contactId);
+    if (recipientEmail) q = q.eq("recipient_email", recipientEmail);
+    const r = await q;
+    if (r.error) return send(res, 500, { error: r.error.message });
+    leadId = str(r.data?.[0]?.smartlead_lead_id);
+  }
+  if (!leadId) return send(res, 400, { error: "leadId is required (or provide recipientEmail/contactId with existing Smartlead linkage)" });
+
+  try {
+    const result = await reconcileSmartleadLead({
+      projectId,
+      campaignId,
+      leadId,
+      contactId,
+      recipientEmail,
+      batchName,
+    });
+    return send(res, 200, { data: result });
+  } catch (e) {
+    return send(res, 500, { error: e instanceof Error ? e.message : "Smartlead reconcile failed" });
+  }
 }

@@ -23,6 +23,7 @@
     "seed:feasible-outreach": "tsx src/scripts/seed-feasible-outreach-knowledge.ts",
     "seed:velvetech-outreach": "tsx src/scripts/seed-velvetech-outreach-knowledge.ts",
     "backfill:velvetech-n8n": "tsx src/scripts/backfill-velvetech-n8n-links.ts",
+    "reconcile:smartlead-lead": "tsx src/scripts/reconcile-smartlead-lead.ts",
     "start:worker": "node dist/workers/enrichment-worker.js",
     "start": "node dist/api-server.js"
   },
