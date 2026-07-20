@@ -3,7 +3,7 @@ import { CONTACTS_TABLE, getGetSalesCredentials, getSupabase } from "./services/
 import { createLeadCustomField, listLeadCustomFields, updateLeadCustomFields } from "./services/source-api.js";
 import { GETSALES_INMAIL_FIELD_NAMES, arrangeGetSalesFields } from "./services/inmail-review.js";
 import { normalizeOutreachMessageChannel } from "./services/email-studio.js";
-import { extractPovFacts, loadLatestPovRows } from "./services/pov-facts.js";
+import { extractPovFacts, loadLatestPovRows, resolveCompanyKeys } from "./services/pov-facts.js";
 
 type Json = Record<string, unknown>;
 
@@ -259,6 +259,15 @@ export async function handleSequenceStudioLead(req: IncomingMessage, res: Server
   if (!contact.data) return send(res, 404, { error: "Contact not found" });
   const contactRow = contact.data as Json;
 
+  // POV rows are frequently keyed only by company domain (result.company_key),
+  // so resolve the contact's company domain / website host to match those rows too.
+  const emailDomain = str(contactRow.work_email).split("@")[1] ?? "";
+  const companyKeys = await resolveCompanyKeys(client, {
+    projectId,
+    companyId: str(contactRow.company_uuid) || null,
+    extraKeys: emailDomain ? [emailDomain] : [],
+  });
+
   const [messages, povRows, marks] = await Promise.all([
     client
       .from("outreach_emails")
@@ -267,7 +276,7 @@ export async function handleSequenceStudioLead(req: IncomingMessage, res: Server
       .eq("contact_id", contactId)
       .order("channel", { ascending: true })
       .order("step_number", { ascending: true }),
-    loadLatestPovRows(client, [contactId, str(contactRow.company_uuid)]),
+    loadLatestPovRows(client, [contactId, str(contactRow.company_uuid)], companyKeys),
     client
       .from("pov_fact_marks")
       .select("*")

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { extractPovFacts, loadPriorityAnchors, povFactId } from "./pov-facts.js";
+import {
+  companyKeyFromHost,
+  extractPovFacts,
+  loadLatestPovRows,
+  loadPriorityAnchors,
+  povFactId,
+} from "./pov-facts.js";
 import { N8N_WORKFLOW_RESULTS_TABLE } from "./supabase.js";
 
 test("extractPovFacts assigns content-hashed ids and keeps legacy ids", () => {
@@ -25,12 +31,34 @@ test("extractPovFacts assigns content-hashed ids and keeps legacy ids", () => {
   assert.equal(facts.find((f) => f.legacyId === "verified_signals:1")?.text, "Migrated to AWS");
 });
 
+test("extractPovFacts reads velvetech-pov fields including claim objects", () => {
+  const facts = extractPovFacts({
+    pressure_points: ["Cash conversion is stretched"],
+    transformation_signals: [{ claim: "ERP rollout in Q3", source: "careers" }],
+    discovery_questions: ["Who owns the close calendar?"],
+    hiring_signals: [{ signal: "Hiring a VP Finance" }],
+  });
+  assert.deepEqual(
+    facts.map((f) => f.source),
+    ["pressure_points", "transformation_signals", "hiring_signals", "discovery_questions"]
+  );
+  assert.equal(facts.find((f) => f.source === "transformation_signals")?.text, "ERP rollout in Q3");
+  assert.equal(facts.find((f) => f.source === "hiring_signals")?.text, "Hiring a VP Finance");
+  assert.equal(facts.find((f) => f.source === "discovery_questions")?.text, "Who owns the close calendar?");
+});
+
+test("companyKeyFromHost normalizes domains and website URLs", () => {
+  assert.equal(companyKeyFromHost("VentureLogistics.com"), "venturelogistics.com");
+  assert.equal(companyKeyFromHost("https://www.venturelogistics.com/about"), "venturelogistics.com");
+  assert.equal(companyKeyFromHost("www.example.com"), "example.com");
+});
+
 // Minimal chainable Supabase stub: every builder method returns the awaitable
 // builder; `from(table)` selects which canned result the await resolves to.
-function stubClient(results: Record<string, { data: unknown[]; error: null | { message: string } }>) {
-  const makeBuilder = (result: { data: unknown[]; error: unknown }) => {
+function stubClient(results: Record<string, { data: unknown; error: null | { message: string } }>) {
+  const makeBuilder = (result: { data: unknown; error: unknown }) => {
     const builder: Record<string, unknown> = {};
-    for (const m of ["select", "eq", "or", "in", "order", "limit"]) {
+    for (const m of ["select", "eq", "or", "in", "order", "limit", "maybeSingle", "single"]) {
       builder[m] = () => builder;
     }
     builder.then = (resolve: (v: unknown) => unknown) => resolve(result);
@@ -47,6 +75,7 @@ const PROJECT = "33333333-3333-3333-3333-333333333333";
 
 test("loadPriorityAnchors joins marks to facts, drops stale, and orders by rank", async () => {
   const client = stubClient({
+    companies: { data: { domain: "acme.com", website: "https://www.acme.com" }, error: null },
     [N8N_WORKFLOW_RESULTS_TABLE]: {
       data: [
         { id: "row-company", contact_id: null, company_id: COMPANY, result: { headline_facts: ["Company opened a Berlin office"] }, created_at: "2026-07-12T00:00:00Z" },
@@ -78,9 +107,46 @@ test("loadPriorityAnchors joins marks to facts, drops stale, and orders by rank"
 
 test("loadPriorityAnchors returns empty when there are no marks", async () => {
   const client = stubClient({
+    companies: { data: { domain: "acme.com", website: null }, error: null },
     [N8N_WORKFLOW_RESULTS_TABLE]: { data: [{ id: "r", contact_id: CONTACT, company_id: COMPANY, result: { headline_facts: ["x"] }, created_at: "2026-07-13T00:00:00Z" }], error: null },
     pov_fact_marks: { data: [], error: null },
   });
   const anchors = await loadPriorityAnchors(client, { projectId: PROJECT, contactId: CONTACT, companyId: COMPANY });
   assert.deepEqual(anchors, []);
+});
+
+test("loadLatestPovRows matches company_key domain when FKs are null", async () => {
+  let capturedOr = "";
+  const makeBuilder = (result: { data: unknown; error: unknown }) => {
+    const builder: Record<string, unknown> = {};
+    for (const m of ["select", "eq", "in", "order", "limit"]) {
+      builder[m] = () => builder;
+    }
+    builder.or = (clause: string) => {
+      capturedOr = clause;
+      return builder;
+    };
+    builder.then = (resolve: (v: unknown) => unknown) => resolve(result);
+    return builder;
+  };
+  const client = {
+    from: () =>
+      makeBuilder({
+        data: [
+          {
+            id: "domain-only",
+            contact_id: null,
+            company_id: null,
+            result: { company_key: "venturelogistics.com", pressure_points: ["Close is slow"] },
+            created_at: "2026-07-13T00:00:00Z",
+          },
+        ],
+        error: null,
+      }),
+  } as never;
+
+  const rows = await loadLatestPovRows(client, [CONTACT], ["VentureLogistics.com"]);
+  assert.match(capturedOr, /result->>company_key\.in\.\("venturelogistics\.com"\)/);
+  assert.equal(rows.length, 1);
+  assert.equal(extractPovFacts(rows[0].result)[0]?.text, "Close is slow");
 });
