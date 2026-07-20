@@ -266,15 +266,24 @@ const anotherSyncRunning = computed(() => {
   const run = activeSyncRun.value;
   return run != null && run.project_id !== selectedProjectId.value;
 });
+const activeSyncRunProjectName = computed(() => {
+  const run = activeSyncRun.value;
+  if (!run?.project_id) return null;
+  return projectStore.projects.find((p) => p.id === run.project_id)?.name ?? null;
+});
 const thisSyncRunning = computed(() => {
   const run = activeSyncRun.value;
   return run != null && run.project_id === selectedProjectId.value;
 });
 
-/** Run id for cancel API: local session, or preflight when sync runs without this tab having started it (refresh / other tab). */
+/**
+ * Run id for cancel API: local session, this project's run (refresh / other tab), or any other
+ * project's active run — sync_runs is a single global lock, so a stuck run for a different
+ * project (e.g. left "running" after a redeploy) still needs to be clearable from here.
+ */
 const cancelSyncRunId = computed(() => {
   if (activeRunId.value) return activeRunId.value;
-  if (thisSyncRunning.value && activeSyncRun.value?.id) return activeSyncRun.value.id;
+  if (activeSyncRun.value?.id) return activeSyncRun.value.id;
   return null;
 });
 
@@ -1015,7 +1024,10 @@ const preflightRows = computed(() => {
             </template>
             <template v-else-if="anotherSyncRunning">
               <AlertTriangleIcon :size="16" class="warn-icon" />
-              <NText>Another sync is running (run ID: {{ activeSyncRun?.id?.slice(0, 8) }}…)</NText>
+              <NText>
+                Another sync is running for <strong>{{ activeSyncRunProjectName ?? "another project" }}</strong>
+                (run ID: {{ activeSyncRun?.id?.slice(0, 8) }}…). If it's stuck, use "Clear stuck sync lock" below.
+              </NText>
             </template>
             <template v-else-if="thisSyncRunning">
               <NSpin :size="16" />
@@ -1050,7 +1062,7 @@ const preflightRows = computed(() => {
               @click="stopSync"
             >
               <template #icon><SquareStopIcon :size="15" /></template>
-              Stop sync
+              {{ anotherSyncRunning ? "Clear stuck sync lock" : "Stop sync" }}
             </NButton>
           </div>
         </div>
