@@ -118,12 +118,19 @@ const fitScore = computed(() => {
   const n = Number(props.dossier.fit_score);
   return Number.isFinite(n) ? Math.round(n) : null;
 });
-const scoreTone = computed(() => {
+const fitMetaClass = computed(() => {
   const s = fitScore.value;
-  if (s === null) return "default";
-  if (s >= 75) return "success";
-  if (s >= 50) return "warning";
-  return "default";
+  if (s === null) return "";
+  if (s >= 75) return "meta-chip--ok";
+  if (s >= 50) return "meta-chip--mid";
+  return "meta-chip--low";
+});
+const buildRiskMetaClass = computed(() => {
+  const r = String(props.dossier.build_risk ?? "").toLowerCase();
+  if (r === "low") return "meta-chip--ok";
+  if (r === "medium" || r === "med") return "meta-chip--mid";
+  if (r === "high") return "meta-chip--warn";
+  return "";
 });
 const personaLanes = computed(() => {
   const g = props.dossier.fit_contacts_by_persona ?? {};
@@ -166,15 +173,27 @@ function isHighlighted(c: Record<string, unknown>): boolean {
 <template>
   <NCard size="small">
     <template #header>
-      <NSpace align="center" size="small">
+      <div class="dossier-header">
         <span class="dossier-title">Account dossier</span>
-        <NTag v-if="dossier.vertical" size="small" round :bordered="false">{{ dossier.vertical }}</NTag>
-        <NTag v-if="dossier.build_risk" size="small" round :bordered="false">build risk: {{ dossier.build_risk }}</NTag>
-        <NTag v-if="!dossier.from_contract" size="small" round :bordered="false" type="warning">derived</NTag>
-      </NSpace>
-    </template>
-    <template #header-extra>
-      <NTag v-if="fitScore !== null" :type="scoreTone" size="small" round>fit {{ fitScore }}</NTag>
+        <div class="dossier-meta" aria-label="Account summary">
+          <span v-if="dossier.vertical" class="meta-chip">
+            <span class="meta-label">Vertical</span>
+            <span class="meta-value">{{ dossier.vertical }}</span>
+          </span>
+          <span v-if="dossier.build_risk" class="meta-chip" :class="buildRiskMetaClass">
+            <span class="meta-label">Build risk</span>
+            <span class="meta-value">{{ dossier.build_risk }}</span>
+          </span>
+          <span v-if="fitScore !== null" class="meta-chip" :class="fitMetaClass">
+            <span class="meta-label">Fit</span>
+            <span class="meta-value">{{ fitScore }}</span>
+          </span>
+          <span v-if="!dossier.from_contract" class="meta-chip meta-chip--warn">
+            <span class="meta-label">Source</span>
+            <span class="meta-value">derived</span>
+          </span>
+        </div>
+      </div>
     </template>
 
     <!-- Account narrative (hero) -->
@@ -339,8 +358,58 @@ function isHighlighted(c: Record<string, unknown>): boolean {
 </template>
 
 <style scoped>
+.dossier-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
 .dossier-title {
   font-weight: 600;
+  flex-shrink: 0;
+}
+.dossier-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.meta-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(148, 163, 184, 0.08);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.meta-label {
+  opacity: 0.55;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.meta-value {
+  font-weight: 600;
+  text-transform: capitalize;
+}
+.meta-chip--ok {
+  border-color: rgba(52, 199, 89, 0.45);
+  background: rgba(52, 199, 89, 0.1);
+}
+.meta-chip--mid {
+  border-color: rgba(245, 166, 35, 0.45);
+  background: rgba(245, 166, 35, 0.1);
+}
+.meta-chip--low {
+  border-color: rgba(255, 149, 0, 0.4);
+  background: rgba(255, 149, 0, 0.1);
+}
+.meta-chip--warn {
+  border-color: rgba(255, 69, 58, 0.4);
+  background: rgba(255, 69, 58, 0.1);
 }
 .narrative {
   margin-bottom: 12px;

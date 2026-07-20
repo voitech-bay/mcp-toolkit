@@ -605,6 +605,57 @@ function formatCellValue(value: unknown): string {
   return String(value);
 }
 
+function humanizeFieldKey(key: string): string {
+  const labels: Record<string, string> = {
+    company_key: "Key",
+    company_name: "Name",
+    contact_key: "Contact key",
+    account_narrative: "Narrative",
+    brief_markdown: "Brief",
+    build_risk: "Build risk",
+    fit_score: "Fit",
+    fit: "Fit band",
+    pov_ok: "POV",
+    _preflight_skipped: "Preflight skipped",
+    preflight_skipped: "Preflight skipped",
+    vertical: "Vertical",
+    company_intel: "Company intel",
+    all_contacts: "Contacts",
+    persona: "Persona",
+    title: "Title",
+    score_rationale: "Score rationale",
+  };
+  if (labels[key]) return labels[key];
+  return key
+    .replace(/^_+/, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function truncateText(value: unknown, max = 120): string {
+  const s = formatCellValue(value);
+  if (s === "—") return s;
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
+/** Prefer a short human summary; skip dumping raw JSON blobs into the table. */
+function researchPreviewValue(key: string, value: unknown): string {
+  if (value == null) return "—";
+  if (key === "pov_ok" || key === "_preflight_skipped" || key === "preflight_skipped") {
+    if (typeof value === "boolean") return value ? "yes" : "no";
+    return formatCellValue(value);
+  }
+  if (key === "fit_score") {
+    const n = Number(value);
+    return Number.isFinite(n) ? String(Math.round(n)) : formatCellValue(value);
+  }
+  if (typeof value === "object") return "…";
+  if (key === "account_narrative" || key === "brief_markdown" || key === "score_rationale") {
+    return truncateText(value, 100);
+  }
+  return truncateText(value, 80);
+}
+
 function velvetechCompanyLabelFromRow(row: Record<string, unknown>): string {
   const label = row.company_label;
   if (typeof label === "string" && label.trim()) return label.trim();
@@ -662,44 +713,20 @@ function renderEntityCardLink(
         ? expandedCompanyKey.value === key
         : expandedContactKey.value === key;
     return h(
-      NSpace,
-      { align: "center", size: 8, wrap: false },
-      {
-        default: () => [
-          avatar,
-          h(
-            "button",
-            {
-              type: "button",
-              class: "entity-expand-btn",
-              style: {
-                color: "#2080f0",
-                background: "transparent",
-                border: "none",
-                padding: 0,
-                cursor: "pointer",
-                fontSize: "0.85rem",
-                fontWeight: active ? "700" : "500",
-                textAlign: "left",
-              },
-              onClick: () => toggleExpandRow(entityType, row),
-            },
-            active ? `${label} ▾` : `${label} ▸`
-          ),
-          id
-            ? h(
-                RouterLink,
-                {
-                  to: entityType === "company" ? `/company/${id}` : `/contact/${id}`,
-                  class: "entity-card-link",
-                  style: "color:#94a3b8;text-decoration:none;font-size:0.75rem",
-                  onClick: (e: Event) => e.stopPropagation(),
-                },
-                { default: () => "Open card" }
-              )
-            : null,
-        ],
-      }
+      "div",
+      { class: "entity-expand-cell" },
+      [
+        avatar,
+        h(
+          "button",
+          {
+            type: "button",
+            class: ["entity-expand-btn", active ? "is-active" : ""].filter(Boolean).join(" "),
+            onClick: () => toggleExpandRow(entityType, row),
+          },
+          active ? `${label} ▾` : `${label} ▸`
+        ),
+      ]
     );
   }
 
@@ -723,18 +750,100 @@ function renderEntityCardLink(
   );
 }
 
+const COMPANY_RESEARCH_COLUMNS = [
+  "company_key",
+  "vertical",
+  "build_risk",
+  "fit_score",
+  "pov_ok",
+  "_preflight_skipped",
+  "account_narrative",
+] as const;
+
+const CONTACT_RESEARCH_COLUMNS = [
+  "title",
+  "persona",
+  "fit",
+  "fit_score",
+  "company_key",
+] as const;
+
+const COMPANY_RESEARCH_SKIP = new Set([
+  "company_id",
+  "company_label",
+  "company_logo_url",
+  "company_name",
+  "company_intel",
+  "all_contacts",
+  "brief_markdown",
+  "headline_facts",
+  "pressure_points",
+  "data_integration_pain",
+  "transformation_signals",
+  "discovery_questions",
+  "job_postings",
+  "leadership_openings",
+  "research_source_urls",
+  "team_signal",
+  "fit_contacts_by_persona",
+  "tech_stack",
+  "target",
+  "hook",
+  "lead_question",
+  "score_rationale",
+]);
+
+const CONTACT_RESEARCH_SKIP = new Set([
+  "contact_id",
+  "contact_label",
+  "contact_avatar_url",
+  "contact_key",
+  "company_id",
+  "company_logo_url",
+  "contact",
+]);
+
+function pickResearchFieldKeys(
+  preferred: readonly string[],
+  available: string[],
+  skip: Set<string>
+): string[] {
+  const avail = new Set(available);
+  const ordered: string[] = [];
+  for (const key of preferred) {
+    if (key === "_preflight_skipped") {
+      if (avail.has("_preflight_skipped")) ordered.push("_preflight_skipped");
+      else if (avail.has("preflight_skipped")) ordered.push("preflight_skipped");
+      continue;
+    }
+    if (avail.has(key)) ordered.push(key);
+  }
+  // Fill gaps with remaining short scalar keys so sparse runs still show something useful
+  for (const key of available) {
+    if (ordered.length >= preferred.length) break;
+    if (skip.has(key) || ordered.includes(key) || key.startsWith("_")) continue;
+    ordered.push(key);
+  }
+  return ordered;
+}
+
 function buildEntityColumns(
   fieldKeys: string[],
   entityType: "company" | "contact",
   onOpenJson: (row: Record<string, unknown>) => void,
   linkMode: "navigate" | "expand" = "navigate"
 ): DataTableColumns<Record<string, unknown>> {
+  const curated =
+    entityType === "company"
+      ? pickResearchFieldKeys(COMPANY_RESEARCH_COLUMNS, fieldKeys, COMPANY_RESEARCH_SKIP)
+      : pickResearchFieldKeys(CONTACT_RESEARCH_COLUMNS, fieldKeys, CONTACT_RESEARCH_SKIP);
+
   const cols: DataTableColumns<Record<string, unknown>> = [
     {
       title: entityType === "company" ? "Company" : "Contact",
       key: "_entity_card",
       fixed: "left",
-      minWidth: linkMode === "expand" ? 280 : 220,
+      minWidth: 220,
       render(row) {
         const label =
           entityType === "company"
@@ -745,22 +854,13 @@ function buildEntityColumns(
     },
   ];
 
-  for (const key of fieldKeys) {
+  for (const key of curated) {
     cols.push({
-      title: key,
+      title: humanizeFieldKey(key),
       key,
-      minWidth: key.length > 16 ? 180 : 120,
+      minWidth: key === "account_narrative" ? 200 : key.length > 14 ? 140 : 110,
       ellipsis: { tooltip: true },
       render(row) {
-        if (entityType === "company" && key === "company_key" && (row.company_id || linkMode === "expand")) {
-          return renderEntityCardLink(entityType, row, formatCellValue(row[key]), linkMode);
-        }
-        if (entityType === "company" && key === "company_name" && (row.company_id || linkMode === "expand")) {
-          return renderEntityCardLink(entityType, row, formatCellValue(row[key]), linkMode);
-        }
-        if (entityType === "contact" && key === "contact_key" && (row.contact_id || linkMode === "expand")) {
-          return renderEntityCardLink(entityType, row, velvetechContactLabelFromRow(row), linkMode);
-        }
         if (entityType === "contact" && key === "company_key" && row.company_id) {
           return h(
             RouterLink,
@@ -771,13 +871,17 @@ function buildEntityColumns(
             { default: () => formatCellValue(row[key]) }
           );
         }
-        return formatCellValue(row[key]);
+        const raw =
+          key === "_preflight_skipped" && row[key] == null
+            ? row.preflight_skipped
+            : row[key];
+        return researchPreviewValue(key, raw);
       },
     });
   }
 
   cols.push({
-    title: "JSON",
+    title: "Raw",
     key: "_json",
     width: 72,
     fixed: "right",
@@ -1459,7 +1563,7 @@ const detailVendorMetrics = computed(() => {
       <NTabs v-model:value="detailTab" type="segment" animated style="margin-top: 4px">
         <NTabPane name="research" tab="Research">
           <p class="muted">
-            Click a company or contact to expand POV / research on this page. Use “Open card” for the full CRM page.
+            Click a company or contact to expand research on this page. Open the full CRM card from the bar above the dossier.
           </p>
           <template v-if="detail?.companies?.length">
             <h4 class="section-title">Companies ({{ detail.companies.length }})</h4>
@@ -1468,18 +1572,39 @@ const detailVendorMetrics = computed(() => {
               :data="detail.companies"
               :loading="detailLoading"
               size="small"
-              :scroll-x="Math.min(4800, 400 + (detail.company_field_keys?.length ?? 0) * 150)"
+              :scroll-x="Math.min(1400, 320 + companyDetailColumns.length * 130)"
               :max-height="360"
               :row-key="(row) => entityRowKey('company', row)"
             />
-            <div v-if="expandedCompanyDossier" class="inline-dossier">
-              <CompanyDossier :dossier="expandedCompanyDossier" />
+            <div v-if="expandedCompanyRow" class="inline-dossier">
+              <div class="inline-dossier-toolbar">
+                <div class="inline-dossier-heading">
+                  <span class="inline-dossier-name">{{
+                    velvetechCompanyLabelFromRow(expandedCompanyRow)
+                  }}</span>
+                  <span v-if="expandedCompanyRow.company_key" class="inline-dossier-key">{{
+                    formatCellValue(expandedCompanyRow.company_key)
+                  }}</span>
+                </div>
+                <RouterLink
+                  v-if="expandedCompanyRow.company_id"
+                  :to="`/company/${expandedCompanyRow.company_id}`"
+                  class="entity-card-link"
+                >
+                  View full company card →
+                </RouterLink>
+                <span v-else class="muted">No CRM company linked yet</span>
+              </div>
+              <CompanyDossier
+                v-if="expandedCompanyDossier"
+                :dossier="expandedCompanyDossier"
+              />
+              <NEmpty
+                v-else
+                description="No POV fields on this company row yet"
+                style="margin: 12px 0"
+              />
             </div>
-            <NEmpty
-              v-else-if="expandedCompanyRow && !expandedCompanyDossier"
-              description="No POV fields on this company row yet"
-              style="margin: 12px 0"
-            />
           </template>
           <template v-if="detail?.contacts?.length">
             <h4 class="section-title">Contacts ({{ detail.contacts.length }})</h4>
@@ -1488,34 +1613,37 @@ const detailVendorMetrics = computed(() => {
               :data="detail.contacts"
               :loading="detailLoading"
               size="small"
-              :scroll-x="Math.min(5600, 400 + (detail.contact_field_keys?.length ?? 0) * 150)"
+              :scroll-x="Math.min(1200, 320 + contactDetailColumns.length * 130)"
               :max-height="480"
               :row-key="(row) => entityRowKey('contact', row)"
             />
             <div v-if="expandedContactRow" class="inline-contact-detail">
-              <h4 class="section-title">
-                {{ velvetechContactLabelFromRow(expandedContactRow) }}
-              </h4>
+              <div class="inline-dossier-toolbar">
+                <div class="inline-dossier-heading">
+                  <span class="inline-dossier-name">{{
+                    velvetechContactLabelFromRow(expandedContactRow)
+                  }}</span>
+                </div>
+                <RouterLink
+                  v-if="expandedContactRow.contact_id"
+                  :to="`/contact/${expandedContactRow.contact_id}`"
+                  class="entity-card-link"
+                >
+                  View full contact card →
+                </RouterLink>
+              </div>
               <div class="funnel-grid">
                 <div
                   v-for="key in ['fit', 'fit_score', 'persona', 'title', 'company_key', 'contact_key']"
                   :key="key"
                   class="funnel-cell"
                 >
-                  <div class="funnel-label">{{ key }}</div>
+                  <div class="funnel-label">{{ humanizeFieldKey(key) }}</div>
                   <div class="funnel-value metric-value">
                     {{ formatCellValue(expandedContactRow[key]) }}
                   </div>
                 </div>
               </div>
-              <RouterLink
-                v-if="expandedContactRow.contact_id"
-                :to="`/contact/${expandedContactRow.contact_id}`"
-                class="entity-card-link"
-                style="display:inline-block;margin-top:10px;color:#2080f0;text-decoration:none;font-size:0.85rem"
-              >
-                Open contact card
-              </RouterLink>
             </div>
           </template>
           <NAlert v-else-if="detail && !detailLoading && !detail.contacts?.length" type="info">
@@ -1844,5 +1972,60 @@ const detailVendorMetrics = computed(() => {
   border: 1px solid rgba(128, 128, 128, 0.25);
   border-radius: 8px;
   background: rgba(128, 128, 128, 0.04);
+}
+.inline-dossier-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(128, 128, 128, 0.2);
+}
+.inline-dossier-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.inline-dossier-name {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+.inline-dossier-key {
+  font-size: 0.75rem;
+  opacity: 0.55;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.entity-card-link {
+  color: #38bdf8;
+  text-decoration: none;
+  font-size: 0.85rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.entity-card-link:hover {
+  text-decoration: underline;
+}
+:deep(.entity-expand-cell) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+:deep(.entity-expand-btn) {
+  color: #38bdf8;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 500;
+  text-align: left;
+  line-height: 1.3;
+}
+:deep(.entity-expand-btn.is-active) {
+  font-weight: 700;
 }
 </style>
