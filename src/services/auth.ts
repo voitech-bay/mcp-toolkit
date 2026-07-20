@@ -172,6 +172,7 @@ export function isN8nWorkflowResultsMachineAuth(req: IncomingMessage, pathname: 
 export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/auth/session" || pathname === "/api/auth/logout") return true;
   if (pathname === "/api/projects" || pathname === "/api/users") return true;
+  if (pathname === "/api/project-dashboard") return true;
 
   // Velvetech data mini-app: Companies, Contacts, Conversations.
   if (pathname === "/api/project-company-records" || pathname === "/api/project-contact-records") return true;
