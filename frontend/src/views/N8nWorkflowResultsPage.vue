@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, h } from "vue";
+import { ref, computed, watch, h, type VNodeChild } from "vue";
 import { useRoute, useRouter, RouterLink } from "vue-router";
 import { use } from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
@@ -786,20 +786,6 @@ const COMPANY_RESEARCH_SKIP = new Set([
   "score_rationale",
 ]);
 
-const CONTACT_RESEARCH_SKIP = new Set([
-  "contact_id",
-  "contact_label",
-  "contact_avatar_url",
-  "contact_key",
-  "company_id",
-  "company_logo_url",
-  "contact",
-  "enrichment",
-  "csv_hints",
-  "fit_score",
-  "company_key",
-]);
-
 function contactEnrichment(row: Record<string, unknown>): Record<string, unknown> {
   const e = row.enrichment;
   return e != null && typeof e === "object" && !Array.isArray(e) ? (e as Record<string, unknown>) : {};
@@ -911,7 +897,12 @@ function buildEntityColumns(
   ];
 
   if (entityType === "contact") {
-    const contactColDefs: Array<{ title: string; key: string; minWidth: number; render: (row: Record<string, unknown>) => unknown }> = [
+    const contactColDefs: Array<{
+      title: string;
+      key: string;
+      minWidth: number;
+      render: (row: Record<string, unknown>) => VNodeChild;
+    }> = [
       {
         title: "Title",
         key: "title",
@@ -999,16 +990,6 @@ function buildEntityColumns(
       minWidth: key === "account_narrative" ? 200 : key.length > 14 ? 140 : 110,
       ellipsis: { tooltip: true },
       render(row) {
-        if (entityType === "contact" && key === "company_key" && row.company_id) {
-          return h(
-            RouterLink,
-            {
-              to: `/company/${String(row.company_id)}`,
-              style: "color:#2080f0;text-decoration:none;font-size:0.85rem",
-            },
-            { default: () => formatCellValue(row[key]) }
-          );
-        }
         const raw =
           key === "_preflight_skipped" && row[key] == null
             ? row.preflight_skipped
