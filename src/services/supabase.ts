@@ -5730,33 +5730,55 @@ async function attachVelvetechExecutionEntityLinks(
 
 function computeVelvetechFunnelFromRows(rows: N8nWorkflowResultListRow[]): Record<string, number> {
   const funnel: Record<string, number> = {
+    companies_launched: 0,
     companies_icp: 0,
+    companies_icp_passed: 0,
+    companies_icp_excluded: 0,
     companies_discovery: 0,
     contacts_enriched: 0,
     contacts_fit_scored: 0,
+    contacts_analyzed: 0,
     contacts_high_medium: 0,
+    contacts_eligible: 0,
     companies_deep: 0,
     companies_pov: 0,
     companies_pov_ok: 0,
+    jobs_researched: 0,
   };
+  let povJobs = 0;
+  let deepJobs = 0;
+  let hasPov = false;
   for (const row of rows) {
     if (isVelvetechBillingRow(row)) continue;
     const j = row.result ?? {};
     const wf = velvetechWorkflowName(row);
-    if (wf === "velvetech-icp-gate") funnel.companies_icp += 1;
-    else if (wf === "velvetech-contact-discovery") funnel.companies_discovery += 1;
+    if (wf === "velvetech-icp-gate") {
+      funnel.companies_icp += 1;
+      if (j.icp_passed === true) funnel.companies_icp_passed += 1;
+      else funnel.companies_icp_excluded += 1;
+    } else if (wf === "velvetech-contact-discovery") funnel.companies_discovery += 1;
     else if (wf === "velvetech-contact-enrichment") funnel.contacts_enriched += 1;
     else if (wf === "velvetech-contact-fit") {
       funnel.contacts_fit_scored += 1;
+      funnel.contacts_analyzed += 1;
       if (String(j.fit ?? "") === "high" || String(j.fit ?? "") === "medium") {
         funnel.contacts_high_medium += 1;
+        funnel.contacts_eligible += 1;
       }
-    } else if (wf === "velvetech-company-deep-research") funnel.companies_deep += 1;
-    else if (wf === "velvetech-pov") {
+    } else if (wf === "velvetech-company-deep-research") {
+      funnel.companies_deep += 1;
+      const jobs = Number(j.job_postings_researched_count);
+      if (Number.isFinite(jobs) && jobs > 0) deepJobs += jobs;
+    } else if (wf === "velvetech-pov") {
+      hasPov = true;
       funnel.companies_pov += 1;
       if (j.pov_ok === true) funnel.companies_pov_ok += 1;
+      const jobs = Number(j.job_postings_researched_count);
+      if (Number.isFinite(jobs) && jobs > 0) povJobs += jobs;
     }
   }
+  funnel.companies_launched = funnel.companies_icp;
+  funnel.jobs_researched = hasPov ? povJobs : deepJobs;
   return funnel;
 }
 
@@ -5766,7 +5788,13 @@ function funnelLooksEmpty(funnel: Record<string, number>): boolean {
 
 /** Stub/legacy billing sometimes used stage names (icp_gate) instead of UI keys (companies_icp). */
 function funnelMissingListMetrics(funnel: Record<string, number>): boolean {
-  return funnel.companies_pov == null && funnel.companies_pov_ok == null && funnel.contacts_high_medium == null;
+  return (
+    (funnel.companies_pov == null && funnel.companies_pov_ok == null && funnel.contacts_high_medium == null) ||
+    funnel.companies_launched == null ||
+    funnel.companies_icp_excluded == null ||
+    funnel.jobs_researched == null ||
+    funnel.contacts_analyzed == null
+  );
 }
 
 function normalizeVelvetechFunnelAliases(funnel: Record<string, number>): Record<string, number> {

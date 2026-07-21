@@ -40,13 +40,20 @@ const STAGE_WORKFLOW_NAMES: Record<string, string> = {
   pov: "velvetech-pov",
 };
 
+/** Node name → [breakdown kind, credits]. P2 uses direct/fallback collect (not "employee collect"). */
 const CORESIGNAL_NODE_CREDITS: Record<string, [string, number]> = {
   "Coresignal employee search": ["agentic_search", 2],
-  "Coresignal employee collect": ["employee_collect", 2],
+  "Coresignal employee collect": ["employee_collect", 2], // legacy alias
+  "Coresignal direct collect": ["employee_collect", 2],
+  "Coresignal fallback collect": ["employee_collect", 2],
   "Coresignal company search": ["agentic_search", 2],
   "Coresignal company collect": ["company_collect", 2],
-  "Coresignal jobs search": ["jobs_search", 1],
+  // Jobs hit agentic_search/fast (not multi-source jobs @ 1 credit).
+  "Coresignal jobs search": ["agentic_search", 2],
 };
+
+/** Grace after parent stoppedAt so late child LLM/CS calls still count. */
+const CHILD_WINDOW_GRACE_MS = 30 * 60 * 1000;
 const PARALLEL_SEARCH_NODES = new Set(["Parallel ICP Gate Search", "Parallel Velvetech Search", "Exa ICP Gate Search", "Exa Velvetech Search"]);
 const PARALLEL_EXTRACT_NODES = new Set(["Parallel Velvetech Get Contents", "Exa Velvetech Get Contents"]);
 const PARALLEL_USD = { search: 5.0 / 1000.0, extract: 1.0 / 1000.0 };
@@ -93,8 +100,65 @@ async function n8nGetExecution(apiKey: string, eid: string, includeData = false)
 }
 
 async function n8nListExecutions(apiKey: string, workflowId: string, limit = 250): Promise<Json[]> {
-  const payload = await httpJson(`${N8N_BASE}/api/v1/executions?workflowId=${workflowId}&limit=${limit}`, n8nHeaders(apiKey));
-  return Array.isArray(payload.data) ? (payload.data as Json[]) : [];
+  const out: Json[] = [];
+  let cursor: string | undefined;
+  // Paginate — a single limit=250 silently drops older children on busy workflows.
+  while (out.length < 2000) {
+    const qs = new URLSearchParams({ workflowId, limit: String(Math.min(limit, 250)) });
+    if (cursor) qs.set("cursor", cursor);
+    const payload = await httpJson(`${N8N_BASE}/api/v1/executions?${qs}`, n8nHeaders(apiKey));
+    const batch = Array.isArray(payload.data) ? (payload.data as Json[]) : [];
+    out.push(...batch);
+    const next = payload.nextCursor ?? payload.next_cursor;
+    if (!batch.length || !next || typeof next !== "string") break;
+    cursor = next;
+  }
+  return out;
+}
+
+/** OpenRouter wallet snapshot (total_usage / remaining). Returns null if no key. */
+export async function snapshotOpenRouterCredits(): Promise<{
+  total_credits: number;
+  total_usage: number;
+  remaining: number;
+} | null> {
+  const key =
+    process.env.OPENROUTER_MANAGEMENT_API_KEY?.trim() || process.env.OPENROUTER_API_KEY?.trim() || "";
+  if (!key) return null;
+  try {
+    const data = await httpJson("https://openrouter.ai/api/v1/credits", {
+      Authorization: `Bearer ${key}`,
+    });
+    const row = (data.data as Json) ?? {};
+    const total_credits = Number(row.total_credits ?? 0) || 0;
+    const total_usage = Number(row.total_usage ?? 0) || 0;
+    return {
+      total_credits,
+      total_usage,
+      remaining: round(total_credits - total_usage, 4),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve dated model ids (gpt-5.6-luna-20260709) to a priced /models entry. */
+function resolveModelPricing(model: string, pricing: Pricing): Pricing[string] {
+  if (pricing[model]) return pricing[model];
+  const bare = model.includes("/") ? model.split("/").slice(1).join("/") : model;
+  if (pricing[bare]) return pricing[bare];
+  // Strip trailing -YYYYMMDD / -YYYYMMDDHH date suffixes
+  const noDate = model.replace(/-\d{8}(\d{2})?$/, "");
+  if (pricing[noDate]) return pricing[noDate];
+  const noDateBare = bare.replace(/-\d{8}(\d{2})?$/, "");
+  if (pricing[noDateBare]) return pricing[noDateBare];
+  // Prefix match: openai/gpt-5.6-luna-… → openai/gpt-5.6-luna
+  for (const id of Object.keys(pricing)) {
+    if (model.startsWith(id) || id.startsWith(noDate) || noDate.startsWith(id)) {
+      if (id.length >= 12) return pricing[id];
+    }
+  }
+  return { prompt: 0, completion: 0, input_cache_read: 0, input_cache_write: 0 };
 }
 
 async function n8nGetWorkflow(apiKey: string, workflowId: string): Promise<Json> {
@@ -192,7 +256,7 @@ export function estimateTokenCost(
   cachedTokens = 0,
   cacheWriteTokens = 0
 ): [number, number] {
-  const row = pricing[model] ?? { prompt: 0, completion: 0, input_cache_read: 0, input_cache_write: 0 };
+  const row = resolveModelPricing(model, pricing);
   const promptRate = row.prompt || 0;
   const completionRate = row.completion || 0;
   const cacheReadRate = row.input_cache_read || 0;
@@ -287,33 +351,36 @@ function extractLlmCalls(
   const calls: LineItem[] = [];
   for (const [node, runs] of Object.entries(runData(ex))) {
     if (!node.includes("OpenRouter")) continue;
-    const branch = ((runs?.[0]?.data as Json) ?? {}).ai_languageModel as Json[][] | undefined;
-    if (!branch || !branch[0]) continue;
     const model = nodeModels[node] || DEFAULT_OPENROUTER_NODE_MODELS[node] || "unknown";
-    for (const item of branch[0]) {
-      const tu = (((item as Json).json as Json) ?? {}).tokenUsage as Json | undefined;
-      if (!tu || !Object.keys(tu).length) continue;
-      const u = parseTokenUsage(tu);
-      const [usd, usdNaive] = estimateTokenCost(model, u.prompt, u.completion, pricing, u.cached_tokens, u.cache_write_tokens);
-      const rowKey = entity.contact_key || entity.company_key || childExecutionId;
-      calls.push({
-        stage,
-        node,
-        model,
-        entity_type: entity.contact_key ? "contact" : "company",
-        entity_key: rowKey,
-        company_key: entity.company_key,
-        contact_key: entity.contact_key,
-        child_execution_id: childExecutionId,
-        prompt_tokens: u.prompt,
-        cached_tokens: u.cached_tokens,
-        cache_write_tokens: u.cache_write_tokens,
-        completion_tokens: u.completion,
-        total_tokens: u.total,
-        cached_tokens_source: u.cached_tokens || u.cache_write_tokens ? "reported" : "none",
-        usd_estimated: usd,
-        usd_estimated_naive: usdNaive,
-      });
+    // Walk every run index (agentic tool-call iterations), not only runs[0].
+    for (const run of runs ?? []) {
+      const branch = ((run.data as Json) ?? {}).ai_languageModel as Json[][] | undefined;
+      if (!branch || !branch[0]) continue;
+      for (const item of branch[0]) {
+        const tu = (((item as Json).json as Json) ?? {}).tokenUsage as Json | undefined;
+        if (!tu || !Object.keys(tu).length) continue;
+        const u = parseTokenUsage(tu);
+        const [usd, usdNaive] = estimateTokenCost(model, u.prompt, u.completion, pricing, u.cached_tokens, u.cache_write_tokens);
+        const rowKey = entity.contact_key || entity.company_key || childExecutionId;
+        calls.push({
+          stage,
+          node,
+          model,
+          entity_type: entity.contact_key ? "contact" : "company",
+          entity_key: rowKey,
+          company_key: entity.company_key,
+          contact_key: entity.contact_key,
+          child_execution_id: childExecutionId,
+          prompt_tokens: u.prompt,
+          cached_tokens: u.cached_tokens,
+          cache_write_tokens: u.cache_write_tokens,
+          completion_tokens: u.completion,
+          total_tokens: u.total,
+          cached_tokens_source: u.cached_tokens || u.cache_write_tokens ? "reported" : "none",
+          usd_estimated: usd,
+          usd_estimated_naive: usdNaive,
+        });
+      }
     }
   }
   return calls;
@@ -439,17 +506,38 @@ function sumOpenRouterTokens(ex: Json): { calls: number; total: number; payment_
   let total = 0;
   for (const [node, runs] of Object.entries(rd)) {
     if (!node.includes("OpenRouter")) continue;
-    const branch = ((runs?.[0]?.data as Json) ?? {}).ai_languageModel as Json[][] | undefined;
-    if (!branch || !branch[0]) continue;
-    for (const item of branch[0]) {
-      const tu = (((item as Json).json as Json) ?? {}).tokenUsage as Json | undefined;
-      if (!tu || !Object.keys(tu).length) continue;
-      const u = parseTokenUsage(tu);
-      calls += 1;
-      total += u.total;
+    for (const run of runs ?? []) {
+      const branch = ((run.data as Json) ?? {}).ai_languageModel as Json[][] | undefined;
+      if (!branch || !branch[0]) continue;
+      for (const item of branch[0]) {
+        const tu = (((item as Json).json as Json) ?? {}).tokenUsage as Json | undefined;
+        if (!tu || !Object.keys(tu).length) continue;
+        const u = parseTokenUsage(tu);
+        calls += 1;
+        total += u.total;
+      }
     }
   }
   return { calls, total, payment_errors: paymentErrors };
+}
+
+/** True when the HTTP node actually hit api.coresignal.com (not invalid.local/skip). */
+function coresignalNodeBillable(node: string, runs: Json[]): boolean {
+  if (!CORESIGNAL_NODE_CREDITS[node] || !nodeSucceeded(runs)) return false;
+  const j = firstMainJson(runs);
+  const blob = JSON.stringify(j).toLowerCase();
+  if (blob.includes("invalid.local") || blob.includes("/skip")) return false;
+  // Prefer evidence of a real Coresignal host or a successful multi-source/agentic payload.
+  if (blob.includes("api.coresignal.com")) return true;
+  if (blob.includes("coresignal")) return true;
+  // Search/collect nodes that returned empty still bill on 200 — count if no skip URL in request params.
+  const reqUrl = String(
+    j.url ?? j.requestUrl ?? ((j.request as Json) ?? {}).url ?? ""
+  ).toLowerCase();
+  if (reqUrl.includes("invalid.local") || reqUrl.includes("/skip")) return false;
+  if (reqUrl.includes("api.coresignal.com")) return true;
+  // Node succeeded and is a known CS node without skip markers.
+  return !reqUrl || reqUrl.startsWith("http");
 }
 
 function countBillableNodes(ex: Json): { coresignal: Record<string, number>; parallel: { search_calls: number; extract_calls: number }; prospeo_pages: number } {
@@ -457,7 +545,7 @@ function countBillableNodes(ex: Json): { coresignal: Record<string, number>; par
   const parallel = { search_calls: 0, extract_calls: 0 };
   let prospeoPages = 0;
   for (const [node, runs] of Object.entries(runData(ex))) {
-    if (CORESIGNAL_NODE_CREDITS[node] && nodeSucceeded(runs)) {
+    if (coresignalNodeBillable(node, runs)) {
       const [kind, credits] = CORESIGNAL_NODE_CREDITS[node];
       coresignal[kind] = (coresignal[kind] ?? 0) + 1;
       coresignal._credits = (coresignal._credits ?? 0) + credits;
@@ -485,8 +573,12 @@ export interface ChildUsage {
 
 async function aggregateChildUsage(apiKey: string, parent: Json, runId: string): Promise<ChildUsage> {
   const start = String(parent.startedAt ?? "");
-  const stop = String(parent.stoppedAt ?? parent.startedAt ?? "");
-  const inWindow = (ts: string) => start <= ts && ts <= stop;
+  const stopRaw = String(parent.stoppedAt ?? parent.startedAt ?? "");
+  const stopMs = Date.parse(stopRaw);
+  const stopWithGrace = Number.isFinite(stopMs)
+    ? new Date(stopMs + CHILD_WINDOW_GRACE_MS).toISOString()
+    : stopRaw;
+  const inWindow = (ts: string) => Boolean(ts) && start <= ts && ts <= stopWithGrace;
 
   const tokensByStage: Record<string, number> = {};
   let llmCalls = 0;
@@ -559,16 +651,37 @@ export async function analyzeParentUsage(executionId: string, runId: string): Pr
 
 async function fetchFunnel(client: SupabaseClient, runId: string): Promise<{ funnel: Record<string, number>; warnings: string[] }> {
   const funnel: Record<string, number> = {
+    companies_launched: 0,
     companies_icp: 0,
+    companies_icp_passed: 0,
+    companies_icp_excluded: 0,
     companies_discovery: 0,
     contacts_enriched: 0,
     contacts_fit_scored: 0,
+    contacts_analyzed: 0,
     contacts_high_medium: 0,
+    contacts_eligible: 0,
     companies_deep: 0,
     companies_pov: 0,
     companies_pov_ok: 0,
+    jobs_researched: 0,
   };
   const warnings: string[] = [];
+
+  // Prefer launch requested_count when run_id is a launch uuid.
+  try {
+    const { data: launch } = await client
+      .from("n8n_launch_runs")
+      .select("requested_count")
+      .eq("id", runId)
+      .maybeSingle();
+    if (launch && typeof (launch as Json).requested_count === "number") {
+      funnel.companies_launched = Number((launch as Json).requested_count) || 0;
+    }
+  } catch {
+    /* column/table optional */
+  }
+
   const { data, error } = await client
     .from(N8N_WORKFLOW_RESULTS_TABLE)
     .select("workflow_name,result")
@@ -581,17 +694,43 @@ async function fetchFunnel(client: SupabaseClient, runId: string): Promise<{ fun
   for (const row of (data ?? []) as Json[]) {
     const j = (row.result as Json) ?? {};
     const wf = String(j.workflow_name ?? row.workflow_name ?? "");
-    if (wf === STAGE_WORKFLOW_NAMES.icp) funnel.companies_icp += 1;
-    else if (wf === STAGE_WORKFLOW_NAMES.discovery) funnel.companies_discovery += 1;
+    if (wf === STAGE_WORKFLOW_NAMES.icp) {
+      funnel.companies_icp += 1;
+      if (j.icp_passed === true) funnel.companies_icp_passed += 1;
+      else funnel.companies_icp_excluded += 1;
+    } else if (wf === STAGE_WORKFLOW_NAMES.discovery) funnel.companies_discovery += 1;
     else if (wf === STAGE_WORKFLOW_NAMES.enrichment) funnel.contacts_enriched += 1;
     else if (wf === STAGE_WORKFLOW_NAMES.fit) {
       funnel.contacts_fit_scored += 1;
-      if (["high", "medium"].includes(String(j.fit ?? ""))) funnel.contacts_high_medium += 1;
-    } else if (wf === STAGE_WORKFLOW_NAMES.deep) funnel.companies_deep += 1;
-    else if (wf === STAGE_WORKFLOW_NAMES.pov) {
+      funnel.contacts_analyzed += 1;
+      if (["high", "medium"].includes(String(j.fit ?? ""))) {
+        funnel.contacts_high_medium += 1;
+        funnel.contacts_eligible += 1;
+      }
+    } else if (wf === STAGE_WORKFLOW_NAMES.deep) {
+      funnel.companies_deep += 1;
+      const jobs = Number(j.job_postings_researched_count);
+      if (Number.isFinite(jobs) && jobs > 0) funnel.jobs_researched += jobs;
+    } else if (wf === STAGE_WORKFLOW_NAMES.pov) {
       funnel.companies_pov += 1;
       if (j.pov_ok === true) funnel.companies_pov_ok += 1;
+      const jobs = Number(j.job_postings_researched_count);
+      if (Number.isFinite(jobs) && jobs > 0) funnel.jobs_researched += jobs;
     }
+  }
+  if (!funnel.companies_launched) funnel.companies_launched = funnel.companies_icp;
+  // Prefer POV job sums when both deep+pov counted — deep rows often duplicate POV.
+  // If both stages present, jobs were double-counted; recount from POV only when pov > 0.
+  if (funnel.companies_pov > 0 && funnel.companies_deep > 0) {
+    let povJobs = 0;
+    for (const row of (data ?? []) as Json[]) {
+      const j = (row.result as Json) ?? {};
+      const wf = String(j.workflow_name ?? row.workflow_name ?? "");
+      if (wf !== STAGE_WORKFLOW_NAMES.pov) continue;
+      const jobs = Number(j.job_postings_researched_count);
+      if (Number.isFinite(jobs) && jobs > 0) povJobs += jobs;
+    }
+    funnel.jobs_researched = povJobs;
   }
   return { funnel, warnings };
 }
@@ -619,6 +758,8 @@ export interface BuildBillingArgs {
   fallbackStatus?: string | null;
   /** Pre-fetched funnel (e.g. from a local/MCP query) to use instead of querying the client. */
   funnel?: Record<string, number>;
+  /** OpenRouter total_usage at launch start (credits delta). */
+  openrouterUsageBefore?: number | null;
 }
 
 export interface BuiltBilling {
@@ -671,11 +812,45 @@ export async function buildBillingResult(args: BuildBillingArgs): Promise<BuiltB
   const usage = await aggregateChildUsage(apiKey, parent, runId);
   if (usage.payment_errors) warnings.push("openrouter_payment_errors");
   if (usage.cross_run_excluded) warnings.push(`cross_run_child_execs_excluded:${usage.cross_run_excluded}`);
-  warnings.push("cost_llm_token_estimated"); // app uses token-estimate (no balance delta)
 
   const llm = usage.llm_breakdown as { usd_estimated_total?: number };
   const parallelUsd = Number(usage.parallel.usd_estimated) || 0;
-  const costTotal = round((Number(llm.usd_estimated_total) || 0) + parallelUsd, 4);
+  const tokenEst = Number(llm.usd_estimated_total) || 0;
+
+  let openrouterSpent: number | null = null;
+  let usageBefore = args.openrouterUsageBefore;
+  if (usageBefore == null && args.client) {
+    try {
+      const { data: launch } = await args.client
+        .from("n8n_launch_runs")
+        .select("billing_meta")
+        .eq("id", runId)
+        .maybeSingle();
+      const meta = (launch as Json | null)?.billing_meta;
+      if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+        const v = Number((meta as Json).openrouter_total_usage_before);
+        if (Number.isFinite(v)) usageBefore = v;
+      }
+    } catch {
+      /* billing_meta may not exist yet */
+    }
+  }
+  if (usageBefore != null && Number.isFinite(usageBefore)) {
+    const after = await snapshotOpenRouterCredits();
+    if (after) {
+      openrouterSpent = round(Math.max(0, after.total_usage - usageBefore), 4);
+    } else {
+      warnings.push("openrouter_after_snapshot_failed");
+    }
+  }
+
+  let costTotal: number;
+  if (openrouterSpent != null) {
+    costTotal = round(openrouterSpent + parallelUsd, 4);
+  } else {
+    warnings.push("cost_llm_token_estimated");
+    costTotal = round(tokenEst + parallelUsd, 4);
+  }
 
   const result: Json = {
     workflow_name: BILLING_WORKFLOW_NAME,
@@ -685,7 +860,12 @@ export async function buildBillingResult(args: BuildBillingArgs): Promise<BuiltB
     status: String(parent.status ?? args.fallbackStatus ?? "unknown"),
     duration_sec: durationFromParent(parent),
     billing: {
-      openrouter: { llm_calls: usage.llm_calls, payment_errors: usage.payment_errors, usd_estimated_from_tokens: llm.usd_estimated_total ?? null },
+      openrouter: {
+        llm_calls: usage.llm_calls,
+        payment_errors: usage.payment_errors,
+        usd_estimated_from_tokens: tokenEst || null,
+        usd_spent: openrouterSpent,
+      },
       prospeo: { search_pages: usage.prospeo.search_pages },
       coresignal: usage.coresignal,
       parallel: usage.parallel,

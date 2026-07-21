@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS public.n8n_launch_runs (
   status text NOT NULL DEFAULT 'running', -- running | success | partial | failed
   error_message text,
   created_at timestamptz NOT NULL DEFAULT now(),
-  finished_at timestamptz
+  finished_at timestamptz,
+  billing_meta jsonb NOT NULL DEFAULT '{}'::jsonb
 );
 
 CREATE INDEX IF NOT EXISTS idx_n8n_launch_runs_project
@@ -32,3 +33,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON public.n8n_launch_runs TO service_role;
 -- Retrofit for tables created before company_uuids existed (applied 2026-07-16):
 -- ALTER TABLE public.n8n_launch_runs
 --   ADD COLUMN IF NOT EXISTS company_uuids jsonb NOT NULL DEFAULT '[]'::jsonb;
+
+-- OpenRouter usage snapshot at launch (for cost_usd_total = credits delta):
+ALTER TABLE public.n8n_launch_runs
+  ADD COLUMN IF NOT EXISTS billing_meta jsonb NOT NULL DEFAULT '{}'::jsonb;

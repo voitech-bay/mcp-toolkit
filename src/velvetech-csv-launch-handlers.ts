@@ -11,6 +11,7 @@ import {
   updateProjectContactRecord,
 } from "./services/supabase.js";
 import { triggerWorkflowPayload, VELVETECH_PROJECT_ID } from "./services/n8n-trigger.js";
+import { snapshotOpenRouterCredits } from "./services/velvetech-billing.js";
 
 const LAUNCH_RUNS_TABLE = "n8n_launch_runs";
 const WORKFLOW_KEY = "velvetech_research";
@@ -396,6 +397,20 @@ export async function handleVelvetechResearchCsvLaunch(req: IncomingMessage, res
     return sendJson(res, 500, { error: inserted.error?.message ?? "Failed to create launch record" });
   }
   const launchId = String((inserted.data as Json).id);
+
+  const orSnap = await snapshotOpenRouterCredits();
+  if (orSnap) {
+    const { error: metaErr } = await client
+      .from(LAUNCH_RUNS_TABLE)
+      .update({
+        billing_meta: {
+          openrouter_total_usage_before: orSnap.total_usage,
+          openrouter_snapshotted_at: new Date().toISOString(),
+        },
+      })
+      .eq("id", launchId);
+    if (metaErr) console.warn("billing_meta stamp failed:", metaErr.message);
+  }
 
   const payloadRows = imported.rows.map((r) => ({
     lead_uuid: r.lead_uuid,

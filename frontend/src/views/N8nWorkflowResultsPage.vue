@@ -239,23 +239,35 @@ type ExecutionDetail = {
 };
 
 const FUNNEL_LABELS: Record<string, string> = {
-  companies_icp: "ICP passed",
+  companies_launched: "Companies launched",
+  companies_icp: "ICP screened",
+  companies_icp_passed: "ICP passed",
+  companies_icp_excluded: "ICP excluded",
   companies_discovery: "Contact discovery",
   contacts_enriched: "Contacts enriched",
   contacts_fit_scored: "Fit scored",
-  contacts_high_medium: "High / medium fit",
+  contacts_analyzed: "Contacts analyzed",
+  contacts_high_medium: "Eligible contacts",
+  contacts_eligible: "Eligible contacts",
   companies_deep: "Deep research",
   companies_pov: "POV generated",
   companies_pov_ok: "POV OK",
+  jobs_researched: "Jobs analyzed",
 };
 
 const FUNNEL_ORDER = [
+  "companies_launched",
   "companies_icp",
+  "companies_icp_passed",
+  "companies_icp_excluded",
   "companies_discovery",
   "contacts_enriched",
+  "contacts_analyzed",
+  "contacts_eligible",
   "contacts_fit_scored",
   "contacts_high_medium",
   "companies_deep",
+  "jobs_researched",
   "companies_pov",
   "companies_pov_ok",
 ];
@@ -765,10 +777,11 @@ const COMPANY_RESEARCH_COLUMNS = [
 
 const CONTACT_RESEARCH_COLUMNS = [
   "title",
+  "tenure_display",
   "persona",
   "fit",
-  "fit_score",
-  "company_key",
+  "company_name",
+  "linkedin_experience",
 ] as const;
 
 const COMPANY_RESEARCH_SKIP = new Set([
@@ -804,7 +817,70 @@ const CONTACT_RESEARCH_SKIP = new Set([
   "company_id",
   "company_logo_url",
   "contact",
+  "enrichment",
+  "csv_hints",
+  "fit_score",
+  "company_key",
 ]);
+
+function contactEnrichment(row: Record<string, unknown>): Record<string, unknown> {
+  const e = row.enrichment;
+  return e != null && typeof e === "object" && !Array.isArray(e) ? (e as Record<string, unknown>) : {};
+}
+
+function contactNested(row: Record<string, unknown>): Record<string, unknown> {
+  const c = row.contact;
+  return c != null && typeof c === "object" && !Array.isArray(c) ? (c as Record<string, unknown>) : {};
+}
+
+function contactTitle(row: Record<string, unknown>): string {
+  const en = contactEnrichment(row);
+  const ct = contactNested(row);
+  for (const v of [en.current_title, row.title, ct.title, ct.job_title, en.headline]) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+}
+
+function formatTenureMonths(months: unknown): string {
+  const n = typeof months === "number" ? months : Number(months);
+  if (!Number.isFinite(n) || n < 0) return "";
+  const y = Math.floor(n / 12);
+  const m = Math.round(n % 12);
+  if (y <= 0) return `${m}m`;
+  if (m <= 0) return `${y}y`;
+  return `${y}y ${m}m`;
+}
+
+function contactTenureDisplay(row: Record<string, unknown>): string {
+  return formatTenureMonths(contactEnrichment(row).tenure_months);
+}
+
+function contactLinkedinExperiencePreview(row: Record<string, unknown>): string {
+  const en = contactEnrichment(row);
+  const summary = typeof en.summary === "string" ? en.summary.trim() : "";
+  if (summary) return summary.slice(0, 180) + (summary.length > 180 ? "…" : "");
+  const exp = Array.isArray(en.experience) ? en.experience : [];
+  for (const item of exp) {
+    if (!item || typeof item !== "object") continue;
+    const e = item as Record<string, unknown>;
+    const desc = typeof e.description === "string" ? e.description.trim() : "";
+    if (desc) return desc.slice(0, 180) + (desc.length > 180 ? "…" : "");
+    const title = typeof e.title === "string" ? e.title.trim() : "";
+    const company = typeof e.company === "string" ? e.company.trim() : "";
+    if (title || company) return [title, company].filter(Boolean).join(" @ ");
+  }
+  return "";
+}
+
+function contactLinkedinUrl(row: Record<string, unknown>): string {
+  const en = contactEnrichment(row);
+  const ct = contactNested(row);
+  for (const v of [en.linkedin_url, ct.linkedin_url, row.linkedin_url]) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+}
 
 function pickResearchFieldKeys(
   preferred: readonly string[],
@@ -839,7 +915,7 @@ function buildEntityColumns(
   const curated =
     entityType === "company"
       ? pickResearchFieldKeys(COMPANY_RESEARCH_COLUMNS, fieldKeys, COMPANY_RESEARCH_SKIP)
-      : pickResearchFieldKeys(CONTACT_RESEARCH_COLUMNS, fieldKeys, CONTACT_RESEARCH_SKIP);
+      : [...CONTACT_RESEARCH_COLUMNS];
 
   const cols: DataTableColumns<Record<string, unknown>> = [
     {
@@ -856,6 +932,88 @@ function buildEntityColumns(
       },
     },
   ];
+
+  if (entityType === "contact") {
+    const contactColDefs: Array<{ title: string; key: string; minWidth: number; render: (row: Record<string, unknown>) => unknown }> = [
+      {
+        title: "Title",
+        key: "title",
+        minWidth: 140,
+        render: (row) => contactTitle(row) || "—",
+      },
+      {
+        title: "In role",
+        key: "tenure_display",
+        minWidth: 90,
+        render: (row) => contactTenureDisplay(row) || "—",
+      },
+      {
+        title: "Persona",
+        key: "persona",
+        minWidth: 90,
+        render: (row) => formatCellValue(row.persona),
+      },
+      {
+        title: "Fit",
+        key: "fit",
+        minWidth: 90,
+        render: (row) => formatCellValue(row.fit),
+      },
+      {
+        title: "Company",
+        key: "company_name",
+        minWidth: 140,
+        render(row) {
+          const name = String(row.company_name || row.company_key || "").trim() || "—";
+          if (row.company_id) {
+            return h(
+              RouterLink,
+              {
+                to: `/company/${String(row.company_id)}`,
+                style: "color:#2080f0;text-decoration:none;font-size:0.85rem",
+              },
+              { default: () => name }
+            );
+          }
+          return name;
+        },
+      },
+      {
+        title: "LinkedIn / experience",
+        key: "linkedin_experience",
+        minWidth: 220,
+        render(row) {
+          const preview = contactLinkedinExperiencePreview(row);
+          const url = contactLinkedinUrl(row);
+          if (!preview && !url) return "—";
+          if (url) {
+            return h(
+              "a",
+              {
+                href: url.startsWith("http") ? url : `https://www.linkedin.com/in/${url}`,
+                target: "_blank",
+                rel: "noopener noreferrer",
+                style: "color:#2080f0;text-decoration:none;font-size:0.82rem",
+                title: preview || url,
+              },
+              preview || "Open profile"
+            );
+          }
+          return preview;
+        },
+      },
+    ];
+    for (const def of contactColDefs) {
+      cols.push({
+        title: def.title,
+        key: def.key,
+        minWidth: def.minWidth,
+        ellipsis: { tooltip: true },
+        render: def.render,
+      });
+    }
+    return cols;
+  }
 
   for (const key of curated) {
     cols.push({
@@ -899,6 +1057,7 @@ function buildEntityColumns(
   return cols;
 }
 
+
 function openEntityDetail(row: Record<string, unknown>, label: string) {
   drawerTitle.value = label;
   drawerJson.value = JSON.stringify(row, null, 2);
@@ -931,27 +1090,67 @@ const execColumns: DataTableColumns<ExecutionSummary> = [
   {
     title: "Cost",
     key: "cost_usd",
-    width: 90,
+    width: 110,
     render(row) {
-      return formatUsd(row.cost_usd);
+      const usd = formatUsd(row.cost_usd);
+      const est = (row.warnings ?? []).some((w) => w.includes("cost_llm_token_estimated"));
+      const spent =
+        row.billing &&
+        typeof row.billing === "object" &&
+        (row.billing as Record<string, unknown>).openrouter &&
+        typeof (row.billing as Record<string, unknown>).openrouter === "object"
+          ? ((row.billing as Record<string, unknown>).openrouter as Record<string, unknown>).usd_spent
+          : null;
+      if (usd === "—" || row.cost_usd == null) return "—";
+      if (spent != null && Number.isFinite(Number(spent))) return usd;
+      if (est) return `${usd} est.`;
+      return usd;
     },
   },
   {
-    title: "POV ok",
-    key: "pov",
-    width: 90,
+    title: "Companies",
+    key: "companies",
+    width: 110,
     render(row) {
-      const ok = row.funnel?.companies_pov_ok ?? 0;
-      const total = row.funnel?.companies_pov ?? 0;
-      return total ? `${ok}/${total}` : "—";
+      const launched = row.funnel?.companies_launched ?? row.funnel?.companies_icp ?? 0;
+      const povOk = row.funnel?.companies_pov_ok ?? 0;
+      if (!launched && !povOk) return "—";
+      return `${launched} → ${povOk}`;
     },
   },
   {
-    title: "Fit HM",
-    key: "hm",
+    title: "ICP excluded",
+    key: "icp_excluded",
+    width: 110,
+    render(row) {
+      const v = row.funnel?.companies_icp_excluded;
+      return v != null ? String(v) : "—";
+    },
+  },
+  {
+    title: "Eligible",
+    key: "eligible",
     width: 90,
     render(row) {
-      const v = row.funnel?.contacts_high_medium;
+      const v = row.funnel?.contacts_eligible ?? row.funnel?.contacts_high_medium;
+      return v != null ? String(v) : "—";
+    },
+  },
+  {
+    title: "Jobs",
+    key: "jobs",
+    width: 80,
+    render(row) {
+      const v = row.funnel?.jobs_researched;
+      return v != null ? String(v) : "—";
+    },
+  },
+  {
+    title: "Contacts",
+    key: "contacts",
+    width: 90,
+    render(row) {
+      const v = row.funnel?.contacts_analyzed ?? row.funnel?.contacts_fit_scored;
       return v != null ? String(v) : "—";
     },
   },
@@ -1345,23 +1544,150 @@ const columns = computed<DataTableColumns<N8nWorkflowResultRow>>(() => {
   return [...head, ...agentCols, ...tail];
 });
 
-const companyDetailColumns = computed(() =>
-  buildEntityColumns(
+const companyDetailColumns = computed(() => {
+  const base = buildEntityColumns(
     detail.value?.company_field_keys ?? [],
     "company",
     (row) => openEntityDetail(row, velvetechCompanyLabelFromRow(row)),
     "expand"
-  )
-);
+  );
+  const expandCol: DataTableColumns<Record<string, unknown>>[number] = {
+    type: "expand",
+    expandable: () => true,
+    renderExpand(row) {
+      return renderCompanyExpand(row);
+    },
+  };
+  return [expandCol, ...base];
+});
 
-const contactDetailColumns = computed(() =>
-  buildEntityColumns(
+const contactDetailColumns = computed(() => {
+  const base = buildEntityColumns(
     detail.value?.contact_field_keys ?? [],
     "contact",
     (row) => openEntityDetail(row, velvetechContactLabelFromRow(row)),
     "expand"
-  )
-);
+  );
+  const expandCol: DataTableColumns<Record<string, unknown>>[number] = {
+    type: "expand",
+    expandable: () => true,
+    renderExpand(row) {
+      return renderContactExpand(row);
+    },
+  };
+  return [expandCol, ...base];
+});
+
+const companyExpandedKeys = computed({
+  get: () => (expandedCompanyKey.value ? [expandedCompanyKey.value] : []),
+  set: (keys: Array<string | number>) => {
+    expandedCompanyKey.value = keys.length ? String(keys[keys.length - 1]) : null;
+  },
+});
+
+const contactExpandedKeys = computed({
+  get: () => (expandedContactKey.value ? [expandedContactKey.value] : []),
+  set: (keys: Array<string | number>) => {
+    expandedContactKey.value = keys.length ? String(keys[keys.length - 1]) : null;
+  },
+});
+
+function renderCompanyExpand(row: Record<string, unknown>) {
+  const dossier = dossierFromMergedCompanyRow(row);
+  return h("div", { class: "inline-dossier" }, [
+    h("div", { class: "inline-dossier-toolbar" }, [
+      h("div", { class: "inline-dossier-heading" }, [
+        h("span", { class: "inline-dossier-name" }, velvetechCompanyLabelFromRow(row)),
+        row.company_key
+          ? h("span", { class: "inline-dossier-key" }, formatCellValue(row.company_key))
+          : null,
+      ]),
+      row.company_id
+        ? h("div", { class: "inline-dossier-actions" }, [
+            h(
+              RouterLink,
+              { to: `/company/${row.company_id}`, class: "entity-card-link" },
+              { default: () => "View full company card →" }
+            ),
+            h(
+              RouterLink,
+              {
+                to: {
+                  path: "/sequence-studio",
+                  query: {
+                    companyId: String(row.company_id),
+                    eligible: "1",
+                    ...(projectStore.selectedProjectId
+                      ? { projectId: projectStore.selectedProjectId }
+                      : {}),
+                  },
+                },
+                class: "entity-card-link",
+              },
+              { default: () => "Go to Sequence Studio →" }
+            ),
+          ])
+        : h("span", { class: "muted" }, "No CRM company linked yet"),
+    ]),
+    dossier
+      ? h(CompanyDossier, { dossier })
+      : h(NEmpty, { description: "No POV fields on this company row yet", style: "margin: 12px 0" }),
+  ]);
+}
+
+function renderContactExpand(row: Record<string, unknown>) {
+  const en = contactEnrichment(row);
+  const exp = Array.isArray(en.experience) ? en.experience : [];
+  const experienceNodes = exp.length
+    ? h(
+        "div",
+        { class: "contact-experience-list" },
+        exp.map((item) => {
+          const e = (item && typeof item === "object" ? item : {}) as Record<string, unknown>;
+          const title = String(e.title ?? "").trim();
+          const company = String(e.company ?? "").trim();
+          const dates = [e.date_from, e.date_to].filter(Boolean).join(" → ");
+          const desc = String(e.description ?? "").trim();
+          return h("div", { class: "contact-experience-item" }, [
+            h("div", { class: "contact-experience-head" }, [
+              h("strong", {}, [title, company].filter(Boolean).join(" @ ") || "Role"),
+              dates ? h("span", { class: "muted" }, dates) : null,
+            ]),
+            desc ? h("p", { class: "contact-experience-desc" }, desc) : null,
+          ]);
+        })
+      )
+    : null;
+  const summary = typeof en.summary === "string" ? en.summary.trim() : "";
+  const keys = ["persona", "fit", "role_type", "company_key", "contact_key"].filter((k) => row[k] != null);
+  return h("div", { class: "inline-contact-detail" }, [
+    h("div", { class: "inline-dossier-toolbar" }, [
+      h("div", { class: "inline-dossier-heading" }, [
+        h("span", { class: "inline-dossier-name" }, velvetechContactLabelFromRow(row)),
+        contactTitle(row) ? h("span", { class: "inline-dossier-key" }, contactTitle(row)) : null,
+      ]),
+      row.contact_id
+        ? h(
+            RouterLink,
+            { to: `/contact/${row.contact_id}`, class: "entity-card-link" },
+            { default: () => "View full contact card →" }
+          )
+        : null,
+    ]),
+    h(
+      "div",
+      { class: "funnel-grid" },
+      keys.map((key) =>
+        h("div", { class: "funnel-chip" }, [
+          h("span", { class: "funnel-label" }, humanizeFieldKey(key)),
+          h("span", { class: "funnel-value" }, formatCellValue(row[key])),
+        ])
+      )
+    ),
+    summary ? h("p", { class: "contact-summary" }, summary) : null,
+    experienceNodes,
+  ]);
+}
 
 const detailFunnelEntries = computed(() => {
   const funnel = detail.value?.summary?.funnel ?? {};
@@ -1571,99 +1897,28 @@ const detailVendorMetrics = computed(() => {
           <template v-if="detail?.companies?.length">
             <h4 class="section-title">Companies ({{ detail.companies.length }})</h4>
             <NDataTable
+              v-model:expanded-row-keys="companyExpandedKeys"
               :columns="companyDetailColumns"
               :data="detail.companies"
               :loading="detailLoading"
               size="small"
               :scroll-x="Math.min(1400, 320 + companyDetailColumns.length * 130)"
-              :max-height="360"
+              :max-height="520"
               :row-key="(row) => entityRowKey('company', row)"
             />
-            <div v-if="expandedCompanyRow" class="inline-dossier">
-              <div class="inline-dossier-toolbar">
-                <div class="inline-dossier-heading">
-                  <span class="inline-dossier-name">{{
-                    velvetechCompanyLabelFromRow(expandedCompanyRow)
-                  }}</span>
-                  <span v-if="expandedCompanyRow.company_key" class="inline-dossier-key">{{
-                    formatCellValue(expandedCompanyRow.company_key)
-                  }}</span>
-                </div>
-                <div v-if="expandedCompanyRow.company_id" class="inline-dossier-actions">
-                  <RouterLink
-                    :to="`/company/${expandedCompanyRow.company_id}`"
-                    class="entity-card-link"
-                  >
-                    View full company card →
-                  </RouterLink>
-                  <RouterLink
-                    :to="{
-                      path: '/sequence-studio',
-                      query: {
-                        companyId: String(expandedCompanyRow.company_id),
-                        eligible: '1',
-                        ...(projectStore.selectedProjectId
-                          ? { projectId: projectStore.selectedProjectId }
-                          : {}),
-                      },
-                    }"
-                    class="entity-card-link"
-                  >
-                    Go to Sequence Studio →
-                  </RouterLink>
-                </div>
-                <span v-else class="muted">No CRM company linked yet</span>
-              </div>
-              <CompanyDossier
-                v-if="expandedCompanyDossier"
-                :dossier="expandedCompanyDossier"
-              />
-              <NEmpty
-                v-else
-                description="No POV fields on this company row yet"
-                style="margin: 12px 0"
-              />
-            </div>
           </template>
           <template v-if="detail?.contacts?.length">
             <h4 class="section-title">Contacts ({{ detail.contacts.length }})</h4>
             <NDataTable
+              v-model:expanded-row-keys="contactExpandedKeys"
               :columns="contactDetailColumns"
               :data="detail.contacts"
               :loading="detailLoading"
               size="small"
-              :scroll-x="Math.min(1200, 320 + contactDetailColumns.length * 130)"
-              :max-height="480"
+              :scroll-x="Math.min(1400, 320 + contactDetailColumns.length * 130)"
+              :max-height="560"
               :row-key="(row) => entityRowKey('contact', row)"
             />
-            <div v-if="expandedContactRow" class="inline-contact-detail">
-              <div class="inline-dossier-toolbar">
-                <div class="inline-dossier-heading">
-                  <span class="inline-dossier-name">{{
-                    velvetechContactLabelFromRow(expandedContactRow)
-                  }}</span>
-                </div>
-                <RouterLink
-                  v-if="expandedContactRow.contact_id"
-                  :to="`/contact/${expandedContactRow.contact_id}`"
-                  class="entity-card-link"
-                >
-                  View full contact card →
-                </RouterLink>
-              </div>
-              <div class="funnel-grid">
-                <div
-                  v-for="key in ['fit', 'fit_score', 'persona', 'title', 'company_key', 'contact_key']"
-                  :key="key"
-                  class="funnel-cell"
-                >
-                  <div class="funnel-label">{{ humanizeFieldKey(key) }}</div>
-                  <div class="funnel-value metric-value">
-                    {{ formatCellValue(expandedContactRow[key]) }}
-                  </div>
-                </div>
-              </div>
-            </div>
           </template>
           <NAlert v-else-if="detail && !detailLoading && !detail.contacts?.length" type="info">
             No contact rows found for this run.
@@ -2022,6 +2277,35 @@ const detailVendorMetrics = computed(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 12px 18px;
+}
+.contact-summary {
+  margin: 8px 0;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  opacity: 0.9;
+}
+.contact-experience-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.contact-experience-item {
+  padding: 8px 10px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  border-radius: 6px;
+}
+.contact-experience-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.85rem;
+}
+.contact-experience-desc {
+  margin: 6px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  opacity: 0.85;
 }
 .entity-card-link {
   color: #38bdf8;

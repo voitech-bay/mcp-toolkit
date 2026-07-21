@@ -27,7 +27,7 @@ import {
 } from "./services/n8n-trigger.js";
 import { getAuthSession } from "./services/auth.js";
 import { fetchAllSenders, sendLinkedInMessage } from "./services/source-api.js";
-import { computeAndEmitBilling, findResearchParentsMissingBilling } from "./services/velvetech-billing.js";
+import { computeAndEmitBilling, findResearchParentsMissingBilling, snapshotOpenRouterCredits } from "./services/velvetech-billing.js";
 import { checkExistingResearch } from "./velvetech-csv-launch-handlers.js";
 
 const LAUNCH_RUNS_TABLE = "n8n_launch_runs";
@@ -35,6 +35,20 @@ const LAUNCH_RUNS_TABLE = "n8n_launch_runs";
 const SETTLE_MS = 90_000;
 
 type Json = Record<string, unknown>;
+
+/** Best-effort: stamp OpenRouter total_usage on the launch so settle can compute wallet delta. */
+async function stampOpenRouterUsageBefore(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  launchId: string
+): Promise<void> {
+  const snap = await snapshotOpenRouterCredits();
+  if (!snap) return;
+  const { error } = await client
+    .from(LAUNCH_RUNS_TABLE)
+    .update({ billing_meta: { openrouter_total_usage_before: snap.total_usage, openrouter_snapshotted_at: new Date().toISOString() } })
+    .eq("id", launchId);
+  if (error) console.warn("billing_meta stamp failed:", error.message);
+}
 
 function sendJson(res: ServerResponse, status: number, obj: unknown): void {
   res.setHeader("Content-Type", "application/json");
@@ -615,6 +629,7 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
         .eq("id", launchId);
       return sendJson(res, built.status, { error: built.error, launchId });
     }
+    await stampOpenRouterUsageBefore(client, launchId);
     trig = await triggerWorkflowPayload(workflowKey, built.payload);
   } else if (wf.adapter === "velvetech_messaging") {
     const built = await buildVelvetechMessagingPayloads(client, { projectId, launchId, leadUuids });
@@ -1077,12 +1092,18 @@ export async function handleN8nLaunchComplete(
     const finishedAt = str(updated as Json, "finished_at");
     const durationSec =
       createdAt && finishedAt ? Math.max(0, Math.round((Date.parse(finishedAt) - Date.parse(createdAt)) / 1000)) : null;
+    const meta = (updated as Json).billing_meta;
+    const usageBefore =
+      meta && typeof meta === "object" && !Array.isArray(meta)
+        ? Number((meta as Json).openrouter_total_usage_before)
+        : NaN;
     void computeAndEmitBilling({
       client,
       runId: String((updated as Json).id),
       executionId: str(body, "execution_id") || null,
       fallbackDurationSec: durationSec,
       fallbackStatus: str(updated as Json, "status"),
+      openrouterUsageBefore: Number.isFinite(usageBefore) ? usageBefore : null,
     }).catch((e) => console.error("velvetech billing emit failed:", e instanceof Error ? e.message : e));
   }
 
