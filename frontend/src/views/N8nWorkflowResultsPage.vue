@@ -410,29 +410,6 @@ function dossierFromMergedCompanyRow(row: Record<string, unknown>) {
   };
 }
 
-const expandedCompanyRow = computed(() => {
-  if (!expandedCompanyKey.value || !detail.value?.companies) return null;
-  return (
-    detail.value.companies.find(
-      (r) => entityRowKey("company", r) === expandedCompanyKey.value
-    ) ?? null
-  );
-});
-
-const expandedContactRow = computed(() => {
-  if (!expandedContactKey.value || !detail.value?.contacts) return null;
-  return (
-    detail.value.contacts.find(
-      (r) => entityRowKey("contact", r) === expandedContactKey.value
-    ) ?? null
-  );
-});
-
-const expandedCompanyDossier = computed(() => {
-  const row = expandedCompanyRow.value;
-  return row ? dossierFromMergedCompanyRow(row) : null;
-});
-
 const healthMetrics = computed(() => {
   const funnel = detail.value?.summary?.funnel ?? {};
   const pov = Number(funnel.companies_pov ?? 0);
@@ -1859,7 +1836,7 @@ const detailVendorMetrics = computed(() => {
         :columns="execColumns"
         :data="execRows"
         :loading="execLoading"
-        :scroll-x="980"
+        :scroll-x="1200"
         size="small"
         striped
       />
