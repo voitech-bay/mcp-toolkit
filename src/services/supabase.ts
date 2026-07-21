@@ -5836,7 +5836,9 @@ function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSu
   };
 }
 
-/** Paginated Velvetech batch runs from `velvetech-run-billing` rows (newest first). */
+/** Paginated Velvetech batch runs from `velvetech-run-billing` rows (newest first).
+ *  Also synthesizes list entries for recent stage runs that never got a billing row,
+ *  so CLI fire-and-forget batches still appear in executions history. */
 export async function listVelvetechExecutionSummaries(
   client: SupabaseClient,
   params: { limit: number; offset: number }
@@ -5865,6 +5867,45 @@ export async function listVelvetechExecutionSummaries(
     seen.add(key);
     deduped.push(mapped);
   }
+
+  // Safety net: surface recent Velvetech stage runs missing a billing row.
+  const stageRes = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("id, execution_id, created_at, workflow_name, result")
+    .like("workflow_name", "velvetech-%")
+    .neq("workflow_name", VELVETECH_BILLING_WORKFLOW)
+    .order("created_at", { ascending: false })
+    .limit(1500);
+  if (!stageRes.error && stageRes.data) {
+    const orphans = new Map<string, VelvetechExecutionSummaryRow>();
+    for (const raw of stageRes.data as Array<Record<string, unknown>>) {
+      const j = (raw.result as Record<string, unknown>) ?? {};
+      const runId = String(j.run_id ?? j.launch_id ?? "").trim();
+      if (!runId || seen.has(runId) || orphans.has(runId)) continue;
+      if (isRunIdArtifactKey(runId, runId)) continue;
+      orphans.set(runId, {
+        id: String(raw.id ?? ""),
+        run_id: runId,
+        execution_id: (raw.execution_id as string | null) ?? null,
+        created_at: String(raw.created_at ?? ""),
+        status: "legacy",
+        duration_sec: null,
+        cost_usd: null,
+        funnel: {},
+        warnings: ["no_billing_row"],
+        billing: null,
+        tokens_by_stage: null,
+        llm_breakdown: null,
+        row_count: null,
+      });
+    }
+    for (const row of orphans.values()) {
+      deduped.push(row);
+      seen.add(row.run_id);
+    }
+    deduped.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
+  }
+
   return { rows: deduped.slice(offset, offset + limit), total: deduped.length, error: null };
 }
 
@@ -5913,13 +5954,19 @@ export async function getVelvetechExecutionDetail(
       summary = mapBillingResultRow(billingByExec.data as Record<string, unknown>);
       runId = summary.run_id;
       executionId = summary.execution_id;
-    } else {
+    } else if (/^\d+$/.test(key)) {
+      // Bare n8n parent execution id (e.g. "44854")
       executionId = key;
+    } else {
+      // CLI / launcher run_id or launch_id (e.g. "vv-20260720T233831Z" or UUID)
+      runId = key;
+      executionId = null;
     }
   }
 
   const filters: Array<{ field: string; op: string; value: string }> = [];
-  if (runId && summary) {
+  if (runId && (summary || !/^\d+$/.test(runId))) {
+    // launch_id filter also matches result.run_id (see n8n-workflow-result-filters).
     filters.push({ field: "launch_id", op: "eq", value: runId });
   } else if (executionId) {
     filters.push({ field: "execution_id", op: "eq", value: executionId });
