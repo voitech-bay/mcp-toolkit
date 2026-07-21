@@ -5764,6 +5764,27 @@ function funnelLooksEmpty(funnel: Record<string, number>): boolean {
   return Object.values(funnel).every((v) => !v);
 }
 
+/** Stub/legacy billing sometimes used stage names (icp_gate) instead of UI keys (companies_icp). */
+function funnelMissingListMetrics(funnel: Record<string, number>): boolean {
+  return funnel.companies_pov == null && funnel.companies_pov_ok == null && funnel.contacts_high_medium == null;
+}
+
+function normalizeVelvetechFunnelAliases(funnel: Record<string, number>): Record<string, number> {
+  const out = { ...funnel };
+  const aliases: Array<[string, string]> = [
+    ["companies_icp", "icp_gate"],
+    ["companies_discovery", "discovery"],
+    ["contacts_enriched", "enrichment"],
+    ["contacts_fit_scored", "contact_fit"],
+    ["companies_deep", "deep_research"],
+    ["companies_pov", "pov"],
+  ];
+  for (const [canonical, legacy] of aliases) {
+    if (out[canonical] == null && typeof out[legacy] === "number") out[canonical] = out[legacy];
+  }
+  return out;
+}
+
 function collectVelvetechFieldKeys(
   rows: Array<Record<string, unknown>>,
   priority: string[]
@@ -5798,7 +5819,7 @@ function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSu
   const funnelRaw = j.funnel;
   const funnel =
     funnelRaw && typeof funnelRaw === "object" && !Array.isArray(funnelRaw)
-      ? (funnelRaw as Record<string, number>)
+      ? normalizeVelvetechFunnelAliases(funnelRaw as Record<string, number>)
       : {};
   const warningsRaw = j.warnings;
   const warnings = Array.isArray(warningsRaw)
@@ -5813,11 +5834,6 @@ function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSu
   const tokens_by_stage =
     tokensRaw && typeof tokensRaw === "object" && !Array.isArray(tokensRaw)
       ? (tokensRaw as Record<string, number>)
-      : null;
-  const llmRaw = j.llm_breakdown;
-  const llm_breakdown =
-    llmRaw && typeof llmRaw === "object" && !Array.isArray(llmRaw)
-      ? (llmRaw as Record<string, unknown>)
       : null;
   return {
     id: String(raw.id ?? ""),
@@ -5865,6 +5881,18 @@ export async function listVelvetechExecutionSummaries(
     const key = mapped.run_id || mapped.id;
     if (seen.has(key)) continue;
     seen.add(key);
+    // Recompute funnel from stage rows when billing stub used wrong/empty keys.
+    if (funnelLooksEmpty(mapped.funnel) || funnelMissingListMetrics(mapped.funnel)) {
+      const stage = await client
+        .from(N8N_WORKFLOW_RESULTS_TABLE)
+        .select("id, workflow_name, result, execution_id, created_at, contact_id, company_id")
+        .neq("workflow_name", VELVETECH_BILLING_WORKFLOW)
+        .or(`result->>run_id.eq.${key},result->>launch_id.eq.${key}`)
+        .limit(500);
+      if (!stage.error && stage.data?.length) {
+        mapped.funnel = computeVelvetechFunnelFromRows(stage.data as never[]);
+      }
+    }
     deduped.push(mapped);
   }
 
