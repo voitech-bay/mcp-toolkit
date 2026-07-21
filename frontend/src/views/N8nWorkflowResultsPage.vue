@@ -1086,15 +1086,6 @@ const execColumns: DataTableColumns<ExecutionSummary> = [
     },
   },
   {
-    title: "Eligible",
-    key: "eligible",
-    width: 90,
-    render(row) {
-      const v = row.funnel?.contacts_eligible ?? row.funnel?.contacts_high_medium;
-      return v != null ? String(v) : "—";
-    },
-  },
-  {
     title: "Jobs",
     key: "jobs",
     width: 80,
@@ -1109,6 +1100,15 @@ const execColumns: DataTableColumns<ExecutionSummary> = [
     width: 90,
     render(row) {
       const v = row.funnel?.contacts_analyzed ?? row.funnel?.contacts_fit_scored;
+      return v != null ? String(v) : "—";
+    },
+  },
+  {
+    title: "Eligible",
+    key: "eligible",
+    width: 90,
+    render(row) {
+      const v = row.funnel?.contacts_eligible ?? row.funnel?.contacts_high_medium;
       return v != null ? String(v) : "—";
     },
   },
