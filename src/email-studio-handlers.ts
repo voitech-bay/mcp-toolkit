@@ -5,7 +5,7 @@ import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRan
 import { buildVelvetechSystemPrompt } from "./services/velvetech-messaging/prompt.js";
 import { isVelvetechProjectId } from "./services/velvetech-messaging/types.js";
 import { loadPriorityAnchors, type PriorityAnchor } from "./services/pov-facts.js";
-import { plaintextToHtml } from "./services/html-plaintext.js";
+import { htmlToPlaintext, plaintextToHtml } from "./services/html-plaintext.js";
 import { reconcileSmartleadLead } from "./services/smartlead-reconcile.js";
 
 type Json = Record<string, unknown>;
@@ -330,7 +330,7 @@ export async function handleEmailStudioRegenerate(req: IncomingMessage, res: Ser
 export async function handleEmailStudioAdoptVersion(req: IncomingMessage, res: ServerResponse, emailId: string, versionId: string) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, emailId, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const v = await client.from("outreach_email_versions").select("*").eq("id", versionId).eq("email_id", emailId).single(); if (v.error) return send(res, 404, { error: "Version not found" });
   await client.from("outreach_email_versions").update({ state: "superseded" }).eq("email_id", emailId).eq("state", "current"); await client.from("outreach_email_versions").update({ state: "current" }).eq("id", versionId);
-  const comments = await client.from("outreach_email_comments").select("*").eq("email_id", emailId).eq("status", "open"); for (const c of (comments.data ?? []) as Json[]) { const anchor = reanchorQuote(String(v.data.body), String(c.selected_quote), Number(c.start_offset), String(c.context_before), String(c.context_after)); await client.from("outreach_email_comments").update({ mapped_version_id: versionId, mapped_start_offset: anchor?.start ?? null, mapped_end_offset: anchor?.end ?? null, updated_at: new Date().toISOString() }).eq("id", c.id); }
+  const adoptedPlain = htmlToPlaintext(v.data.body ?? ""); const comments = await client.from("outreach_email_comments").select("*").eq("email_id", emailId).eq("status", "open"); for (const c of (comments.data ?? []) as Json[]) { const anchor = reanchorQuote(adoptedPlain, String(c.selected_quote), Number(c.start_offset), String(c.context_before), String(c.context_after)); await client.from("outreach_email_comments").update({ mapped_version_id: versionId, mapped_start_offset: anchor?.start ?? null, mapped_end_offset: anchor?.end ?? null, updated_at: new Date().toISOString() }).eq("id", c.id); }
   const updated = await client.from("outreach_emails").update({ current_version_id: versionId, current_subject: v.data.subject, current_body: v.data.body, current_model: v.data.model ?? null, updated_at: new Date().toISOString() }).eq("id", emailId).select("*").single(); return send(res, 200, { data: updated.data, version: v.data });
 }
 
@@ -342,7 +342,13 @@ export async function handleEmailStudioHumanVersion(req: IncomingMessage, res: S
 }
 
 export async function handleEmailStudioCreateComment(req: IncomingMessage, res: ServerResponse, id: string) {
-  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const version = await client.from("outreach_email_versions").select("body").eq("id", email.current_version_id).single(); const start = Number(b.startOffset), end = Number(b.endOffset), quote = String(b.selectedQuote ?? ""); if (!quote || start < 0 || end <= start || String(version.data?.body ?? "").slice(start, end) !== quote) return send(res, 400, { error: "Comment selection no longer matches the current version" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const version = await client.from("outreach_email_versions").select("body").eq("id", email.current_version_id).single();
+  // Operators edit and select against the plaintext rendering of the body (the
+  // stored body is HTML), so the incoming offsets index into htmlToPlaintext(body),
+  // not the raw body. Validate in that same coordinate space.
+  const plain = htmlToPlaintext(version.data?.body ?? ""); const quote = String(b.selectedQuote ?? ""); let start = Number(b.startOffset), end = Number(b.endOffset);
+  if (!quote || !Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return send(res, 400, { error: "Select some text to comment on" });
+  if (plain.slice(start, end) !== quote) { const anchor = reanchorQuote(plain, quote, start, String(b.contextBefore ?? ""), String(b.contextAfter ?? "")); if (!anchor) return send(res, 400, { error: "Comment selection no longer matches the current version" }); start = anchor.start; end = anchor.end; }
   const r = await client.from("outreach_email_comments").insert({ email_id: id, source_version_id: email.current_version_id, selected_quote: quote, start_offset: start, end_offset: end, context_before: String(b.contextBefore ?? ""), context_after: String(b.contextAfter ?? ""), body: String(b.body ?? "").trim(), author_id: actor(req), author_user_id: actorUserId(req), mapped_version_id: email.current_version_id, mapped_start_offset: start, mapped_end_offset: end }).select("*").single(); if (r.error) return send(res, 500, { error: r.error.message });
   if (email.status !== "comments_made") try { await statusChange(client, email, "comments_made", "user", actor(req), "Review comment added", undefined, actorUserId(req)); } catch {}
   return send(res, 201, { data: r.data });

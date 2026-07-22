@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   NCard,
@@ -135,6 +135,68 @@ const noteDraft = ref("");
 const savingNote = ref(false);
 const summarizing = ref(false);
 const runningResearch = ref(false);
+// Live status for a research launch fired from this card. The launcher records the
+// run in n8n_launch_runs; GET /api/n8n/launch/:id/status returns its computed state
+// (running until n8n pushes completion or the run idles out).
+interface LaunchStatus { id: string; status: string; requested: number; succeeded: number; failed: number }
+const launchStatus = ref<LaunchStatus | null>(null);
+let launchPollTimer: ReturnType<typeof setInterval> | null = null;
+const LAUNCH_TERMINAL = new Set(["success", "partial", "failed"]);
+
+function stopLaunchPolling() {
+  if (launchPollTimer) { clearInterval(launchPollTimer); launchPollTimer = null; }
+}
+
+async function pollLaunchOnce(launchId: string): Promise<boolean> {
+  try {
+    const r = await fetch(`/api/n8n/launch/${encodeURIComponent(launchId)}/status`);
+    const data = (await r.json()) as { run?: Json; error?: string };
+    if (!r.ok || !data.run) return false;
+    const run = data.run;
+    const status = String(run.status ?? "running");
+    launchStatus.value = {
+      id: launchId,
+      status,
+      requested: Number(run.requested_count ?? 0),
+      succeeded: Number(run.succeeded_count ?? 0),
+      failed: Number(run.failed_count ?? 0),
+    };
+    if (LAUNCH_TERMINAL.has(status)) {
+      stopLaunchPolling();
+      if (status === "failed") message.error("Research run failed. Check the n8n results for details.");
+      else message.success(`Research ${status === "partial" ? "finished with some failures" : "complete"}. Refreshing card…`);
+      await load();
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function trackLaunch(launchId: string) {
+  stopLaunchPolling();
+  launchStatus.value = { id: launchId, status: "running", requested: researchTargetCount.value, succeeded: 0, failed: 0 };
+  void pollLaunchOnce(launchId);
+  launchPollTimer = setInterval(() => void pollLaunchOnce(launchId), 8000);
+}
+
+const launchStatusLabel = computed(() => {
+  const s = launchStatus.value;
+  if (!s) return "";
+  if (s.status === "success") return `Research complete (${s.succeeded}/${s.requested})`;
+  if (s.status === "partial") return `Finished: ${s.succeeded} ok, ${s.failed} failed`;
+  if (s.status === "failed") return "Research failed";
+  return s.succeeded ? `Research running… ${s.succeeded}/${s.requested} done` : "Research running…";
+});
+const launchStatusType = computed(() => {
+  const s = launchStatus.value?.status;
+  if (s === "success") return "success" as const;
+  if (s === "failed") return "error" as const;
+  if (s === "partial") return "warning" as const;
+  return "info" as const;
+});
+
 const rawDrawerOpen = ref(false);
 const rawDrawerTitle = ref("");
 const rawDrawerJson = ref("");
@@ -482,6 +544,13 @@ async function addNote() {
   }
 }
 
+function openSequenceStudio() {
+  if (!companyId.value) return;
+  const query: Record<string, string> = { companyId: companyId.value, eligible: "1" };
+  if (projectStore.selectedProjectId) query.projectId = projectStore.selectedProjectId;
+  void router.push({ path: "/sequence-studio", query });
+}
+
 async function runN8nResearch() {
   if (isVelvetechProject.value) {
     const rows = filtersActive.value ? filteredRoster.value : roster.value;
@@ -490,7 +559,8 @@ async function runN8nResearch() {
       message.warning("No contacts at this account to launch");
       return;
     }
-    await launchVelvetechResearch(leadUuids);
+    const launchId = await launchVelvetechResearch(leadUuids);
+    if (launchId) trackLaunch(launchId);
     return;
   }
   runningResearch.value = true;
@@ -514,8 +584,9 @@ onMounted(() => {
   void loadWorkflows();
   load();
 });
+onUnmounted(stopLaunchPolling);
 watch(() => projectStore.selectedProjectId, () => void loadWorkflows());
-watch(companyId, load);
+watch(companyId, () => { stopLaunchPolling(); launchStatus.value = null; void load(); });
 watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
 </script>
 
@@ -545,6 +616,14 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
               <NText v-if="companyHq" depth="3" style="font-size: 0.85rem">{{ companyHq }}</NText>
             </NSpace>
           </div>
+          <NButton
+            v-if="companyId"
+            type="primary"
+            secondary
+            @click="openSequenceStudio"
+          >
+            Sequence Studio →
+          </NButton>
         </NSpace>
         <template v-if="company.about">
           <NDivider style="margin: 12px 0" />
@@ -680,6 +759,15 @@ watch(() => route.query, syncContactFiltersFromRoute, { deep: true });
       <NCard title="Company research (n8n)" size="small">
         <template #header-extra>
           <NSpace align="center" size="small">
+            <NTag
+              v-if="launchStatus"
+              size="small"
+              :type="launchStatusType"
+              :bordered="false"
+            >
+              <NSpin v-if="!LAUNCH_TERMINAL.has(launchStatus.status)" :size="12" style="margin-right: 6px" />
+              {{ launchStatusLabel }}
+            </NTag>
             <NButton
               v-if="companyId"
               size="tiny"
