@@ -17,7 +17,7 @@ const renderedSections = computed(() =>
   <div class="how-to-guide">
     <div class="header-row">
       <div>
-        <h1>How-to Guide</h1>
+        <NText tag="h1">How-to Guide</NText>
         <NText depth="3">A plain-language walkthrough of Voitech for running the Velvetech campaign.</NText>
       </div>
     </div>
