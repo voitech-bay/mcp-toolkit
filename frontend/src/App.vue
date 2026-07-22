@@ -44,6 +44,7 @@ import {
   RocketIcon,
   LayersIcon,
   LogOutIcon,
+  BookOpenIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 import { VELVETECH_PROJECT_ID, isFeasibleProjectId } from "./project-ids";
@@ -125,6 +126,7 @@ const PIPELINE_PATHS = [
   "/inmail-review",
   "/email-studio",
   "/sequence-studio",
+  "/how-to-guide",
   "/calls/cold-n8n",
 ] as const;
 const VELVETECH_PATHS = [
@@ -138,6 +140,7 @@ const VELVETECH_PATHS = [
   "/n8n/workflow-results",
   "/email-studio",
   "/sequence-studio",
+  "/how-to-guide",
   "/analytics",
   "/hypotheses",
   "/enrichment",
@@ -279,6 +282,11 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "Sequence Studio",
     key: "/sequence-studio",
     icon: () => h(SendIcon, { size: 14 }),
+  },
+  {
+    label: "How-to Guide",
+    key: "/how-to-guide",
+    icon: () => h(BookOpenIcon, { size: 14 }),
   },
   {
     label: "Cold call (n8n)",
@@ -931,6 +939,10 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   <NButton quaternary :type="route.path === '/sequence-studio' ? 'primary' : undefined" size="small" @click="router.push('/sequence-studio')">
                     <SendIcon :size="14" style="margin-right: 4px" />
                     Sequence Studio
+                  </NButton>
+                  <NButton quaternary :type="route.path === '/how-to-guide' ? 'primary' : undefined" size="small" @click="router.push('/how-to-guide')">
+                    <BookOpenIcon :size="14" style="margin-right: 4px" />
+                    How-to Guide
                   </NButton>
                 </template>
                 <NButton v-if="isVelvetechLogin" quaternary size="small" @click="toggleTheme()" :title="isDark ? 'Light mode' : 'Dark mode'">

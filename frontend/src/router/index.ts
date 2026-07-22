@@ -85,6 +85,12 @@ const router = createRouter({
       meta: { title: "Sequence Studio | Voitech" },
     },
     {
+      path: "/how-to-guide",
+      name: "HowToGuide",
+      component: () => import("../views/HowToGuidePage.vue"),
+      meta: { title: "How-to Guide | Voitech" },
+    },
+    {
       path: "/calls/cold-n8n",
       name: "ColdCallN8n",
       component: () => import("../views/ColdCallN8nPage.vue"),
