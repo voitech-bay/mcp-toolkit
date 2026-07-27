@@ -24,6 +24,7 @@ import {
   summarizeContactActivity,
   type MessageRow,
 } from "./account-context.js";
+import { resolveCuratedList, getCuratedMemberUuids } from "./curated-lists.js";
 
 const COMPANY_WORKFLOW_LATEST_VIEW = "company_workflow_latest";
 const PHASE_B_WORKFLOW = "phase_b_company";
@@ -221,22 +222,46 @@ export function resolveEmailCount(
   return localCount > 0 ? localCount : null;
 }
 
+const CONTACTS_SELECT =
+  "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, work_phone_number, personal_phone_number, call_messenger_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, email_inbox_count, gs_connection_sent_at, gs_connection_lost_at, gs_connection_accepted_at, markers_synced_at";
+
+/** Chunked so a few hundred pinned members cannot overflow the PostgREST query URL. */
+async function fetchContactsByUuid(
+  client: SupabaseClient,
+  uuids: string[]
+): Promise<{ data: Json[]; error: string | null }> {
+  const CHUNK = 100;
+  const out: Json[] = [];
+  for (let i = 0; i < uuids.length; i += CHUNK) {
+    const { data, error } = await client
+      .from(CONTACTS_TABLE)
+      .select(CONTACTS_SELECT)
+      .in("uuid", uuids.slice(i, i + CHUNK));
+    if (error) return { data: [], error: error.message };
+    out.push(...((data ?? []) as Json[]));
+  }
+  return { data: out, error: null };
+}
+
 export async function buildLeadersList(
   client: SupabaseClient,
-  tagUuid: string
+  listKey: string
 ): Promise<{ data: LeaderListRecord[]; error: string | null }> {
-  const tag = tagUuid.trim();
-  if (!tag) return { data: [], error: "tag is required" };
+  const key = listKey.trim();
+  if (!key) return { data: [], error: "list is required" };
 
-  const { data: contacts, error: cErr } = await client
-    .from(CONTACTS_TABLE)
-    .select(
-      "uuid, name, first_name, last_name, position, headline, linkedin, linkedin_url, location, work_email, personal_email, email, email_status, work_phone_number, personal_phone_number, call_messenger_status, company_id, company_uuid, company_name, pipeline_stage_uuid, email_sent_count, email_inbox_count, gs_connection_sent_at, gs_connection_lost_at, gs_connection_accepted_at, markers_synced_at"
-    )
-    // tags is a jsonb array of GetSalesTags uuids → containment needs a JSON string,
-    // not a JS array (which supabase-js would serialize as a PostgREST array literal).
-    .contains("tags", JSON.stringify([tag]));
-  if (cErr) return { data: [], error: cErr.message };
+  // Membership is pinned in Supabase, not derived from GetSales tags, so retagging
+  // or moving a lead in GetSales never changes what this list shows.
+  const { list, error: listErr } = await resolveCuratedList(client, key);
+  if (listErr) return { data: [], error: listErr };
+  if (!list) return { data: [], error: `Unknown list: ${key}` };
+
+  const { uuids: memberUuids, error: memberErr } = await getCuratedMemberUuids(client, list.id);
+  if (memberErr) return { data: [], error: memberErr };
+  if (memberUuids.length === 0) return { data: [], error: null };
+
+  const { data: contacts, error: cErr } = await fetchContactsByUuid(client, memberUuids);
+  if (cErr) return { data: [], error: cErr };
   const rows = (contacts ?? []) as Json[];
   if (rows.length === 0) return { data: [], error: null };
 

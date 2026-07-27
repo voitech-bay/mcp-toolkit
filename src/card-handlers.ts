@@ -18,6 +18,11 @@ import {
   type MessageRow,
 } from "./services/account-context.js";
 import { buildLeadersList } from "./services/leaders-list.js";
+import {
+  resolveCuratedList,
+  getCuratedMemberUuids,
+  removeCuratedMembers,
+} from "./services/curated-lists.js";
 import { syncMarkersForContacts } from "./services/getsales-markers.js";
 import { CONTACTS_TABLE, getGetSalesCredentials } from "./services/supabase.js";
 import { fetchContactByUuid } from "./services/source-api.js";
@@ -116,43 +121,52 @@ export async function handleGetCompanyCard(req: IncomingMessage, res: ServerResp
   if (!UUID_RE.test(id)) return sendJson(res, 400, { error: "id must be a UUID" });
   const { data, error } = await buildCompanyCard(client, id);
   if (error) return sendJson(res, error === "Company not found" ? 404 : 500, { error });
-  const tag = queryParam(req, "tag");
-  if (tag && UUID_RE.test(tag)) {
-    const list = await buildLeadersList(client, tag);
+  // Accepts a pinned-list slug or the legacy GetSales tag UUID it replaced.
+  const listKey = queryParam(req, "tag");
+  if (listKey) {
+    const list = await buildLeadersList(client, listKey);
     if (list.error) return sendJson(res, 500, { error: list.error });
     const listRecords = list.data.filter((row) => row.company_id === id);
-    return sendJson(res, 200, { ...data, list_records: listRecords, list_tag: tag });
+    return sendJson(res, 200, { ...data, list_records: listRecords, list_tag: listKey });
   }
   sendJson(res, 200, data);
 }
 
-// --- GET /api/lists/tagged?tag=<GetSalesTags uuid> ----------------------------
-// Tag-backed record list for the lists-checker view (e.g. "MSSP Leaders in MENA").
+// --- GET /api/lists/tagged?tag=<slug or legacy GetSales tag uuid> -------------
+// Pinned record list for the lists-checker view (e.g. "MSSP Leaders in MENA").
+// Membership comes from curated_list_members, so GetSales retagging cannot change it.
 // Read-only assembly across Contacts/companies/PipelineStages/n8n/FlowLeads/LinkedinMessages.
 export async function handleGetTaggedList(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "GET") return sendJson(res, 405, { error: "Method not allowed" });
   const client = getSupabase();
   if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
-  const tag = queryParam(req, "tag");
-  if (!UUID_RE.test(tag)) return sendJson(res, 400, { error: "tag must be a UUID" });
+  const listKey = queryParam(req, "tag") || queryParam(req, "list");
+  if (!listKey) return sendJson(res, 400, { error: "list is required" });
 
-  // Refresh GetSales markers for contacts never synced so email/connection stats are accurate.
+  const { list, error: listErr } = await resolveCuratedList(client, listKey);
+  if (listErr) return sendJson(res, 500, { error: listErr });
+  if (!list) return sendJson(res, 404, { error: `Unknown list: ${listKey}` });
+
+  // Refresh GetSales markers for members never synced so email/connection stats are accurate.
   const { credentials } = await getGetSalesCredentials(client, FEASIBLE_PROJECT_ID);
   if (credentials) {
-    const { data: unsynced, error: unsyncedErr } = await client
-      .from(CONTACTS_TABLE)
-      .select("uuid")
-      .contains("tags", JSON.stringify([tag]))
-      .is("markers_synced_at", null);
-    if (!unsyncedErr && unsynced?.length) {
-      const uuids = ((unsynced ?? []) as { uuid: string }[]).map((r) => r.uuid).filter(Boolean);
-      if (uuids.length) await syncMarkersForContacts(client, uuids, credentials);
+    const { uuids: memberUuids } = await getCuratedMemberUuids(client, list.id);
+    if (memberUuids.length) {
+      const { data: unsynced, error: unsyncedErr } = await client
+        .from(CONTACTS_TABLE)
+        .select("uuid")
+        .in("uuid", memberUuids)
+        .is("markers_synced_at", null);
+      if (!unsyncedErr && unsynced?.length) {
+        const uuids = ((unsynced ?? []) as { uuid: string }[]).map((r) => r.uuid).filter(Boolean);
+        if (uuids.length) await syncMarkersForContacts(client, uuids, credentials);
+      }
     }
   }
 
-  const { data, error } = await buildLeadersList(client, tag);
+  const { data, error } = await buildLeadersList(client, listKey);
   if (error) return sendJson(res, 500, { error });
-  sendJson(res, 200, { data, total: data.length });
+  sendJson(res, 200, { data, total: data.length, list: { slug: list.slug, name: list.name } });
 }
 
 // --- POST /api/cards/company-summary { companyId } -----------------------------
@@ -311,14 +325,14 @@ export async function handlePostSyncMarkers(req: IncomingMessage, res: ServerRes
   if (!credentialsResult.credentials) return sendJson(res, 500, { error: "GetSales credentials not configured for project" });
   let uuids: string[] = [];
 
-  if (typeof body.tag === "string" && UUID_RE.test(body.tag)) {
-    // Resolve all contacts with this tag
-    const { data, error } = await client
-      .from(CONTACTS_TABLE)
-      .select("uuid")
-      .contains("tags", JSON.stringify([body.tag]));
-    if (error) return sendJson(res, 500, { error: error.message });
-    uuids = ((data ?? []) as { uuid: string }[]).map((r) => r.uuid).filter(Boolean);
+  if (typeof body.tag === "string" && body.tag.trim()) {
+    // Resolve all contacts pinned to this list
+    const { list, error: listErr } = await resolveCuratedList(client, body.tag);
+    if (listErr) return sendJson(res, 500, { error: listErr });
+    if (!list) return sendJson(res, 404, { error: `Unknown list: ${body.tag}` });
+    const { uuids: memberUuids, error } = await getCuratedMemberUuids(client, list.id);
+    if (error) return sendJson(res, 500, { error });
+    uuids = memberUuids;
   } else if (Array.isArray(body.uuids)) {
     uuids = (body.uuids as unknown[]).filter((v): v is string => typeof v === "string" && UUID_RE.test(v));
   }
@@ -331,27 +345,28 @@ export async function handlePostSyncMarkers(req: IncomingMessage, res: ServerRes
 }
 
 // --- POST /api/lists/tagged/remove { tag, uuids } ----------------------------
-// Removes the given tag UUID from Contacts.tags for each listed contact UUID.
-// Uses the remove_tag_from_contacts Postgres function for an atomic batch update.
+// Drops the given contacts from the pinned list. Local only: GetSales tags, lists
+// and flow enrolment are untouched, so this cannot be undone by a GetSales sync.
 export async function handlePostRemoveFromList(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== "POST") return sendJson(res, 405, { error: "Method not allowed" });
   const client = getSupabase();
   if (!client) return sendJson(res, 500, { error: "Supabase not configured" });
   const body = await readJsonBody(req);
-  const tag = typeof body.tag === "string" ? body.tag.trim() : "";
-  if (!UUID_RE.test(tag)) return sendJson(res, 400, { error: "tag must be a UUID" });
+  const listKey = typeof body.tag === "string" ? body.tag.trim() : "";
+  if (!listKey) return sendJson(res, 400, { error: "tag (list slug or uuid) is required" });
   const uuids = Array.isArray(body.uuids)
     ? (body.uuids as unknown[]).filter((v): v is string => typeof v === "string" && UUID_RE.test(v))
     : [];
   if (!uuids.length) return sendJson(res, 400, { error: "uuids must be a non-empty array of UUIDs" });
   if (uuids.length > 200) return sendJson(res, 400, { error: "Batch too large (max 200)" });
 
-  const { data, error } = await client.rpc("remove_tag_from_contacts", {
-    p_uuids: uuids,
-    p_tag_uuid: tag,
-  });
-  if (error) return sendJson(res, 500, { error: error.message });
-  sendJson(res, 200, { ok: true, removed: data as number });
+  const { list, error: listErr } = await resolveCuratedList(client, listKey);
+  if (listErr) return sendJson(res, 500, { error: listErr });
+  if (!list) return sendJson(res, 404, { error: `Unknown list: ${listKey}` });
+
+  const { removed, error } = await removeCuratedMembers(client, list.id, uuids);
+  if (error) return sendJson(res, 500, { error });
+  sendJson(res, 200, { ok: true, removed });
 }
 
 // --- POST /api/feasible/run-phase-b-company { companyId, listUuid?, companyTypeTag? } ---

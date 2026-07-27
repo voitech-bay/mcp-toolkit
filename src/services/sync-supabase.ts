@@ -72,7 +72,8 @@ import {
   type DateRangeFilter,
 } from "./source-api.js";
 import { syncEventBus } from "./sync-event-bus.js";
-import { MSSP_LEADERS_TAG_UUIDS, syncMarkersForContacts } from "./getsales-markers.js";
+import { syncMarkersForContacts } from "./getsales-markers.js";
+import { getAllCuratedMemberUuids } from "./curated-lists.js";
 import {
   SyncCancelledError,
   clearSyncCancellation,
@@ -1244,21 +1245,13 @@ export async function syncSupabaseFromSource(
   // for contacts touched by this run and every current member of the Supabase-
   // managed MSSP regional lists, using the same decrypted project secret.
   if (!contactsRes.error && credentials) {
-    for (const tagUuid of MSSP_LEADERS_TAG_UUIDS) {
-      const { data: taggedContacts, error: taggedContactsError } = await client
-        .from(CONTACTS_TABLE)
-        .select("uuid")
-        .contains("tags", JSON.stringify([tagUuid]));
-      if (taggedContactsError) {
-        await logger.logError("contacts: failed to resolve MSSP marker refresh membership", {
-          tagUuid,
-          error: taggedContactsError.message,
-        });
-      } else {
-        for (const row of (taggedContacts ?? []) as Array<{ uuid: string | null }>) {
-          if (row.uuid) contactUuidsForMarkers.add(row.uuid);
-        }
-      }
+    const { uuids: pinnedUuids, error: pinnedError } = await getAllCuratedMemberUuids(client);
+    if (pinnedError) {
+      await logger.logError("contacts: failed to resolve pinned list marker refresh membership", {
+        error: pinnedError,
+      });
+    } else {
+      for (const uuid of pinnedUuids) contactUuidsForMarkers.add(uuid);
     }
     if (contactUuidsForMarkers.size > 0) {
       await logger.log("contacts: refreshing GetSales markers", { count: contactUuidsForMarkers.size });

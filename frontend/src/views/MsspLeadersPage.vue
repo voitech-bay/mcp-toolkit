@@ -22,14 +22,15 @@ function openComposer(row: LeaderRecord) {
   };
 }
 
-// Region-switchable, tag-backed lists. Each region maps to its GetSalesTags uuid.
-const TAG_BY_REGION = {
-  MENA: "b108ac8f-5049-466d-bc48-982c5a7e2201",
-  LATAM: "2cd32c55-47a2-4e3e-b69c-1d01a8b70e1b",
+// Region-switchable pinned lists. Membership lives in Supabase (curated_list_members),
+// not in GetSales tags, so retagging or moving a lead in GetSales cannot empty a list.
+const LIST_BY_REGION = {
+  MENA: "mssp-leaders-mena",
+  LATAM: "mssp-leaders-latam",
 } as const;
-type Region = keyof typeof TAG_BY_REGION;
+type Region = keyof typeof LIST_BY_REGION;
 const region = ref<Region>("MENA");
-const tagUuid = computed(() => TAG_BY_REGION[region.value]);
+const tagUuid = computed(() => LIST_BY_REGION[region.value]);
 
 interface LeaderRecord {
   uuid: string;
