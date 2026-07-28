@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { NCard, NSpace, NText } from "naive-ui";
+import { useRouter } from "vue-router";
+import { NCard, NSpace, NText, NButton } from "naive-ui";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { sections } from "./how-to-guide-content";
+
+const router = useRouter();
 
 const renderedSections = computed(() =>
   sections.map((section) => ({
@@ -21,6 +24,17 @@ const renderedSections = computed(() =>
         <NText depth="3">A plain-language walkthrough of Voitech for running the Velvetech campaign.</NText>
       </div>
     </div>
+
+    <NCard title="Sub-pages" size="small" class="toc-card">
+      <NSpace size="small" wrap>
+        <NButton size="small" secondary type="primary" @click="router.push('/how-to-guide/data-flow-diagram')">
+          Data Flow Diagram
+        </NButton>
+      </NSpace>
+      <NText depth="3" style="display: block; margin-top: 8px; font-size: 0.85rem">
+        Field-level contract for the research pipeline — what each stage receives, adds, and emits.
+      </NText>
+    </NCard>
 
     <NCard title="On this page" size="small" class="toc-card">
       <NSpace size="small" wrap>

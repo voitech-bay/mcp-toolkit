@@ -269,9 +269,11 @@ const servesStatic = async (pathname: string, res: import("node:http").ServerRes
   try {
     const body = await fs.readFile(filePath);
     const ext = path.extname(filePath).toLowerCase();
+    const isSpaShell = filePath.endsWith("index.html");
+    const isDocsHtml = ext === ".html" && resolvedPath.includes(`${path.sep}docs${path.sep}`);
     res.writeHead(200, {
       "Content-Type": MIME_TYPES[ext] ?? "application/octet-stream",
-      "Cache-Control": filePath.endsWith("index.html")
+      "Cache-Control": isSpaShell || isDocsHtml
         ? "no-cache"
         : "public, max-age=31536000, immutable",
     });

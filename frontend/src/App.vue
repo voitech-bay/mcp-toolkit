@@ -156,6 +156,7 @@ function pathInGroup(path: string, group: readonly string[]): boolean {
 
 function isVelvetechAllowedPath(path: string): boolean {
   if (VELVETECH_PATHS.includes(path as (typeof VELVETECH_PATHS)[number])) return true;
+  if (path.startsWith("/how-to-guide/")) return true;
   if (path.startsWith("/plays/")) return true;
   if (path.startsWith("/company/") || path.startsWith("/contact/")) return true;
   if (path.startsWith("/analytics/") || path.startsWith("/enrichment/")) return true;
@@ -946,7 +947,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                     <LayersIcon :size="14" style="margin-right: 4px" />
                     Plays
                   </NButton>
-                  <NButton quaternary :type="route.path === '/how-to-guide' ? 'primary' : undefined" size="small" @click="router.push('/how-to-guide')">
+                  <NButton quaternary :type="route.path.startsWith('/how-to-guide') ? 'primary' : undefined" size="small" @click="router.push('/how-to-guide')">
                     <BookOpenIcon :size="14" style="margin-right: 4px" />
                     How-to Guide
                   </NButton>

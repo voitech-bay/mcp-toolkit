@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Velvetech research pipeline — data flow contract</title>
+<style>
+:root{
+  --ground:#F6F8F9; --panel:#FFFFFF; --panel-2:#EDF1F3; --line:#D5DDE2; --line-soft:#E4EAEE;
+  --text:#16212B; --text-2:#4A5C69; --text-3:#71838F;
+  --accent:#2F6B8E; --accent-soft:#E2EDF3;
+  --company:#8F6524; --company-soft:#F4EADA;
+  --contact:#2F7358; --contact-soft:#DFEFE7;
+  --gap:#9E4034; --gap-soft:#F7E4E1;
+  --code-bg:#EEF2F4;
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  --r:7px;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --ground:#0F161D; --panel:#161F28; --panel-2:#1C2731; --line:#2A3944; --line-soft:#222E38;
+    --text:#DDE6EC; --text-2:#9DAEBA; --text-3:#758896;
+    --accent:#6FA8C7; --accent-soft:#1A2A35;
+    --company:#D2A05C; --company-soft:#2B2317;
+    --contact:#6FC3A0; --contact-soft:#152720;
+    --gap:#D97F70; --gap-soft:#2C1A17;
+    --code-bg:#111A22;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0F161D; --panel:#161F28; --panel-2:#1C2731; --line:#2A3944; --line-soft:#222E38;
+  --text:#DDE6EC; --text-2:#9DAEBA; --text-3:#758896;
+  --accent:#6FA8C7; --accent-soft:#1A2A35;
+  --company:#D2A05C; --company-soft:#2B2317;
+  --contact:#6FC3A0; --contact-soft:#152720;
+  --gap:#D97F70; --gap-soft:#2C1A17;
+  --code-bg:#111A22;
+}
+:root[data-theme="light"]{
+  --ground:#F6F8F9; --panel:#FFFFFF; --panel-2:#EDF1F3; --line:#D5DDE2; --line-soft:#E4EAEE;
+  --text:#16212B; --text-2:#4A5C69; --text-3:#71838F;
+  --accent:#2F6B8E; --accent-soft:#E2EDF3;
+  --company:#8F6524; --company-soft:#F4EADA;
+  --contact:#2F7358; --contact-soft:#DFEFE7;
+  --gap:#9E4034; --gap-soft:#F7E4E1;
+  --code-bg:#EEF2F4;
+}
+*{box-sizing:border-box;}
+body{
+  margin:0; background:var(--ground); color:var(--text);
+  font-family:var(--sans); font-size:15px; line-height:1.6;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px; margin:0 auto; padding:0 20px 96px;}
+code,.mono{font-family:var(--mono);}
+
+/* ---- masthead ---- */
+header.top{padding:56px 0 28px; border-bottom:1px solid var(--line);}
+.eyebrow{
+  font-family:var(--mono); font-size:11px; letter-spacing:.13em; text-transform:uppercase;
+  color:var(--text-3); margin:0 0 14px;
+}
+h1{
+  font-size:clamp(28px,4.2vw,40px); line-height:1.12; letter-spacing:-.021em;
+  font-weight:660; margin:0 0 14px; text-wrap:balance; max-width:19ch;
+}
+.standfirst{font-size:17px; color:var(--text-2); margin:0; max-width:64ch;}
+.meta-row{display:flex; flex-wrap:wrap; gap:8px; margin-top:22px;}
+.meta{
+  font-family:var(--mono); font-size:11.5px; color:var(--text-2);
+  background:var(--panel-2); border:1px solid var(--line-soft);
+  padding:4px 9px; border-radius:5px;
+}
+
+/* ---- nav ---- */
+nav.stages{
+  position:sticky; top:0; z-index:20; background:var(--ground);
+  border-bottom:1px solid var(--line); padding:10px 0; margin-bottom:40px;
+}
+nav.stages .inner{display:flex; gap:6px; overflow-x:auto; scrollbar-width:thin;}
+nav.stages a{
+  font-family:var(--mono); font-size:12px; white-space:nowrap;
+  color:var(--text-2); text-decoration:none; padding:5px 10px;
+  border:1px solid var(--line-soft); border-radius:5px; background:var(--panel);
+}
+nav.stages a:hover{color:var(--accent); border-color:var(--accent);}
+nav.stages a:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+section{margin:0 0 56px; scroll-margin-top:64px;}
+h2{
+  font-size:22px; letter-spacing:-.014em; font-weight:640; margin:0 0 6px;
+  display:flex; align-items:baseline; gap:11px; text-wrap:balance;
+}
+h2 .num{font-family:var(--mono); font-size:12px; color:var(--text-3); font-weight:400;}
+.lede{color:var(--text-2); margin:0 0 22px; max-width:66ch;}
+h3{font-size:15.5px; font-weight:640; margin:30px 0 10px; letter-spacing:-.006em;}
+
+/* ---- callout ---- */
+.callout{
+  border:1px solid var(--line); border-left:3px solid var(--gap);
+  background:var(--gap-soft); border-radius:var(--r);
+  padding:15px 17px; margin:0 0 26px;
+}
+.callout .k{
+  font-family:var(--mono); font-size:11px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--gap); display:block; margin-bottom:6px; font-weight:600;
+}
+.callout p{margin:0 0 8px;} .callout p:last-child{margin:0;}
+
+/* ---- diagram ---- */
+.diagram{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+  padding:18px; overflow-x:auto; margin:0 0 20px;
+}
+.mermaid{min-width:520px;}
+
+/* ---- stage cards ---- */
+.stage{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r);
+  margin:0 0 16px; overflow:hidden;
+}
+.stage > .head{
+  display:flex; flex-wrap:wrap; align-items:center; gap:10px;
+  padding:12px 16px; border-bottom:1px solid var(--line-soft); background:var(--panel-2);
+}
+.chip{
+  font-family:var(--mono); font-size:11px; font-weight:600; letter-spacing:.06em;
+  padding:3px 8px; border-radius:4px; text-transform:uppercase;
+}
+.chip.company{background:var(--company-soft); color:var(--company); border:1px solid var(--company);}
+.chip.contact{background:var(--contact-soft); color:var(--contact); border:1px solid var(--contact);}
+.chip.stageid{background:var(--accent-soft); color:var(--accent); border:1px solid var(--accent);}
+.nodename{font-family:var(--mono); font-size:13px; color:var(--text); font-weight:500;}
+.head .why{color:var(--text-3); font-size:13px; margin-left:auto;}
+.cols{display:grid; grid-template-columns:repeat(3,1fr); gap:0;}
+.col{padding:14px 16px; border-right:1px solid var(--line-soft); min-width:0;}
+.col:last-child{border-right:none;}
+.col > .label{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.12em; text-transform:uppercase;
+  color:var(--text-3); margin:0 0 9px; display:flex; justify-content:space-between; gap:8px;
+}
+.col .count{color:var(--text-3); font-variant-numeric:tabular-nums;}
+.col.added > .label{color:var(--accent);}
+.fields{display:flex; flex-wrap:wrap; gap:4px;}
+.f{
+  font-family:var(--mono); font-size:11.5px; line-height:1.5;
+  background:var(--code-bg); border:1px solid var(--line-soft);
+  padding:2px 6px; border-radius:4px; color:var(--text-2);
+  overflow-wrap:anywhere;
+}
+.col.added .f{border-color:var(--accent); color:var(--text); background:var(--accent-soft);}
+.note{font-size:12.5px; color:var(--text-3); margin:10px 0 0; padding-top:9px; border-top:1px dashed var(--line-soft);}
+.note strong{color:var(--text-2); font-weight:600;}
+@media(max-width:760px){ .cols{grid-template-columns:1fr;} .col{border-right:none; border-bottom:1px solid var(--line-soft);} .col:last-child{border-bottom:none;} .head .why{margin-left:0; flex-basis:100%;} }
+
+/* ---- tables ---- */
+.tablewrap{overflow-x:auto; border:1px solid var(--line); border-radius:var(--r); margin:0 0 18px; background:var(--panel);}
+table{border-collapse:collapse; width:100%; font-size:13.5px; min-width:560px;}
+th,td{text-align:left; padding:9px 13px; border-bottom:1px solid var(--line-soft); vertical-align:top;}
+th{
+  font-family:var(--mono); font-size:10.5px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--text-3); font-weight:500; background:var(--panel-2); white-space:nowrap;
+}
+tbody tr:last-child td{border-bottom:none;}
+td.mono,th.mono{font-family:var(--mono); font-size:12px;}
+td .en{font-family:var(--mono); font-size:11.5px; color:var(--text-2); overflow-wrap:anywhere;}
+.num{font-variant-numeric:tabular-nums;}
+
+/* ---- dictionary ---- */
+details.dict{
+  background:var(--panel); border:1px solid var(--line); border-radius:var(--r); margin:0 0 9px;
+}
+details.dict > summary{
+  cursor:pointer; padding:11px 15px; display:flex; align-items:center; gap:10px; list-style:none;
+  font-family:var(--mono); font-size:13px; color:var(--text);
+}
+details.dict > summary::-webkit-details-marker{display:none;}
+details.dict > summary::before{content:"+"; color:var(--accent); font-weight:600; width:11px;}
+details.dict[open] > summary::before{content:"\2212";}
+details.dict > summary:focus-visible{outline:2px solid var(--accent); outline-offset:-2px;}
+details.dict > summary .where{margin-left:auto; font-family:var(--sans); font-size:12px; color:var(--text-3);}
+details.dict .body{padding:0 15px 14px;}
+
+/* ---- worked example ---- */
+.step{display:grid; grid-template-columns:150px 1fr; gap:16px; padding:13px 0; border-bottom:1px solid var(--line-soft);}
+.step:last-child{border-bottom:none;}
+.step .stepname{font-family:var(--mono); font-size:12px; color:var(--text-2); padding-top:2px;}
+.step .stepname .grain{display:block; font-size:10px; letter-spacing:.09em; text-transform:uppercase; margin-top:4px;}
+.step .grain.company{color:var(--company);} .step .grain.contact{color:var(--contact);}
+.delta{font-size:13px; color:var(--text-2); margin:0 0 7px;}
+.delta b{color:var(--text); font-weight:600;}
+pre.json{
+  font-family:var(--mono); font-size:11.5px; line-height:1.55; background:var(--code-bg);
+  border:1px solid var(--line-soft); border-radius:5px; padding:11px 13px; margin:0;
+  overflow-x:auto; color:var(--text-2);
+}
+pre.json .key{color:var(--accent);}
+pre.json .str{color:var(--contact);}
+pre.json .n{color:var(--company);}
+@media(max-width:640px){ .step{grid-template-columns:1fr; gap:6px;} }
+
+.tot{
+  display:flex; gap:22px; flex-wrap:wrap; padding:14px 16px; background:var(--panel-2);
+  border:1px solid var(--line); border-radius:var(--r); margin:18px 0 0;
+}
+.tot div{display:flex; flex-direction:column; gap:2px;}
+.tot .v{font-family:var(--mono); font-size:19px; font-weight:600; color:var(--text); font-variant-numeric:tabular-nums;}
+.tot .l{font-size:11.5px; color:var(--text-3);}
+
+footer{border-top:1px solid var(--line); padding:22px 0 0; color:var(--text-3); font-size:12.5px;}
+a{color:var(--accent);}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <p class="eyebrow">Velvetech · n8n research pipeline · traced 2026-07-28</p>
+  <h1>What each stage receives, adds, and emits</h1>
+  <p class="standfirst">
+    A field level contract for the research pipeline, from a CSV row to a POV brief. Every field name here was
+    read out of a stage that was actually executed, not transcribed from source. Seven stages, two grains,
+    three staticData side channels.
+  </p>
+  <div class="meta-row">
+    <span class="meta">P0 → P6</span>
+    <span class="meta">111 code nodes</span>
+    <span class="meta">2 vendors</span>
+    <span class="meta">source: build_n8n_velvetech_research_workflow.py</span>
+  </div>
+</header>
+
+<nav class="stages"><div class="inner">
+  <a href="#grains">Grains</a>
+  <a href="#stages">Stages</a>
+  <a href="#dictionary">Objects</a>
+  <a href="#worked">Worked example</a>
+  <a href="#vendors">Vendors</a>
+  <a href="#gaps">Gaps</a>
+</div></nav>
+
+<section id="grains">
+  <h2><span class="num">01</span> Two grains, and why fields disappear</h2>
+  <p class="lede">
+    The pipeline alternates between one item per company and one item per contact. Nearly every
+    "where did my field go" question traces to a grain change or to a stage that rebuilds its output object
+    instead of spreading the input. Both are marked below.
+  </p>
+
+  <div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  CSV["CSV rows<br/>10 columns"] --> GRP["Group companies<br/>7 keys"]
+  GRP --> P0["P0 ICP gate<br/>+9 keys"]
+  P0 --> PICK["Pick ICP-passing"]
+  PICK --> P1["P1 Discovery<br/>rebuilds: 16 keys"]
+  P1 --> FLAT["Flatten contacts<br/>fan out, 7 keys"]
+  FLAT --> P2["P2 Enrichment<br/>+enrichment"]
+  P2 --> GATE["Verification gate<br/>+4 keys"]
+  GATE --> P3["P3 Rollup people<br/>adds nothing to item"]
+  P3 --> P4["P4 Contact fit<br/>+8 keys"]
+  P4 --> BC["Build companies<br/>collapse, 15 keys"]
+  BC --> P5["P5 Deep research<br/>linear: intel→web→jobs→people→synthesis"]
+  P5 --> P6["P6 POV builder<br/>15 properties"]
+
+  PICK -. "_vv_icp_*" .-> BC
+  FLAT -. "_vv_disc_err_*" .-> BC
+  P3 -. "_vv_rollups_*" .-> BC
+
+  classDef co fill:#F4EADA,stroke:#8F6524,color:#3a2a10;
+  classDef ct fill:#DFEFE7,stroke:#2F7358,color:#12301f;
+  classDef io fill:#EDF1F3,stroke:#7d8f9b,color:#1d2830;
+  class CSV io;
+  class GRP,P0,PICK,P1,BC,P5,P6 co;
+  class FLAT,P2,GATE,P3,P4 ct;
+</pre>
+  </div>
+
+  <div class="tablewrap"><table>
+    <thead><tr><th>Side channel</th><th>Written by</th><th>Read by</th><th>Carries</th></tr></thead>
+    <tbody>
+      <tr><td class="mono">_vv_icp_&lt;execId&gt;</td><td class="mono">Pick ICP-passing companies</td><td class="mono">Build companies</td><td>10 key record per company. The only way P0's verdict survives P1.</td></tr>
+      <tr><td class="mono">_vv_disc_err_&lt;execId&gt;</td><td class="mono">Flatten contacts</td><td class="mono">Build companies</td><td><span class="en">discovery_error</span> string, keyed by lowercased domain.</td></tr>
+      <tr><td class="mono">_vv_rollups_&lt;execId&gt;</td><td class="mono">Rollup people</td><td class="mono">Build companies</td><td>9 key rollup per company, including every contact bio.</td></tr>
+    </tbody>
+  </table></div>
+  <p class="lede" style="margin-bottom:0">
+    All three are keyed by domain. n8n can re-index dotted keys to <code>"0","1"…</code> on reload, so
+    <span class="en">Build companies</span> re-keys defensively from each record's inner <span class="en">company_key</span>.
+  </p>
+</section>
+
+<section id="stages">
+  <h2><span class="num">02</span> Stage by stage</h2>
+  <p class="lede">
+    IN and OUT are total key counts on the item. ADDED lists the exact new keys. Counts come from executing
+    each stage with a real Riverstone row and reading <code>Object.keys()</code> off the result.
+  </p>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">Ingest</span><span class="nodename">Group companies</span><span class="chip company">company</span><span class="why">One item per unique domain</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">4</span></p><div class="fields"><span class="f">run_id</span><span class="f">project_id</span><span class="f">rows</span><span class="f">row_count</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">7 built</span></p><div class="fields"><span class="f">company_key</span><span class="f">company_uuid</span><span class="f">company_name</span><span class="f">csv_hints</span><span class="f">csv_contacts</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">7</span></p><div class="fields"><span class="f">run_id</span><span class="f">project_id</span><span class="f">company_key</span><span class="f">company_uuid</span><span class="f">company_name</span><span class="f">csv_hints</span><span class="f">csv_contacts</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>Domain is the identity.</strong> <span class="en">company_key</span> is the normalized domain, falling back to the host part of an email. Rows with no resolvable domain are dropped. <span class="en">company_uuid</span> and <span class="en">lead_uuid</span> are read from the row but the CLI never emits them, so via the CLI path they are always empty.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">P0</span><span class="nodename">Normalize ICP Gate</span><span class="chip company">company</span><span class="why">Web-researched ICP verdict</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">7</span></p><div class="fields"><span class="f">…the 7 above</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">9</span></p><div class="fields"><span class="f">icp_passed</span><span class="f">icp_confidence</span><span class="f">build_risk</span><span class="f">vertical</span><span class="f">size_estimate</span><span class="f">icp_reasons</span><span class="f">icp_search_results</span><span class="f">web_evidence_empty</span><span class="f">icp_ok</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">16</span></p><div class="fields"><span class="f">7 in</span><span class="f">+ 9 added</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>Three fields are renamed on the way out.</strong> The schema emits <span class="en">confidence</span>, <span class="en">reasons</span>, <span class="en">evidence</span>; the item carries <span class="en">icp_confidence</span>, <span class="en">icp_reasons</span>, <span class="en">icp_search_results</span>. Grep for the schema name and you will find nothing downstream. There is also a rescue rule: a fail with no evidence and no reason is treated as an empty web lane, not a rejection, and flips to pass at low confidence.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">P1</span><span class="nodename">Velvetech Prospeo Discovery</span><span class="chip company">company</span><span class="why">Prospeo ×5 + CoreSignal ×1, merged</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">16</span></p><div class="fields"><span class="f">…the 16 above</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">10</span></p><div class="fields"><span class="f">contacts</span><span class="f">discovered_count</span><span class="f">csv_contact_count</span><span class="f">discovery_buckets</span><span class="f">discovery_candidates</span><span class="f">discovery_lanes</span><span class="f">discovery_cs_rows</span><span class="f">discovery_cs_wrong_company</span><span class="f">discovery_by_source</span><span class="f">discovery_error</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">16</span></p><div class="fields"><span class="f">run_id</span><span class="f">project_id</span><span class="f">company_key</span><span class="f">company_uuid</span><span class="f">company_name</span><span class="f">csv_hints</span><span class="f">+ the 10 added</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>This stage rebuilds its output rather than spreading the input.</strong> All nine P0 fields are dropped here, along with <span class="en">csv_contacts</span>. They are recovered later only from the <span class="en">_vv_icp_*</span> side channel. Out is 16 keys again, but they are not the same 16.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">Fan out</span><span class="nodename">Flatten contacts</span><span class="chip contact">contact</span><span class="why">1 company → N contact items</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">16</span></p><div class="fields"><span class="f">…P1 output</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">2</span></p><div class="fields"><span class="f">contact_key</span><span class="f">contact</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">7</span></p><div class="fields"><span class="f">run_id</span><span class="f">company_key</span><span class="f">company_name</span><span class="f">csv_hints</span><span class="f">contact_key</span><span class="f">contact</span><span class="f">discovery_error</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>The grain changes and the item shrinks to 7 keys.</strong> <span class="en">contact_key</span> is the LinkedIn slug when there is one, otherwise <span class="en">full-name@domain</span>. Everything P1 counted (<span class="en">discovery_buckets</span>, <span class="en">discovery_by_source</span>, the lane diagnostics) stops here and never reaches the brief.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">P2</span><span class="nodename">Velvetech Coresignal Enrich</span><span class="chip contact">contact</span><span class="why">Full profile by LinkedIn slug</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">7</span></p><div class="fields"><span class="f">…the 7 above</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">1</span></p><div class="fields"><span class="f">enrichment</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">8</span></p><div class="fields"><span class="f">7 in</span><span class="f">+ enrichment</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>One key, eighteen fields inside it</strong> — and this is where the role text that names a company's real systems arrives. See the object dictionary. The live P2 is <span class="en">recovered/P2_verification.json</span>, not the builder functions in the Python file, which are dead code.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">Gate</span><span class="nodename">Apply contact verification gate</span><span class="chip contact">contact</span><span class="why">Is this person still there?</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">8</span></p><div class="fields"><span class="f">…P2 output</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">4 (+6)</span></p><div class="fields"><span class="f">verification_gate_passed</span><span class="f">effective_title</span><span class="f">discovery_title</span><span class="f">title_source</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">12</span></p><div class="fields"><span class="f">8 in</span><span class="f">+ 4 added</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>A failing contact gets its P4 verdict written before P4 runs.</strong> When the gate fails it also sets <span class="en">fit:'exclude'</span>, <span class="en">role_type:'other'</span>, <span class="en">persona:'other'</span>, <span class="en">fit_reasons</span>, <span class="en">fit_evidence</span>, <span class="en">fit_ok</span> — 18 keys out instead of 12.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">P3</span><span class="nodename">Rollup people</span><span class="chip contact">contact</span><span class="why">Company-level aggregate</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">12</span></p><div class="fields"><span class="f">…gate output</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">0</span></p><div class="fields"><span class="f">nothing on the item</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">12</span></p><div class="fields"><span class="f">unchanged passthrough</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>The only stage whose entire output goes to a side channel.</strong> It writes a 9 key rollup per company to <span class="en">_vv_rollups_*</span> and passes items through untouched. It also runs <em>before</em> the P4 fit gate, so unverified contacts are present in <span class="en">per_contact_summaries</span> even though they never reach <span class="en">fit_contacts</span>.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">P4</span><span class="nodename">Normalize Velvetech Contact Fit</span><span class="chip contact">contact</span><span class="why">Buyer scoring</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">12</span></p><div class="fields"><span class="f">…rollup passthrough</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">8</span></p><div class="fields"><span class="f">fit</span><span class="f">role_type</span><span class="f">persona</span><span class="f">is_new_leader</span><span class="f">long_tenure_leader</span><span class="f">fit_reasons</span><span class="f">fit_evidence</span><span class="f">fit_ok</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">20</span></p><div class="fields"><span class="f">12 in</span><span class="f">+ 8 added</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong><span class="en">persona</span> is not in the schema.</strong> The agent returns <span class="en">role_type</span>; persona is derived from it in normalize by mapping three ops roles and three finance roles, everything else to <span class="en">it</span>, and <span class="en">other</span> to <span class="en">other</span>. <span class="en">reasons</span> and <span class="en">evidence</span> are renamed to <span class="en">fit_reasons</span> and <span class="en">fit_evidence</span>.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">Collapse</span><span class="nodename">Build companies</span><span class="chip company">company</span><span class="why">N contacts → 1 company</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">20 × N</span></p><div class="fields"><span class="f">…P4 items</span><span class="f">+ 3 side channels</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">15 built</span></p><div class="fields"><span class="f">fit_contacts</span><span class="f">all_contacts</span><span class="f">people_rollup</span><span class="f">icp_search_results</span><span class="f">vertical</span><span class="f">size_estimate</span><span class="f">build_risk</span><span class="f">eligible_contact_count</span><span class="f">discovery_error</span><span class="f">roster_absent</span><span class="f">_preflight_skipped</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">15</span></p><div class="fields"><span class="f">run_id</span><span class="f">company_key</span><span class="f">company_name</span><span class="f">csv_hints</span><span class="f">+ the 11 above</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>Companies are seeded from the ICP side channel, not from contacts.</strong> A company with zero discovered contacts still gets a row so deep research and the POV run. <span class="en">fit_contacts</span> is one rule: <span class="en">fit === 'high' || fit === 'medium'</span>. <span class="en">tier</span> is not a second filter — intel tier contacts are already excluded upstream by the fit gate.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">P5</span><span class="nodename">Deep research (5 nodes, linear)</span><span class="chip company">company</span><span class="why">intel → web → jobs → people → synthesis</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">15</span></p><div class="fields"><span class="f">…Build companies</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">18</span></p><div class="fields"><span class="f">company_intel</span><span class="f">web_research</span><span class="f">research_source_urls</span><span class="f">job_postings</span><span class="f">leadership_openings</span><span class="f">jobs_error</span><span class="f">job_postings_researched_count</span><span class="f">jobs_window_months</span><span class="f">people_analysis</span><span class="f">transformation_signals</span><span class="f">ma_activity</span><span class="f">hiring_signals</span><span class="f">data_integration_pain</span><span class="f">leadership_gaps</span><span class="f">tech_stack</span><span class="f">icp_score</span><span class="f">score_rationale</span><span class="f">deep_research_ok</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">33</span></p><div class="fields"><span class="f">15 in</span><span class="f">+ 18 added</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>It is a linear chain, not parallel lanes.</strong> Each node spreads the item forward, so the five stages accumulate rather than merge. Parallelism exists only across companies. Every post-HTTP node re-reads its prep node by name, because an n8n HTTP node destroys upstream fields.</p></div>
+  </div>
+
+  <div class="stage">
+    <div class="head"><span class="chip stageid">P6</span><span class="nodename">Velvetech POV Builder</span><span class="chip company">company</span><span class="why">The brief</span></div>
+    <div class="cols">
+      <div class="col"><p class="label"><span>In</span><span class="count">14 sent</span></p><div class="fields"><span class="f">company_key</span><span class="f">company_name</span><span class="f">vertical</span><span class="f">icp_score</span><span class="f">score_rationale</span><span class="f">transformation_signals</span><span class="f">ma_activity</span><span class="f">hiring_signals</span><span class="f">data_integration_pain</span><span class="f">leadership_gaps</span><span class="f">tech_stack</span><span class="f">company_intel</span><span class="f">people_analysis</span><span class="f">fit_contacts</span></div></div>
+      <div class="col added"><p class="label"><span>Added</span><span class="count">15 props</span></p><div class="fields"><span class="f">brief_markdown</span><span class="f">account_narrative</span><span class="f">word_count</span><span class="f">fit_score</span><span class="f">pressure_points</span><span class="f">velvetech_angle</span><span class="f">discovery_questions</span><span class="f">evidence_sources</span><span class="f">headline_facts</span><span class="f">hook</span><span class="f">lead_question</span><span class="f">target</span><span class="f">pov_ok</span><span class="f">validation_failed</span><span class="f">pov_error</span></div></div>
+      <div class="col"><p class="label"><span>Out</span><span class="count">brief</span></p><div class="fields"><span class="f">persisted to Voitech</span></div></div>
+    </div>
+    <div class="col" style="border:none"><p class="note"><strong>Deliberately not sent to the agent:</strong> <span class="en">web_research</span>, <span class="en">people_rollup</span>, <span class="en">all_contacts</span>, <span class="en">job_postings</span>, <span class="en">leadership_openings</span> — duplicated substance that bloats tokens. <span class="en">word_count</span> is recounted in JS and never trusted from the model. A validator with nine error codes runs after.</p></div>
+  </div>
+
+  <h3>Where it lands</h3>
+  <p class="lede">
+    Six stages each POST to one endpoint, <span class="en">voitech.up.railway.app/api/n8n/workflow-results</span>, not to Supabase directly.
+    Each row is the whole stage item plus <span class="en">workflow_name</span>, <span class="en">entity_key</span>, <span class="en">run_id</span>, <span class="en">persisted_at</span>.
+    Writes are plain inserts per run; reads go through a view that keeps the newest row per
+    <span class="en">(entity_key, workflow_name)</span>.
+  </p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Stage</th><th>workflow_name</th><th>entity_key</th></tr></thead>
+    <tbody>
+      <tr><td>P0 ICP gate</td><td class="mono">velvetech-icp-gate</td><td class="mono">company_key</td></tr>
+      <tr><td>P1 discovery</td><td class="mono">velvetech-…-discovery</td><td class="mono">contact_key</td></tr>
+      <tr><td>P2 enrichment</td><td class="mono">velvetech-…-enrichment</td><td class="mono">contact_key</td></tr>
+      <tr><td>P4 contact fit</td><td class="mono">velvetech-…-fit</td><td class="mono">contact_key</td></tr>
+      <tr><td>P5 deep research</td><td class="mono">velvetech-company-deep-research</td><td class="mono">company_key</td></tr>
+      <tr><td>P6 POV</td><td class="mono">velvetech-pov</td><td class="mono">company_key</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section id="dictionary">
+  <h2><span class="num">03</span> Object dictionary</h2>
+  <p class="lede">The nested shapes, each documented once. Enums are verbatim from the schemas and the code.</p>
+
+  <details class="dict"><summary>contact{}<span class="where">inside every P2–P4 item</span></summary><div class="body">
+    <p class="delta">Two variants that are <b>not</b> the same shape. The asymmetry is real and matters for the email channel.</p>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Key</th><th>CSV sourced</th><th>Discovered</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">lead_uuid, company_uuid</td><td>✓</td><td>✓ (empty)</td><td>Only populated by non-CLI callers</td></tr>
+        <tr><td class="mono">first_name, last_name, full_name, title</td><td>✓</td><td>✓</td><td>CoreSignal has no name split; it is split on the first space</td></tr>
+        <tr><td class="mono">linkedin_url</td><td>✓</td><td>✓</td><td>Dedupe key across vendors</td></tr>
+        <tr><td class="mono">tier</td><td>always <code>buyer</code></td><td><code>buyer</code> | <code>intel</code></td><td>intel = IT individual contributors and the chief executive</td></tr>
+        <tr><td class="mono">email</td><td>✓</td><td><strong>absent</strong></td><td>See gaps</td></tr>
+        <tr><td class="mono">persona</td><td>absent</td><td><code>it</code>|<code>ops</code>|<code>finance</code></td><td>Overwritten by P4 anyway</td></tr>
+        <tr><td class="mono">coresignal_id</td><td>absent</td><td>number | null</td><td>Carried, nothing reads it yet</td></tr>
+        <tr><td class="mono">source</td><td><code>csv</code></td><td><code>prospeo</code> | <code>coresignal</code></td><td></td></tr>
+      </tbody>
+    </table></div>
+  </div></details>
+
+  <details class="dict"><summary>enrichment{}<span class="where">added by P2</span></summary><div class="body">
+    <p class="delta">18 keys on the happy path: <span class="en">error, id, matched_by, identity_verified, profile_source, linkedin_url, headline, current_title, current_company, current_role_date_from, current_role_date_to, verification_status, verification_reason, summary, experience, tenure_months, started_within_6mo, skills</span></p>
+    <p class="delta"><span class="en">experience[]</span> item, capped at 8: <span class="en">title, company, date_from, date_to, active, description</span>. <b>description is capped at 1200 chars</b> and is the single most valuable field in the pipeline — it is where an engineer names the systems they built.</p>
+    <p class="delta"><b>verification_status</b> — five values: <code>unverified</code>, <code>identity_mismatch</code>, <code>verified_current</code>, <code>role_changed</code>, <code>departed</code>. Only the middle two pass the gate.</p>
+    <p class="delta"><b>Not a uniform object.</b> Three degenerate shapes exist with 8 or 9 keys instead of 18, missing <span class="en">headline</span>, <span class="en">skills</span>, <span class="en">tenure_months</span>, <span class="en">summary</span> and more. Consumers must treat those as possibly undefined, not as empty.</p>
+  </div></details>
+
+  <details class="dict"><summary>people_rollup{} and per_contact_summaries[]<span class="where">side channel, read by Build companies</span></summary><div class="body">
+    <p class="delta">Rollup, 9 keys: <span class="en">company_key, it_headcount_sampled, leadership_titles, new_leaders_last_6mo, leadership_tenures_months, tech_keywords, transformation_signals, per_contact_summaries, avg_leadership_tenure_months</span></p>
+    <p class="delta">Each summary, 10 keys: <span class="en">name, title, tier, verification_status, tenure_months, headline, summary_excerpt (600), current_role_description (900), prior_companies, enrichment_error</span></p>
+    <p class="delta"><span class="en">tech_keywords</span> accumulates from <span class="en">enrichment.skills</span>, capped at 40, lowercased, minus a five word stop list.</p>
+  </div></details>
+
+  <details class="dict"><summary>company_intel{}<span class="where">P5, CoreSignal company collect</span></summary><div class="body">
+    <p class="delta">Success, 14 keys: <span class="en">matched, domain_verified, description, employees_count, dept_headcount, revenue_range_usd, funding_rounds, active_job_postings_count, tech_stack, key_executives, executive_arrivals, executive_departures, open_seat_candidates, source</span></p>
+    <p class="delta">Failure, 2 keys: <span class="en">matched:false, note</span>. Check <span class="en">domain_verified</span>, not <span class="en">matched</span> — matched is true whenever any candidate was picked.</p>
+    <p class="delta">Time windows: arrivals and departures 24 months, open seats 9 months, technographics verified within 18 months.</p>
+  </div></details>
+
+  <details class="dict"><summary>web_research{}, job_postings[], leadership_openings[]<span class="where">P5</span></summary><div class="body">
+    <p class="delta"><span class="en">web_research</span>, always 6 keys: <span class="en">ma_findings, leadership_findings, initiative_findings, growth_findings, systems_findings, research_note</span>. Each finding is <span class="en">{finding, source_url}</span>. An agent failure is surfaced as <span class="en">research_note: "web_agent_failed: …"</span> rather than a silent empty array.</p>
+    <p class="delta"><span class="en">job_postings[]</span> ≤25: <span class="en">title, date, location, status, snippet</span>. <span class="en">leadership_openings[]</span> ≤12 adds <span class="en">department</span> and is collected before the IT filter, so a leadership opening in any department survives. Window is 730 days.</p>
+  </div></details>
+
+  <details class="dict"><summary>POV output<span class="where">P6, the deliverable</span></summary><div class="body">
+    <p class="delta">15 properties, 13 required. <span class="en">account_narrative</span> and <span class="en">target</span> are optional.</p>
+    <p class="delta"><span class="en">headline_facts[]</span>: <span class="en">{fact, type, tier, source}</span>. <b>type</b> is one of <code>trigger</code>, <code>systems</code>, <code>leadership</code>, <code>growth</code>, <code>pain</code>, <code>ma</code>, <code>profile</code>. <b>tier</b> is 1, 2 or 3.</p>
+    <p class="delta"><span class="en">target</span>: copied verbatim from <span class="en">fit_contacts</span> or null — <span class="en">name, title, persona, role_type, linkedin_url, contact_key, tenure_months, profile_highlight</span>.</p>
+  </div></details>
+
+  <details class="dict"><summary>Enums, all in one place</summary><div class="body">
+    <div class="tablewrap"><table>
+      <thead><tr><th>Field</th><th>Values</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">tier</td><td class="en">buyer · intel</td></tr>
+        <tr><td class="mono">source</td><td class="en">csv · prospeo · coresignal</td></tr>
+        <tr><td class="mono">fit</td><td class="en">high · medium · low · exclude</td></tr>
+        <tr><td class="mono">persona</td><td class="en">it · ops · finance · other</td></tr>
+        <tr><td class="mono">role_type</td><td class="en">cto · cio · cdo · vp_engineering · it_director · data_leader · architect · engineer · coo · vp_ops · supply_chain · cfo · vp_finance · controller · other</td></tr>
+        <tr><td class="mono">verification_status</td><td class="en">unverified · identity_mismatch · verified_current · role_changed · departed</td></tr>
+        <tr><td class="mono">vertical</td><td class="en">logistics · energy_midstream · healthcare · other</td></tr>
+        <tr><td class="mono">icp_confidence, build_risk</td><td class="en">high · medium · low</td></tr>
+        <tr><td class="mono">org_maturity</td><td class="en">minimal · lean · established · large</td></tr>
+        <tr><td class="mono">transformation_stage</td><td class="en">none_visible · early · active · mature</td></tr>
+        <tr><td class="mono">headline_facts[].type</td><td class="en">trigger · systems · leadership · growth · pain · ma · profile</td></tr>
+      </tbody>
+    </table></div>
+  </div></details>
+</section>
+
+<section id="worked">
+  <h2><span class="num">04</span> One row, end to end</h2>
+  <p class="lede">
+    A single Riverstone Logistics CSV row, run through every stage. Values below are observed output from
+    executing the real node code against live Prospeo and CoreSignal responses, including a genuine 429 on
+    one Prospeo lane.
+  </p>
+
+  <div class="stage"><div style="padding:4px 18px 14px">
+
+    <div class="step">
+      <div class="stepname">CSV row<span class="grain company">company grain</span></div>
+      <div>
+        <p class="delta">10 columns in. Domain becomes the identity for everything downstream.</p>
+        <pre class="json"><span class="key">company_domain</span>: <span class="str">"rlx.us"</span>       <span class="key">full_name</span>: <span class="str">"Nathan Leatherwood"</span>
+<span class="key">company_name</span>:   <span class="str">"Riverstone Logistics"</span>   <span class="key">title</span>: <span class="str">"Head of Technology"</span>
+<span class="key">email</span>:          <span class="str">"nleatherwood@rlx.us"</span></pre>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">Group companies<span class="grain company">7 keys</span></div>
+      <div><p class="delta">One company object. The row becomes <b>csv_contacts[0]</b>, an 8 key contact carrying its email.</p></div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">P0 ICP gate<span class="grain company">16 keys</span></div>
+      <div><p class="delta">Adds 9. <span class="en">icp_passed: true</span>, <span class="en">vertical: "logistics"</span>, <span class="en">size_estimate: "400-500"</span>, <span class="en">build_risk: "medium"</span>.</p></div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">P1 discovery<span class="grain company">16 keys</span></div>
+      <div>
+        <p class="delta">Five Prospeo calls plus one CoreSignal call. <b>21 contacts</b>: 1 from CSV, 20 discovered. The P0 fields are dropped here.</p>
+        <pre class="json"><span class="key">discovered_count</span>: <span class="n">20</span>    <span class="key">csv_contact_count</span>: <span class="n">1</span>
+<span class="key">discovery_buckets</span>:    { exec: <span class="n">2</span>, leader: <span class="n">5</span>, intel: <span class="n">13</span> }
+<span class="key">discovery_candidates</span>: { exec: <span class="n">2</span>, leader: <span class="n">5</span>, intel: <span class="n">14</span> }
+<span class="key">discovery_by_source</span>:  { prospeo: <span class="n">16</span>, coresignal: <span class="n">4</span> }
+<span class="key">discovery_lanes</span>: <span class="n">5</span>   <span class="key">discovery_cs_rows</span>: <span class="n">13</span>   <span class="key">discovery_cs_wrong_company</span>: <span class="n">0</span>
+<span class="key">discovery_error</span>: <span class="str">"429 Too Many Requests"</span></pre>
+        <p class="delta" style="margin-top:8px">CoreSignal contributed four people Prospeo does not have: <b>Nikola Burza</b>, <b>Mark Khalil</b>, <b>Colton McKee</b>, <b>Noah Deibert</b>. Nathan appears in both and in the CSV; dedupe on LinkedIn URL kept one. The 429 was recorded without stopping the run.</p>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">Flatten contacts<span class="grain contact">contact grain</span></div>
+      <div><p class="delta">21 items out, one per contact, 7 keys each. <span class="en">contact_key</span> for Nathan is <span class="en">nathan-leatherwood-3409b111</span>, taken from his LinkedIn slug.</p></div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">P2 enrichment<span class="grain contact">8 keys</span></div>
+      <div>
+        <p class="delta">Following Colton McKee, the Integrations Architect. CoreSignal collect by slug returns the role text.</p>
+        <pre class="json"><span class="key">verification_status</span>: <span class="str">"verified_current"</span>
+<span class="key">current_title</span>: <span class="str">"Integrations Architect"</span>
+<span class="key">experience[0].description</span>:
+  <span class="str">"Created integrations and data pipelines to support business</span>
+<span class="str">   needs such as Turvo, Orderful, and many others…"</span></pre>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">Gate → P3 → P4<span class="grain contact">12 → 12 → 20</span></div>
+      <div><p class="delta">Gate adds 4 and passes him. P3 adds nothing to the item but writes his bio into the rollup. P4 scores him <span class="en">fit: "low"</span>, <span class="en">role_type: "architect"</span>, <span class="en">persona: "it"</span> — correct, he is not a buyer.</p></div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">Build companies<span class="grain company">15 keys</span></div>
+      <div><p class="delta">Back to one company. Colton is in <span class="en">all_contacts</span> with <span class="en">tier: "intel"</span> and absent from <span class="en">fit_contacts</span>. His role text is already safe inside <span class="en">people_rollup.per_contact_summaries</span>.</p></div>
+    </div>
+
+    <div class="step">
+      <div class="stepname">P5 → P6<span class="grain company">33 keys → brief</span></div>
+      <div><p class="delta">People analysis extracts <span class="en">named_systems_from_profiles: ["Turvo", "Orderful", "Snowflake"]</span> verbatim from that role text. Synthesis merges them into <span class="en">tech_stack</span>. The brief can now name the stack and point at a public profile when asked how we know.</p></div>
+    </div>
+
+    <div class="tot">
+      <div><span class="v">10</span><span class="l">CSV columns in</span></div>
+      <div><span class="v">21</span><span class="l">contacts discovered</span></div>
+      <div><span class="v">4</span><span class="l">only CoreSignal had</span></div>
+      <div><span class="v">6</span><span class="l">API calls per company</span></div>
+      <div><span class="v">~33</span><span class="l">CoreSignal credits</span></div>
+    </div>
+  </div></div>
+</section>
+
+<section id="vendors">
+  <h2><span class="num">05</span> What each vendor gives us</h2>
+  <p class="lede">
+    Both are queried per company and merged into one candidate list, so dedupe, tier classification and
+    quota selection apply identically regardless of source.
+  </p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>&nbsp;</th><th>Prospeo</th><th>CoreSignal</th></tr></thead>
+    <tbody>
+      <tr><td>Calls per company</td><td class="num">5 (4 lanes)</td><td class="num">1</td></tr>
+      <tr><td>Query style</td><td>Server side filters on seniority, department, boolean job title</td><td>Natural language prompt scoped to two departments</td></tr>
+      <tr><td>Covers</td><td>C suite, VP/Director/Head across IT, Ops, Finance, whole IT org, title net</td><td>IT org only</td></tr>
+      <tr><td>Returns per person</td><td class="en">person_id, names, linkedin_url, current_job_title, headline, job_history[] with seniority + departments + duration, email{status, revealed, masked}</td><td class="en">id, full_name, linkedin_url, active_experience_title, active_experience_department, company_website, location, connection counts</td></tr>
+      <tr><td>Also returns</td><td>A full company object: employee_count, revenue_range, keywords, job_postings</td><td>Nothing company level on this call</td></tr>
+      <tr><td>We keep</td><td colspan="2">Six fields either way: names, title, LinkedIn URL, plus <span class="en">source</span> and <span class="en">coresignal_id</span></td></tr>
+      <tr><td>Riverstone result</td><td class="num">16 contacts</td><td class="num">4 unique</td></tr>
+    </tbody>
+  </table></div>
+  <p class="lede" style="margin-bottom:0">
+    The indexes genuinely differ. Prospeo has no record of Colton McKee at all — checked against both IT
+    departments and an Architect title search. CoreSignal has him. The reverse also happens, which is why
+    both run rather than one replacing the other.
+  </p>
+</section>
+
+<section id="gaps">
+  <h2><span class="num">06</span> Known gaps</h2>
+  <p class="lede">Found while tracing. All verified in code. None are fixed here except the first, which was fixed on discovery.</p>
+
+  <div class="callout">
+    <span class="k">Fixed during this trace</span>
+    <p><strong>The allow list was deleting exactly the systems we went to get.</strong> Synthesis filtered
+    <span class="en">tech_stack</span> through a whitelist of ~90 known enterprise products. Turvo, Orderful,
+    DispatchTrack, Onward and Excede all fail it; only generic names like Snowflake and Salesforce pass. That
+    silently defeated the whole profile extraction path.</p>
+    <p>Profile sourced systems now skip the whitelist, since it is a list of what we already know and the point
+    of reading an engineer's role text is to catch what it does not contain. The deny list still applies, so
+    Office, Excel and operating systems are still stripped. Verified: Turvo, Orderful and DispatchTrack now
+    reach the brief; Windows and Office still do not.</p>
+  </div>
+
+  <div class="tablewrap"><table>
+    <thead><tr><th>Gap</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Discovered contacts carry no email</strong></td><td>The CSV shape has <span class="en">email</span>; the discovered shape does not. Prospeo returns a verified but masked address, <span class="en">{status:"VERIFIED", revealed:false, email:"j******@rlx.us"}</span>, and we discard it. Email is the Smartlead channel, so discovery currently cannot feed it.</td></tr>
+      <tr><td><strong>it_headcount_sampled counts every contact</strong></td><td>Not just IT, despite the name. It feeds the org maturity judgement. The intel tier change adds up to 8 IT individual contributors per company, so this number now runs higher than it used to and may skew that read. This one is a consequence of the recent change.</td></tr>
+      <tr><td><strong>Dead fallback in Build companies</strong></td><td>It reads <span class="en">enr.summary || enr.current_role_description</span>, but <span class="en">current_role_description</span> is never a key on <span class="en">enrichment</span> — it only exists on <span class="en">per_contact_summaries[]</span>.</td></tr>
+      <tr><td><strong>The POV validator checks data the agent never saw</strong></td><td>The agent is not given <span class="en">research_source_urls</span>, yet the validator rejects any <span class="en">evidence_sources</span> or <span class="en">headline_facts[].source</span> not traceable to that list.</td></tr>
+      <tr><td><strong>Two drifted department classifiers</strong></td><td><span class="en">funcClass()</span> in the intel lane and <span class="en">jobDept()</span> in the jobs lane classify the same concept with different regexes and different output sets.</td></tr>
+      <tr><td><strong>_vv_rollups_* is never pruned</strong></td><td>The other two side channels delete sibling execution keys; this one does not. Build companies re-keys defensively, which is why it has not bitten yet.</td></tr>
+      <tr><td><strong>Unused Prospeo signal</strong></td><td>Every record carries <span class="en">job_history[]</span> with vendor classified <span class="en">seniority</span>, <span class="en">departments</span> and <span class="en">duration_in_months</span>. The title classifier re-derives all of it from the title string alone.</td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<footer>
+  Traced by executing each stage against real Prospeo and CoreSignal responses for rlx.us. Field names are read
+  from <code>Object.keys()</code> on live output, not transcribed. Source of truth:
+  <code>projects/Velvetech/scripts/build_n8n_velvetech_research_workflow.py</code> and
+  <code>scripts/recovered/P2_verification.json</code>.
+</footer>
+
+</div>
+<script type="module">
+  const q = new URLSearchParams(location.search).get("theme");
+  if (q === "dark" || q === "light") document.documentElement.setAttribute("data-theme", q);
+
+  import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.16.0/dist/mermaid.esm.min.mjs";
+  const theme = document.documentElement.getAttribute("data-theme")
+    || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: theme === "dark" ? "dark" : "neutral",
+    securityLevel: "loose",
+    flowchart: { htmlLabels: true, curve: "basis" },
+  });
+</script>
+</body>
+</html>

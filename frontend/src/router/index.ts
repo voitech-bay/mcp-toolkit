@@ -103,6 +103,12 @@ const router = createRouter({
       meta: { title: "How-to Guide | Voitech" },
     },
     {
+      path: "/how-to-guide/data-flow-diagram",
+      name: "HowToDataFlowDiagram",
+      component: () => import("../views/HowToDataFlowDiagramPage.vue"),
+      meta: { title: "Data Flow Diagram | Voitech" },
+    },
+    {
       path: "/calls/cold-n8n",
       name: "ColdCallN8n",
       component: () => import("../views/ColdCallN8nPage.vue"),
