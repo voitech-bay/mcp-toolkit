@@ -206,6 +206,8 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/sync-preflight" || pathname === "/api/sync-status" || pathname === "/api/sync-history") return true;
   if (pathname === "/api/supabase-sync" || pathname === "/api/supabase-sync-cancel") return true;
   if (pathname === "/api/source-api-check") return true;
+  // Analytics sync section on /sync (SyncPage loads these on mount).
+  if (pathname === "/api/analytics-collected-days" || pathname === "/api/analytics-day" || pathname === "/api/analytics-sync") return true;
   if (/^\/api\/projects\/[^/]+\/integration-secrets\/meta$/.test(pathname)) return true;
   if (/^\/api\/projects\/[^/]+\/credentials$/.test(pathname)) return true;
 
