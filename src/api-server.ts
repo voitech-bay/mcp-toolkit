@@ -96,6 +96,9 @@ import {
   handleGetOpenRouterModels,
   handlePostOpenRouterStreamChat,
   handlePostGenerateMessage,
+  handlePostRefineGeneratedMessage,
+  handlePostSendGeneratedMessage,
+  handleGetGeneratedMessageSenders,
   handleGetGeneratedMessages,
   handleDeleteGeneratedMessage,
   handleGetGeneratedMessagePresets,
@@ -386,6 +389,9 @@ const server = createServer(async (req, res) => {
     pathname.match(/^\/api\/contacts\/([^/]+)$/);
   const generatedMessageIdMatch =
     pathname !== "/api/generated-messages/generate" &&
+    pathname !== "/api/generated-messages/refine" &&
+    pathname !== "/api/generated-messages/send" &&
+    pathname !== "/api/generated-messages/senders" &&
     pathname.match(/^\/api\/generated-messages\/([^/]+)$/);
   const generatedMessagePresetVersionsMatch = pathname.match(
     /^\/api\/generated-message-presets\/([^/]+)\/versions$/
@@ -1235,6 +1241,30 @@ const server = createServer(async (req, res) => {
       case "/api/generated-messages/generate":
         if (req.method === "POST") {
           await handlePostGenerateMessage(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/generated-messages/refine":
+        if (req.method === "POST") {
+          await handlePostRefineGeneratedMessage(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/generated-messages/send":
+        if (req.method === "POST") {
+          await handlePostSendGeneratedMessage(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/generated-messages/senders":
+        if (req.method === "GET") {
+          await handleGetGeneratedMessageSenders(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

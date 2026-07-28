@@ -32,7 +32,7 @@ const renderedSections = computed(() =>
         </NButton>
       </NSpace>
       <NText depth="3" style="display: block; margin-top: 8px; font-size: 0.85rem">
-        Field-level contract for the research pipeline — what each stage receives, adds, and emits.
+        Research pipeline only (CSV → POV): what each stage receives, adds, and emits. Does not cover accepts, reply drafting, or email ↔ LinkedIn sync — those are in the sections below.
       </NText>
     </NCard>
 

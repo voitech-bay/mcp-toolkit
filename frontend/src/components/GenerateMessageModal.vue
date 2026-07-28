@@ -13,6 +13,9 @@ import {
   NTooltip,
   NPopover,
   NDropdown,
+  NCard,
+  NTag,
+  NDivider,
   useMessage,
 } from "naive-ui";
 import "emoji-picker-element";
@@ -28,7 +31,7 @@ type EmojiPolicy = "none" | "light" | "allowed";
 type ReadingLevelPreset = "eighth_grade" | "high_school" | "college" | "professional";
 type TonePreset = "casual" | "neutral" | "formal";
 type LengthPreset = "extra_short" | "short" | "medium" | "long" | "extra_long";
-type MethodologyPreset = "pas" | "aida" | "bab" | "jtbd";
+type MethodologyPreset = "none" | "pas" | "aida" | "bab" | "jtbd";
 type FocusPreset = "pain" | "neutral" | "benefits";
 type CtaType =
   | "initiate_conversation"
@@ -47,11 +50,33 @@ type MentionBlock =
   | "company_industry"
   | "conversation_recap";
 
+type GeneratedVariant = {
+  id: string;
+  variantIndex: number;
+  content: string;
+  rationale: string;
+  warnings: string[];
+  created_at: string;
+};
+
+type ContextMeta = {
+  siblingMessageCount: number;
+  researchCached: boolean;
+  hasCuratedCompanyNotes: boolean;
+  hasCuratedContactNotes: boolean;
+  priorityAnchorCount: number;
+  researchPartial: boolean;
+};
+
 const props = defineProps<{
   show: boolean;
   projectId: string | null;
   conversationUuid: string | null;
   contactId: string | null;
+  leadUuid?: string | null;
+  senderProfileUuid?: string | null;
+  contactName?: string | null;
+  senderDisplayName?: string | null;
   preset: ModePreset;
   hypotheses: Array<{ id: string; name: string }>;
 }>();
@@ -59,6 +84,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "update:show", v: boolean): void;
   (e: "generated", payload: { id: string; content: string; created_at: string }): void;
+  (e: "sent"): void;
 }>();
 
 const message = useMessage();
@@ -88,7 +114,7 @@ const questionCountMax = ref<0 | 1 | 2>(1);
 const readingLevelPreset = ref<ReadingLevelPreset>("high_school");
 const tonePreset = ref<TonePreset>("casual");
 const lengthPreset = ref<LengthPreset>("medium");
-const methodology = ref<MethodologyPreset>("pas");
+const methodology = ref<MethodologyPreset>("none");
 const focus = ref<FocusPreset>("pain");
 const ctaType = ref<CtaType>("initiate_conversation");
 const temperature = ref<number>(0.7);
@@ -102,10 +128,24 @@ const mentionBlocks = ref<MentionBlock[]>([
 const additionalInstructions = ref("");
 const messageExamples = ref<string[]>([]);
 const selectedHypothesisId = ref<string | null>(null);
+const forceResearchRefresh = ref(false);
+const showAdvanced = ref(false);
 
 const generationLoading = ref(false);
 const generationError = ref("");
 const generatedText = ref("");
+const variants = ref<GeneratedVariant[]>([]);
+const contextMeta = ref<ContextMeta | null>(null);
+const selectedVariantIdx = ref<number | null>(null);
+const editText = ref("");
+const selectedGeneratedId = ref<string | null>(null);
+const refineInstructions = ref("");
+const refining = ref(false);
+const sending = ref(false);
+const confirmSendOpen = ref(false);
+const senderUuid = ref<string | null>(null);
+const senderOptions = ref<Array<{ label: string; value: string }>>([]);
+const sendersLoading = ref(false);
 const presetVersionsLoading = ref(false);
 const presetVersionsError = ref("");
 const presetVersions = ref<
@@ -187,6 +227,7 @@ const lengthPresetOptions: Array<{ label: string; value: LengthPreset }> = [
   { label: "Extra Long (150-200 words)", value: "extra_long" },
 ];
 const methodologyOptions: Array<{ label: string; value: MethodologyPreset }> = [
+  { label: "None", value: "none" },
   { label: "PAS (Problem-Agitate-Solution)", value: "pas" },
   { label: "AIDA (Attention-Interest-Desire-Action)", value: "aida" },
   { label: "BAB (Before-After-Bridge)", value: "bab" },
@@ -208,11 +249,34 @@ const ctaTypeOptions: Array<{ label: string; value: CtaType }> = [
   { label: "Custom", value: "custom" },
 ];
 const methodologyHints: Record<MethodologyPreset, string> = {
+  none: "No fixed persuasion framework — write a natural reply.",
   pas: "Problem-Agitate-Solution: pain-first short outreach structure.",
   aida: "Attention-Interest-Desire-Action: classic persuasion sequence.",
   bab: "Before-After-Bridge: current state -> desired state -> path.",
   jtbd: "Jobs-to-be-Done: center on recipient job and desired progress.",
 };
+
+const contextMetaLabel = computed(() => {
+  const m = contextMeta.value;
+  if (!m) return "";
+  const parts: string[] = [];
+  if (m.siblingMessageCount > 0) parts.push(`${m.siblingMessageCount} sibling msgs`);
+  if (m.hasCuratedContactNotes || m.hasCuratedCompanyNotes) parts.push("curated notes");
+  if (m.priorityAnchorCount > 0) parts.push(`${m.priorityAnchorCount} POV anchors`);
+  if (m.researchCached) parts.push("research cached");
+  else if (m.researchPartial) parts.push("research partial");
+  else parts.push("research loaded");
+  return parts.join(" · ");
+});
+
+const canSend = computed(
+  () =>
+    Boolean(props.projectId) &&
+    Boolean(props.leadUuid || props.contactId) &&
+    Boolean(senderUuid.value) &&
+    Boolean(editText.value.trim()) &&
+    !sending.value
+);
 
 const hypothesisOptions = computed(() =>
   props.hypotheses.map((h) => ({ label: h.name, value: h.id }))
@@ -426,7 +490,7 @@ function loadPresetByName(name: string | null) {
   readingLevelPreset.value = p.readingLevelPreset ?? "high_school";
   tonePreset.value = p.tonePreset ?? "casual";
   lengthPreset.value = p.lengthPreset ?? "medium";
-  methodology.value = p.methodology ?? "pas";
+  methodology.value = (p.methodology as MethodologyPreset) ?? "none";
   focus.value = p.focus ?? "pain";
   ctaType.value = p.ctaType ?? "initiate_conversation";
   temperature.value = p.temperature;
@@ -526,7 +590,7 @@ async function loadPresetsFromApi(projectId: string) {
             : "high_school") as ReadingLevelPreset,
           tonePreset: (typeof s.tonePreset === "string" ? s.tonePreset : "casual") as TonePreset,
           lengthPreset: (typeof s.lengthPreset === "string" ? s.lengthPreset : "medium") as LengthPreset,
-          methodology: (typeof s.methodology === "string" ? s.methodology : "pas") as MethodologyPreset,
+          methodology: (typeof s.methodology === "string" ? s.methodology : "none") as MethodologyPreset,
           focus: (typeof s.focus === "string" ? s.focus : "pain") as FocusPreset,
           ctaType: (typeof s.ctaType === "string" ? s.ctaType : "initiate_conversation") as CtaType,
           temperature: typeof s.temperature === "number" ? s.temperature : 0.7,
@@ -810,7 +874,7 @@ function applyPreset(preset: ModePreset) {
     tonePreset.value = "casual";
     readingLevelPreset.value = "high_school";
     lengthPreset.value = "medium";
-    methodology.value = "pas";
+    methodology.value = "none";
     focus.value = "pain";
     ctaType.value = "initiate_conversation";
     tone.value = "friendly";
@@ -829,7 +893,7 @@ function applyPreset(preset: ModePreset) {
     tonePreset.value = "formal";
     readingLevelPreset.value = "professional";
     lengthPreset.value = "long";
-    methodology.value = "aida";
+    methodology.value = "none";
     focus.value = "benefits";
     ctaType.value = "schedule_meeting";
     tone.value = "professional";
@@ -910,9 +974,19 @@ watch(
     presetName.value = "";
     presetIcon.value = null;
     selectedPresetName.value = null;
+    variants.value = [];
+    contextMeta.value = null;
+    selectedVariantIdx.value = null;
+    editText.value = "";
+    selectedGeneratedId.value = null;
+    refineInstructions.value = "";
+    confirmSendOpen.value = false;
+    forceResearchRefresh.value = false;
+    senderUuid.value = props.senderProfileUuid ?? null;
     loadPresetsFromStorage();
     if (props.projectId) {
       void loadPresetsFromApi(props.projectId);
+      void loadSenders();
     }
     applyPreset(props.preset);
     if (defaultPresetName.value) {
@@ -923,6 +997,41 @@ watch(
     void loadModels();
   }
 );
+
+watch(
+  () => props.senderProfileUuid,
+  (v) => {
+    if (v) senderUuid.value = v;
+  }
+);
+
+async function loadSenders() {
+  if (!props.projectId) return;
+  sendersLoading.value = true;
+  try {
+    const r = await fetch(
+      `/api/generated-messages/senders?projectId=${encodeURIComponent(props.projectId)}`
+    );
+    const j = (await r.json()) as {
+      data?: Array<{ senderProfileUuid: string; displayName: string }>;
+      error?: string;
+    };
+    senderOptions.value = (j.data ?? []).map((s) => ({
+      label: s.displayName || s.senderProfileUuid,
+      value: s.senderProfileUuid,
+    }));
+    if (!senderUuid.value && props.senderProfileUuid) {
+      senderUuid.value = props.senderProfileUuid;
+    }
+    if (!senderUuid.value && senderOptions.value[0]) {
+      senderUuid.value = senderOptions.value[0].value;
+    }
+  } catch {
+    senderOptions.value = [];
+  } finally {
+    sendersLoading.value = false;
+  }
+}
 
 watch(
   () => props.preset,
@@ -947,6 +1056,11 @@ async function generateMessage() {
   generationLoading.value = true;
   generationError.value = "";
   generatedText.value = "";
+  variants.value = [];
+  contextMeta.value = null;
+  selectedVariantIdx.value = null;
+  editText.value = "";
+  selectedGeneratedId.value = null;
   const selectedPreset = selectedPresetName.value
     ? presets.value.find((p) => p.name === selectedPresetName.value) ?? null
     : null;
@@ -979,6 +1093,72 @@ async function generateMessage() {
         hypothesisId: selectedHypothesisId.value,
         temperature: temperature.value,
         presetId: selectedPreset?.id ?? null,
+        forceResearchRefresh: forceResearchRefresh.value,
+      }),
+    });
+    const j = (await r.json()) as {
+      data?: {
+        variants?: GeneratedVariant[];
+        contextMeta?: ContextMeta;
+        content?: string;
+        generatedMessage?: { id?: string; content?: string; created_at?: string };
+      };
+      error?: string;
+    };
+    if (!r.ok || j.error) {
+      generationError.value = j.error ?? "Generation failed.";
+      return;
+    }
+    const list = Array.isArray(j.data?.variants) ? j.data!.variants! : [];
+    if (list.length === 0) {
+      generationError.value = "Generation returned no variants.";
+      return;
+    }
+    variants.value = list;
+    contextMeta.value = j.data?.contextMeta ?? null;
+    for (const v of list) {
+      emit("generated", {
+        id: v.id,
+        content: v.content,
+        created_at: v.created_at,
+      });
+    }
+    selectVariant(0);
+    message.success("Generated 3 variants.");
+  } catch (e) {
+    generationError.value = e instanceof Error ? e.message : "Generation failed.";
+  } finally {
+    generationLoading.value = false;
+  }
+}
+
+function selectVariant(i: number) {
+  const v = variants.value[i];
+  if (!v) return;
+  selectedVariantIdx.value = i;
+  editText.value = v.content;
+  generatedText.value = v.content;
+  selectedGeneratedId.value = v.id;
+}
+
+async function refineSelected() {
+  if (!props.projectId || !selectedModel.value || !editText.value.trim() || !refineInstructions.value.trim()) {
+    message.warning("Select a variant and enter refine instructions.");
+    return;
+  }
+  refining.value = true;
+  generationError.value = "";
+  try {
+    const r = await fetch("/api/generated-messages/refine", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: props.projectId,
+        conversationUuid: props.conversationUuid,
+        model: selectedModel.value,
+        baseContent: editText.value,
+        instructions: refineInstructions.value,
+        generatedMessageId: selectedGeneratedId.value,
       }),
     });
     const j = (await r.json()) as {
@@ -989,34 +1169,84 @@ async function generateMessage() {
       error?: string;
     };
     if (!r.ok || j.error) {
-      generationError.value = j.error ?? "Generation failed.";
+      generationError.value = j.error ?? "Refine failed.";
       return;
     }
-    generatedText.value = j.data?.content?.trim() ?? "";
-    if (!generatedText.value) generationError.value = "Generation returned empty content.";
-    if (generatedText.value) {
-      const row = j.data?.generatedMessage;
-      if (row?.id && row.created_at) {
-        emit("generated", {
-          id: row.id,
-          content: typeof row.content === "string" && row.content.trim() ? row.content : generatedText.value,
-          created_at: row.created_at,
-        });
-      }
-      emit("update:show", false);
-      message.success("Generated and saved to pending.");
+    const content = j.data?.content?.trim() ?? "";
+    if (!content) {
+      generationError.value = "Refine returned empty content.";
+      return;
     }
+    editText.value = content;
+    generatedText.value = content;
+    const row = j.data?.generatedMessage;
+    if (row?.id && row.created_at) {
+      selectedGeneratedId.value = row.id;
+      emit("generated", {
+        id: row.id,
+        content: row.content ?? content,
+        created_at: row.created_at,
+      });
+    }
+    if (selectedVariantIdx.value != null && variants.value[selectedVariantIdx.value]) {
+      variants.value[selectedVariantIdx.value] = {
+        ...variants.value[selectedVariantIdx.value],
+        content,
+        id: selectedGeneratedId.value ?? variants.value[selectedVariantIdx.value].id,
+      };
+    }
+    refineInstructions.value = "";
+    message.success("Draft refined.");
   } catch (e) {
-    generationError.value = e instanceof Error ? e.message : "Generation failed.";
+    generationError.value = e instanceof Error ? e.message : "Refine failed.";
   } finally {
-    generationLoading.value = false;
+    refining.value = false;
+  }
+}
+
+async function sendSelected() {
+  const leadUuid = props.leadUuid || props.contactId;
+  if (!props.projectId || !leadUuid || !senderUuid.value || !editText.value.trim()) {
+    message.warning("Missing project, lead, sender, or message text.");
+    return false;
+  }
+  sending.value = true;
+  generationError.value = "";
+  try {
+    const r = await fetch("/api/generated-messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        projectId: props.projectId,
+        leadUuid,
+        senderProfileUuid: senderUuid.value,
+        text: editText.value,
+        generatedMessageId: selectedGeneratedId.value,
+      }),
+    });
+    const j = (await r.json()) as { ok?: boolean; error?: string };
+    if (!r.ok || j.error) {
+      generationError.value = j.error ?? "Send failed.";
+      return false;
+    }
+    confirmSendOpen.value = false;
+    message.success("Sent via GetSales.");
+    emit("sent");
+    emit("update:show", false);
+    return true;
+  } catch (e) {
+    generationError.value = e instanceof Error ? e.message : "Send failed.";
+    return false;
+  } finally {
+    sending.value = false;
   }
 }
 
 async function copyGeneratedMessage() {
-  if (!generatedText.value) return;
+  const text = editText.value || generatedText.value;
+  if (!text) return;
   try {
-    await navigator.clipboard.writeText(generatedText.value);
+    await navigator.clipboard.writeText(text);
     message.success("Generated message copied.");
   } catch {
     message.error("Failed to copy generated message.");
@@ -1165,12 +1395,8 @@ async function copyGeneratedMessage() {
 
             <div class="gm-section">
               <div class="gm-section-title">2) Writing style</div>
-              <div class="gm-section-subtitle">Set tone and persuasion strategy.</div>
+              <div class="gm-section-subtitle">Tone, length, CTA — methodology is optional (None by default).</div>
               <div class="gm-grid2">
-          <div>
-            <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Reading level</div>
-            <NSelect v-model:value="readingLevelPreset" :options="readingLevelPresetOptions" />
-          </div>
           <div>
             <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Tone</div>
             <NSelect v-model:value="tonePreset" :options="tonePresetOptions" />
@@ -1178,6 +1404,16 @@ async function copyGeneratedMessage() {
           <div>
             <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Length</div>
             <NSelect v-model:value="lengthPreset" :options="lengthPresetOptions" />
+          </div>
+          <div>
+            <div class="gm-label-with-help">
+              <span>Call to action</span>
+              <NTooltip trigger="hover">
+                <template #trigger><span class="gm-help">?</span></template>
+                Injects target CTA behavior into prompt (meeting ask, feedback ask, intro request, etc).
+              </NTooltip>
+            </div>
+            <NSelect v-model:value="ctaType" :options="ctaTypeOptions" />
           </div>
           <div>
             <div class="gm-label-with-help">
@@ -1189,6 +1425,20 @@ async function copyGeneratedMessage() {
             </div>
             <NSelect v-model:value="methodology" :options="methodologyOptions" />
           </div>
+        </div>
+              <NButton
+                text
+                type="primary"
+                style="margin-top: 10px"
+                @click="showAdvanced = !showAdvanced"
+              >
+                {{ showAdvanced ? "Hide advanced" : "Show advanced" }}
+              </NButton>
+              <div v-if="showAdvanced" class="gm-grid2" style="margin-top: 10px">
+          <div>
+            <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Reading level</div>
+            <NSelect v-model:value="readingLevelPreset" :options="readingLevelPresetOptions" />
+          </div>
           <div>
             <div class="gm-label-with-help">
               <span>Focus</span>
@@ -1198,16 +1448,6 @@ async function copyGeneratedMessage() {
               </NTooltip>
             </div>
             <NSelect v-model:value="focus" :options="focusOptions" />
-          </div>
-          <div>
-            <div class="gm-label-with-help">
-              <span>Call to action</span>
-              <NTooltip trigger="hover">
-                <template #trigger><span class="gm-help">?</span></template>
-                Injects target CTA behavior into prompt (meeting ask, feedback ask, intro request, etc).
-              </NTooltip>
-            </div>
-            <NSelect v-model:value="ctaType" :options="ctaTypeOptions" />
           </div>
           <div>
             <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Emoji policy</div>
@@ -1290,20 +1530,23 @@ async function copyGeneratedMessage() {
 
             <div class="gm-section">
               <div class="gm-section-title">5) Additional instructions</div>
-              <div class="gm-section-subtitle">Optional custom constraints appended to prompt.</div>
-              <div class="gm-label-with-help">
-                <span>Additional instructions (optional)</span>
-                <NTooltip trigger="hover">
-                  <template #trigger><span class="gm-help">?</span></template>
-                  Appended directly to prompt. Use for hard constraints, banned phrases, or custom CTA wording.
-                </NTooltip>
-              </div>
+              <div class="gm-section-subtitle">Tell the model what to emphasize. Context (sibling threads, POV, research) loads automatically.</div>
               <NInput
                 v-model:value="additionalInstructions"
                 type="textarea"
-                :rows="2"
-                placeholder="Example: keep ask very soft, no hard CTA"
+                :rows="3"
+                placeholder="Example: reference their Riverstone platform work; keep it short; soft ask for a call"
               />
+              <NSpace style="margin-top: 8px" align="center">
+                <NButton
+                  size="small"
+                  :type="forceResearchRefresh ? 'warning' : 'default'"
+                  secondary
+                  @click="forceResearchRefresh = !forceResearchRefresh"
+                >
+                  {{ forceResearchRefresh ? "Fresh research required" : "Use research under 30 days" }}
+                </NButton>
+              </NSpace>
             </div>
           </div>
           <input
@@ -1362,18 +1605,97 @@ async function copyGeneratedMessage() {
       {{ generationError }}
     </NAlert>
 
-    <div v-if="generatedText" style="margin-top: 12px">
-      <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Generated message</div>
-      <NInput v-model:value="generatedText" type="textarea" :rows="6" />
+    <NAlert v-if="contextMetaLabel" type="info" :show-icon="false" style="margin-top: 12px">
+      Context: {{ contextMetaLabel }}
+    </NAlert>
+
+    <div v-if="variants.length" class="gm-variants" style="margin-top: 12px">
+      <div class="gm-section-title">Variants — pick one</div>
+      <div class="gm-variant-grid">
+        <NCard
+          v-for="(v, i) in variants"
+          :key="v.id"
+          size="small"
+          :title="`Variant ${v.variantIndex}`"
+          :class="{ 'gm-variant-card--active': selectedVariantIdx === i }"
+          style="cursor: pointer"
+          @click="selectVariant(i)"
+        >
+          <template #header-extra>
+            <NTag v-if="v.warnings.length" size="small" type="warning">{{ v.warnings.length }} warn</NTag>
+          </template>
+          <div class="gm-variant-body">{{ v.content }}</div>
+          <NDivider style="margin: 8px 0" />
+          <div class="gm-variant-rationale">{{ v.rationale }}</div>
+        </NCard>
+      </div>
+    </div>
+
+    <div v-if="selectedVariantIdx !== null" style="margin-top: 12px">
+      <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Selected draft (edit before send)</div>
+      <NInput v-model:value="editText" type="textarea" :rows="6" />
+      <div style="margin-top: 10px">
+        <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Refine with instructions</div>
+        <NInput
+          v-model:value="refineInstructions"
+          type="textarea"
+          :rows="2"
+          placeholder="Example: shorter, mention their recent reply about X"
+        />
+        <NButton
+          style="margin-top: 8px"
+          secondary
+          :loading="refining"
+          :disabled="!refineInstructions.trim() || refining"
+          @click="refineSelected"
+        >
+          Refine draft
+        </NButton>
+      </div>
+      <div style="margin-top: 12px">
+        <div style="margin-bottom: 6px; font-size: 12px; opacity: 0.8">Send as</div>
+        <NSelect
+          v-model:value="senderUuid"
+          :options="senderOptions"
+          :loading="sendersLoading"
+          filterable
+          placeholder="Sender profile"
+          style="max-width: 360px"
+        />
+      </div>
     </div>
 
     <NSpace justify="end" style="margin-top: 16px">
       <NButton @click="emit('update:show', false)">Close</NButton>
-      <NButton :disabled="!generatedText" @click="copyGeneratedMessage">Copy</NButton>
+      <NButton :disabled="!editText && !generatedText" @click="copyGeneratedMessage">Copy</NButton>
       <NButton type="primary" :disabled="!canGenerate" :loading="generationLoading" @click="generateMessage">
-        Generate
+        Generate 3 variants
+      </NButton>
+      <NButton
+        type="primary"
+        :disabled="!canSend"
+        :loading="sending"
+        @click="confirmSendOpen = true"
+      >
+        Send via GetSales
       </NButton>
     </NSpace>
+
+    <NModal
+      v-model:show="confirmSendOpen"
+      preset="dialog"
+      title="Send LinkedIn message?"
+      positive-text="Send"
+      negative-text="Cancel"
+      :loading="sending"
+      @positive-click="sendSelected"
+    >
+      <p>
+        Send to <strong>{{ contactName || leadUuid || contactId || "contact" }}</strong>
+        from <strong>{{ senderOptions.find((s) => s.value === senderUuid)?.label || senderDisplayName || senderUuid }}</strong>?
+      </p>
+      <NInput :value="editText" type="textarea" :rows="5" readonly style="margin-top: 10px" />
+    </NModal>
   </NModal>
 </template>
 
@@ -1382,6 +1704,32 @@ async function copyGeneratedMessage() {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.gm-variant-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.gm-variant-body {
+  white-space: pre-wrap;
+  line-height: 1.45;
+  font-size: 13px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.gm-variant-rationale {
+  font-size: 12px;
+  opacity: 0.72;
+  line-height: 1.35;
+}
+
+.gm-variant-card--active {
+  outline: 2px solid var(--n-primary-color, #18a058);
+  outline-offset: 1px;
 }
 
 .gm-layout {

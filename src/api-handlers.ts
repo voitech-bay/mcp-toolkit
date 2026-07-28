@@ -93,6 +93,7 @@ import {
   createGeneratedMessage,
   listGeneratedMessagesByContact,
   deleteGeneratedMessageById,
+  linkLinkedinMessageToGeneratedMessage,
   listGeneratedMessagePresets,
   listGeneratedMessagePresetVersions,
   setGeneratedMessagePresetDefault,
@@ -156,6 +157,8 @@ import {
   fetchContactsByUuidsConcurrent,
   fetchLeadUuidsByListUuid,
   verifyGetSalesCredentials,
+  sendLinkedInMessage,
+  fetchAllSenders,
   type ApiCredentials,
 } from "./services/source-api.js";
 import { syncPipedriveDeals } from "./services/pipedrive-deals-sync.js";
@@ -170,8 +173,6 @@ import {
   pipeOpenRouterChatStreamToSse,
 } from "./services/openrouter.js";
 import {
-  buildGeneratedMessagePrompt,
-  evaluateGeneratedMessageQuality,
   type GenerationTone,
   type MentionBlock,
   type GenerationGoal,
@@ -186,7 +187,13 @@ import {
   type MethodologyPreset,
   type FocusPreset,
   type CtaType,
+  type PromptInput,
 } from "./services/generated-message-prompt.js";
+import {
+  assembleReplyRichContext,
+  generateReplyVariants,
+  refineReplyDraft,
+} from "./services/conversation-reply-generate.js";
 import {
   normalizePresetWithLlm,
   normalizationHash,
@@ -1167,6 +1174,7 @@ const ALLOWED_LENGTH_PRESET = new Set<LengthPreset>([
   "extra_long",
 ]);
 const ALLOWED_METHODOLOGY_PRESET = new Set<MethodologyPreset>([
+  "none",
   "pas",
   "aida",
   "bab",
@@ -1706,7 +1714,7 @@ export async function handleDeleteGeneratedMessage(
   res.end(JSON.stringify({ ok: true }));
 }
 
-/** POST /api/generated-messages/generate */
+/** POST /api/generated-messages/generate — rich context + 3 LinkedIn reply variants */
 export async function handlePostGenerateMessage(
   req: IncomingMessage,
   res: ServerResponse
@@ -1750,6 +1758,7 @@ export async function handlePostGenerateMessage(
         methodology?: MethodologyPreset;
         focus?: FocusPreset;
         ctaType?: CtaType;
+        forceResearchRefresh?: boolean;
       }
     | undefined;
   const projectId = body?.projectId?.trim();
@@ -1854,7 +1863,7 @@ export async function handlePostGenerateMessage(
   );
   const tonePreset = parseEnumOrDefault(body?.tonePreset, ALLOWED_TONE_PRESET, "casual");
   const lengthPreset = parseEnumOrDefault(body?.lengthPreset, ALLOWED_LENGTH_PRESET, "medium");
-  const methodology = parseEnumOrDefault(body?.methodology, ALLOWED_METHODOLOGY_PRESET, "pas");
+  const methodology = parseEnumOrDefault(body?.methodology, ALLOWED_METHODOLOGY_PRESET, "none");
   const focus = parseEnumOrDefault(body?.focus, ALLOWED_FOCUS_PRESET, "pain");
   const ctaType = parseEnumOrDefault(body?.ctaType, ALLOWED_CTA_TYPE, "initiate_conversation");
   const temperature =
@@ -1867,7 +1876,30 @@ export async function handlePostGenerateMessage(
         .filter(Boolean)
         .slice(0, 8)
     : [];
-  const prompt = buildGeneratedMessagePrompt({
+  const additionalInstructions =
+    typeof body?.additionalInstructions === "string" ? body.additionalInstructions : "";
+
+  let assembled;
+  try {
+    assembled = await assembleReplyRichContext(client, {
+      projectId,
+      contactId,
+      companyId,
+      model,
+      forceResearchRefresh: Boolean(body?.forceResearchRefresh),
+    });
+  } catch (e) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: e instanceof Error ? e.message : "Failed to assemble reply context" }));
+    return;
+  }
+
+  const threadMessages =
+    (conv.messages?.length ? conv.messages : assembled.outreach.target_messages) as Array<
+      Record<string, unknown>
+    >;
+
+  const promptInput: PromptInput = {
     projectId,
     tone,
     goal,
@@ -1885,18 +1917,27 @@ export async function handlePostGenerateMessage(
     ctaType,
     format,
     mentionBlocks,
-    additionalInstructions: typeof body?.additionalInstructions === "string" ? body.additionalInstructions : "",
+    additionalInstructions,
     messageExamples,
-    contact,
-    company: (company as Record<string, unknown> | null) ?? null,
-    messages: (conv.messages ?? []) as Array<Record<string, unknown>>,
-  });
+    contact: (assembled.outreach.contact ?? contact) as Record<string, unknown>,
+    company: (assembled.outreach.company as Record<string, unknown> | null) ??
+      ((company as Record<string, unknown> | null) ?? null),
+    messages: threadMessages,
+    richContext: assembled.rich,
+    multiVariant: true,
+  };
+
   let normalizedPreset: { id: string; model: string; strategy: Record<string, unknown> } | null = null;
-  let resolvedSystemPrompt = prompt.systemPrompt;
   if (presetId != null) {
     const preset = await getGeneratedMessagePresetById(client, presetId);
     if (!preset.error && preset.data && preset.data.status === "active") {
-      resolvedSystemPrompt = preset.data.normalized_system_prompt;
+      // Preset system prompt still applied as additional style guidance via instructions overlay.
+      promptInput.additionalInstructions = [
+        additionalInstructions.trim(),
+        `Style preset system guidance:\n${preset.data.normalized_system_prompt}`,
+      ]
+        .filter(Boolean)
+        .join("\n\n");
       normalizedPreset = {
         id: preset.data.id,
         model: preset.data.normalization_model,
@@ -1906,88 +1947,367 @@ export async function handlePostGenerateMessage(
     }
   }
 
-  const llmRes = await generateOpenRouterMessage({
-    model,
-    systemPrompt: resolvedSystemPrompt,
-    userPrompt: prompt.userPrompt,
-    temperature,
-    user: `contact:${contactId}`,
-    sessionId: `conversation:${conversationUuid}`,
-    trace: {
-      trace_id: `conversation:${conversationUuid}`,
-      trace_name: "Generated Message",
-      span_name: "Generate LinkedIn Reply",
-      generation_name: "OpenRouter Completion",
-      feature: "generated-message",
-      project_id: projectId,
-      conversation_uuid: conversationUuid,
-      contact_id: contactId,
-      hypothesis_id: hypothesisId,
-      methodology,
-      goal,
-      cta_type: ctaType,
-    },
-  });
-  if (llmRes.error || !llmRes.data) {
+  let generated;
+  try {
+    generated = await generateReplyVariants({
+      model,
+      projectId,
+      contactId,
+      promptInput,
+      knowledge: assembled.knowledge,
+    });
+  } catch (e) {
     res.writeHead(502);
-    res.end(JSON.stringify({ error: llmRes.error ?? "Generation failed" }));
+    res.end(JSON.stringify({ error: e instanceof Error ? e.message : "Generation failed" }));
     return;
   }
-  const quality = evaluateGeneratedMessageQuality(llmRes.data.text, {
-    tone,
-    goal,
-    ctaStyle,
-    personalizationDepth,
-    readingLevel,
-    formality,
-    emojiPolicy,
-    questionCountMax,
-    readingLevelPreset,
-    tonePreset,
-    lengthPreset,
-    methodology,
-    focus,
-    ctaType,
-    format,
-    mentionBlocks,
-    additionalInstructions: typeof body?.additionalInstructions === "string" ? body.additionalInstructions : "",
-    messageExamples,
-    contact,
-    company: (company as Record<string, unknown> | null) ?? null,
-    messages: (conv.messages ?? []) as Array<Record<string, unknown>>,
-  });
 
-  const insertRes = await createGeneratedMessage(client, {
-    hypothesisId,
-    contactId,
-    projectCompanyId,
-    content: llmRes.data.text,
-    generationContext: {
-      provider: "openrouter",
-      provider_run_id: llmRes.data.id,
-      provider_model: llmRes.data.model,
-      conversation_uuid: conversationUuid,
-      temperature,
-      preset_id: presetId,
-      normalized_preset: normalizedPreset,
-      quality,
-      ...prompt.contextPayload,
-    },
-  });
-  if (insertRes.error || !insertRes.data) {
-    res.writeHead(500);
-    res.end(JSON.stringify({ error: insertRes.error ?? "Failed to persist generated message." }));
-    return;
+  const variantsOut: Array<{
+    id: string;
+    variantIndex: number;
+    content: string;
+    rationale: string;
+    warnings: string[];
+    created_at: string;
+  }> = [];
+
+  for (let i = 0; i < generated.variants.length; i++) {
+    const v = generated.variants[i];
+    const insertRes = await createGeneratedMessage(client, {
+      hypothesisId,
+      contactId,
+      projectCompanyId,
+      content: v.body,
+      channel: "message",
+      subject: null,
+      variantIndex: i + 1,
+      draftStatus: "draft",
+      generationContext: {
+        provider: "openrouter",
+        provider_model: model,
+        conversation_uuid: conversationUuid,
+        temperature,
+        preset_id: presetId,
+        normalized_preset: normalizedPreset,
+        feature: "conversation-generate",
+        rationale: v.rationale,
+        warnings: v.warnings,
+        usage: generated.usage,
+        contextMeta: assembled.contextMeta,
+        ...generated.prompt.contextPayload,
+      },
+    });
+    if (insertRes.error || !insertRes.data) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ error: insertRes.error ?? "Failed to persist generated message." }));
+      return;
+    }
+    variantsOut.push({
+      id: insertRes.data.id,
+      variantIndex: i + 1,
+      content: v.body,
+      rationale: v.rationale,
+      warnings: v.warnings,
+      created_at: insertRes.data.created_at,
+    });
   }
 
   res.writeHead(201);
-  res.end(JSON.stringify({
-    data: {
-      generatedMessage: insertRes.data,
-      content: llmRes.data.text,
-      model: llmRes.data.model,
-    },
-  }));
+  res.end(
+    JSON.stringify({
+      data: {
+        variants: variantsOut,
+        model,
+        contextMeta: assembled.contextMeta,
+        // Backward-compatible fields (first variant)
+        content: variantsOut[0]?.content ?? "",
+        generatedMessage: variantsOut[0]
+          ? {
+              id: variantsOut[0].id,
+              content: variantsOut[0].content,
+              created_at: variantsOut[0].created_at,
+            }
+          : null,
+      },
+    })
+  );
+}
+
+/** POST /api/generated-messages/refine — revise a chosen draft with operator instructions */
+export async function handlePostRefineGeneratedMessage(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        projectId?: string;
+        conversationUuid?: string;
+        model?: string;
+        baseContent?: string;
+        instructions?: string;
+        generatedMessageId?: string | null;
+        contactId?: string;
+        temperature?: number;
+      }
+    | undefined;
+  const projectId = body?.projectId?.trim();
+  const model = body?.model?.trim();
+  const baseContent = typeof body?.baseContent === "string" ? body.baseContent : "";
+  const instructions = typeof body?.instructions === "string" ? body.instructions : "";
+  if (!projectId || !model || !baseContent.trim() || !instructions.trim()) {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({ error: "projectId, model, baseContent, and instructions are required" })
+    );
+    return;
+  }
+
+  let refined;
+  try {
+    refined = await refineReplyDraft({
+      model,
+      projectId,
+      baseContent,
+      instructions,
+      temperature: typeof body?.temperature === "number" ? body.temperature : 0.5,
+    });
+  } catch (e) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: e instanceof Error ? e.message : "Refine failed" }));
+    return;
+  }
+
+  let savedId: string | null = null;
+  let createdAt: string | null = null;
+  const sourceId =
+    typeof body?.generatedMessageId === "string" && body.generatedMessageId.trim()
+      ? body.generatedMessageId.trim()
+      : null;
+  if (sourceId) {
+    const { data: src } = await client
+      .from("generated_messages")
+      .select("contact_id,project_company_id,hypothesis_id,variant_index")
+      .eq("id", sourceId)
+      .maybeSingle();
+    if (src && typeof src.contact_id === "string" && typeof src.project_company_id === "string") {
+      const insertRes = await createGeneratedMessage(client, {
+        hypothesisId: typeof src.hypothesis_id === "string" ? src.hypothesis_id : null,
+        contactId: src.contact_id,
+        projectCompanyId: src.project_company_id,
+        content: refined.content,
+        channel: "message",
+        subject: null,
+        variantIndex: typeof src.variant_index === "number" ? src.variant_index : null,
+        draftStatus: "draft",
+        generationContext: {
+          provider: "openrouter",
+          feature: "conversation-refine",
+          provider_model: refined.model,
+          conversation_uuid: body?.conversationUuid ?? null,
+          refined_from: sourceId,
+          instructions,
+        },
+      });
+      if (insertRes.data) {
+        savedId = insertRes.data.id;
+        createdAt = insertRes.data.created_at;
+      }
+    }
+  }
+
+  res.writeHead(200);
+  res.end(
+    JSON.stringify({
+      data: {
+        content: refined.content,
+        model: refined.model,
+        generatedMessage: savedId && createdAt ? { id: savedId, content: refined.content, created_at: createdAt } : null,
+      },
+    })
+  );
+}
+
+/** POST /api/generated-messages/send — send LinkedIn message via GetSales */
+export async function handlePostSendGeneratedMessage(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const body = (await getParsedBody(req)) as
+    | {
+        projectId?: string;
+        leadUuid?: string;
+        senderProfileUuid?: string;
+        text?: string;
+        generatedMessageId?: string | null;
+      }
+    | undefined;
+  const projectId = body?.projectId?.trim();
+  const leadUuid = body?.leadUuid?.trim();
+  const senderProfileUuid = body?.senderProfileUuid?.trim();
+  const text = typeof body?.text === "string" ? body.text.trim() : "";
+  const generatedMessageId =
+    typeof body?.generatedMessageId === "string" && body.generatedMessageId.trim()
+      ? body.generatedMessageId.trim()
+      : null;
+
+  if (!projectId || !leadUuid || !senderProfileUuid || !text) {
+    res.writeHead(400);
+    res.end(
+      JSON.stringify({
+        error: "projectId, leadUuid, senderProfileUuid, and text are required",
+      })
+    );
+    return;
+  }
+
+  const { data: contact, error: contactErr } = await client
+    .from(CONTACTS_TABLE)
+    .select("uuid,project_id,name,first_name,last_name")
+    .eq("uuid", leadUuid)
+    .maybeSingle();
+  if (contactErr) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: contactErr.message }));
+    return;
+  }
+  if (!contact) {
+    res.writeHead(404);
+    res.end(JSON.stringify({ error: "Contact not found" }));
+    return;
+  }
+  if (typeof contact.project_id === "string" && contact.project_id !== projectId) {
+    res.writeHead(403);
+    res.end(JSON.stringify({ error: "Contact does not belong to this project" }));
+    return;
+  }
+
+  const credRes = await getGetSalesCredentials(client, projectId);
+  if (credRes.error || !credRes.credentials) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: credRes.error ?? "GetSales credentials not configured" }));
+    return;
+  }
+
+  let sent: Record<string, unknown>;
+  try {
+    sent = await sendLinkedInMessage(credRes.credentials, {
+      senderProfileUuid,
+      leadUuid,
+      text,
+      channel: "linkedin",
+    });
+  } catch (e) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }));
+    return;
+  }
+
+  const sentUuid = typeof sent.uuid === "string" ? sent.uuid : null;
+  if (generatedMessageId && sentUuid) {
+    await linkLinkedinMessageToGeneratedMessage(client, sentUuid, generatedMessageId);
+  }
+  if (generatedMessageId) {
+    const { data: existing } = await client
+      .from("generated_messages")
+      .select("generation_context")
+      .eq("id", generatedMessageId)
+      .maybeSingle();
+    const prev =
+      existing?.generation_context && typeof existing.generation_context === "object"
+        ? (existing.generation_context as Record<string, unknown>)
+        : {};
+    await client
+      .from("generated_messages")
+      .update({
+        draft_status: "sent",
+        generation_context: {
+          ...prev,
+          sent_via: "conversation-generate",
+          sender_profile_uuid: senderProfileUuid,
+          getsales_message_uuid: sentUuid,
+          sent_at: new Date().toISOString(),
+        },
+      })
+      .eq("id", generatedMessageId);
+  }
+
+  res.writeHead(200);
+  res.end(JSON.stringify({ ok: true, message: sent }));
+}
+
+/** GET /api/generated-messages/senders?projectId= */
+export async function handleGetGeneratedMessageSenders(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = (params.get("projectId") ?? "").trim();
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "projectId is required" }));
+    return;
+  }
+  const credRes = await getGetSalesCredentials(client, projectId);
+  if (credRes.error || !credRes.credentials) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: credRes.error ?? "GetSales credentials not configured", data: [] }));
+    return;
+  }
+  try {
+    const senders = await fetchAllSenders(credRes.credentials);
+    const list = (senders.data ?? []).map((s) => {
+      const row = s as Record<string, unknown>;
+      const uuid = String(row.uuid ?? row.sender_profile_uuid ?? "");
+      const first = typeof row.first_name === "string" ? row.first_name : "";
+      const last = typeof row.last_name === "string" ? row.last_name : "";
+      const name = [first, last].filter(Boolean).join(" ") || uuid;
+      return { senderProfileUuid: uuid, displayName: name, raw: row };
+    }).filter((s) => s.senderProfileUuid);
+    res.writeHead(200);
+    res.end(JSON.stringify({ data: list }));
+  } catch (e) {
+    res.writeHead(502);
+    res.end(JSON.stringify({ error: e instanceof Error ? e.message : String(e), data: [] }));
+  }
 }
 
 export async function handleGetCompanyContext(

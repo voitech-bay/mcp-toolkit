@@ -192,6 +192,8 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (/^\/api\/companies\/[^/]+\/hypotheses$/.test(pathname)) return true;
   if (pathname === "/api/build-context") return true;
   if (pathname === "/api/generated-messages" || pathname === "/api/generated-messages/generate") return true;
+  if (pathname === "/api/generated-messages/refine" || pathname === "/api/generated-messages/send") return true;
+  if (pathname === "/api/generated-messages/senders") return true;
   if (/^\/api\/generated-messages\/[^/]+$/.test(pathname)) return true;
 
   // Velvetech launch and results.

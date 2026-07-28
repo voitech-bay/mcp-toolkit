@@ -934,6 +934,12 @@ async function onGeneratedMessage(payload: { id: string; content: string; create
   if (contactId) await fetchGeneratedDrafts(contactId);
 }
 
+async function onGeneratedMessageSent() {
+  const contactId = dialogueContactId.value;
+  if (contactId) await fetchGeneratedDrafts(contactId);
+  if (selectedConvUuid.value) await fetchDialogue(selectedConvUuid.value);
+}
+
 /** Optional: ReplyContextModal "Copy context" still uses /api/build-context + clipboard. */
 function onReplyContextBuilt(contextText: string) {
   navigator.clipboard.writeText(contextText).then(() => {
@@ -1449,9 +1455,14 @@ const filteredRelatedContacts = computed(() => {
     :project-id="projectStore.selectedProjectId"
     :conversation-uuid="selectedConvUuid"
     :contact-id="dialogueContactId"
+    :lead-uuid="selectedConvItem?.leadUuid ?? dialogueContactId"
+    :sender-profile-uuid="selectedConvItem?.senderProfileUuid ?? null"
+    :contact-name="contactName"
+    :sender-display-name="selectedConvItem?.senderDisplayName ?? null"
     :preset="generateMessagePreset"
     :hypotheses="hypotheses"
     @generated="onGeneratedMessage"
+    @sent="onGeneratedMessageSent"
   />
 
   <AttachCompanyModal

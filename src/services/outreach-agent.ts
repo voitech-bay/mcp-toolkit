@@ -80,7 +80,14 @@ export async function loadKnowledge(client: SupabaseClient, projectId: string): 
   return { documents, manifest: documents.map(({ id, kind, title, version, source_checksum }) => ({ id, kind, title, version, source_checksum })) };
 }
 
-export async function structuredCall<T>(params: { model: string; system: string; user: string; schema: z.ZodType<T>; tools?: unknown[]; trace: Json }): Promise<{ value: T; usage: Json | null; annotations: unknown[] }> {
+export async function structuredCall<T>(params: {
+  model: string;
+  system: string;
+  user: string;
+  schema: z.ZodType<T>;
+  tools?: unknown[];
+  trace: Json;
+}): Promise<{ value: T; usage: Json | null; annotations: unknown[] }> {
   let first = await generateOpenRouterMessage({ model: params.model, systemPrompt: params.system, userPrompt: params.user, temperature: 0.2, maxTokens: 8_000, reasoningEffort: "low", tools: params.tools, timeoutMs: 150_000, trace: params.trace });
   if (first.error?.includes("empty assistant message")) {
     // Reasoning models can still burn the whole budget on hidden reasoning even at low effort;

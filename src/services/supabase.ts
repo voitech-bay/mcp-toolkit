@@ -1069,6 +1069,10 @@ export interface GeneratedMessageRow {
   content: string;
   generation_context: Record<string, unknown> | null;
   created_at: string;
+  channel?: string | null;
+  subject?: string | null;
+  variant_index?: number | null;
+  draft_status?: string | null;
 }
 
 export interface GeneratedMessagePresetRow {
@@ -1168,6 +1172,10 @@ export async function createGeneratedMessage(
     projectCompanyId: string;
     content: string;
     generationContext?: Record<string, unknown> | null;
+    channel?: string | null;
+    subject?: string | null;
+    variantIndex?: number | null;
+    draftStatus?: string | null;
   }
 ): Promise<{ data: GeneratedMessageRow | null; error: string | null }> {
   const contactId = payload.contactId?.trim();
@@ -1176,13 +1184,17 @@ export async function createGeneratedMessage(
   if (!contactId) return { data: null, error: "contactId is required." };
   if (!projectCompanyId) return { data: null, error: "projectCompanyId is required." };
   if (!content) return { data: null, error: "content is required." };
-  const insert = {
+  const insert: Record<string, unknown> = {
     hypothesis_id: payload.hypothesisId ?? null,
     contact_id: contactId,
     project_company_id: projectCompanyId,
     content,
     generation_context: payload.generationContext ?? null,
   };
+  if (payload.channel != null) insert.channel = payload.channel;
+  if (payload.subject !== undefined) insert.subject = payload.subject;
+  if (payload.variantIndex != null) insert.variant_index = payload.variantIndex;
+  if (payload.draftStatus != null) insert.draft_status = payload.draftStatus;
   const { data, error } = await client
     .from(GENERATED_MESSAGES_TABLE)
     .insert(insert)
