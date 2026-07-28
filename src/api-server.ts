@@ -47,6 +47,7 @@ import {
   handleProjectCompanyRecords,
   handleProjectContactRecords,
   handleGetProjectCompanies,
+  handleGetProjectContacts,
   handleGetHypotheses,
   handleProjectGtmContext,
   handleGetContextMap,
@@ -1069,6 +1070,14 @@ const server = createServer(async (req, res) => {
           await handleGetProjectCompanies(req, res);
         } else if (req.method === "POST") {
           await handleAddCompaniesToProject(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/project-contacts":
+        if (req.method === "GET") {
+          await handleGetProjectContacts(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

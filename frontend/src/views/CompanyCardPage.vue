@@ -234,7 +234,7 @@ const emailStatusOptions = computed(() =>
 
 const filteredRoster = computed(() => {
   const search = contactSearch.value.trim().toLowerCase();
-  return roster.value.filter((row) => {
+  const rows = roster.value.filter((row) => {
     if (search) {
       const haystack = [nameByLead.value.get(row.uuid), row.position, row.headline]
         .filter(Boolean)
@@ -254,6 +254,18 @@ const filteredRoster = computed(() => {
     if (emailAvailabilityFilter.value === "missing" && hasEmail) return false;
     if (emailStatusFilter.value && row.email_status !== emailStatusFilter.value) return false;
     return true;
+  });
+  // Connected / replied first, then everyone else. Within a bucket, newest activity first.
+  const connectionRank = (s: RosterRow["connection_status"]) =>
+    s === "accepted" ? 0 : s === "sent" ? 1 : s === "withdrawn" ? 2 : 3;
+  return [...rows].sort((a, b) => {
+    const aReplied = (a.activity?.inbox_count ?? 0) > 0 ? 0 : 1;
+    const bReplied = (b.activity?.inbox_count ?? 0) > 0 ? 0 : 1;
+    if (aReplied !== bReplied) return aReplied - bReplied;
+    const aConn = connectionRank(a.connection_status);
+    const bConn = connectionRank(b.connection_status);
+    if (aConn !== bConn) return aConn - bConn;
+    return (b.activity?.last_message_at ?? "").localeCompare(a.activity?.last_message_at ?? "");
   });
 });
 
@@ -365,6 +377,17 @@ function statusType(s: string): "default" | "success" | "warning" {
   return "default";
 }
 
+function replyStatusLabel(activity: Activity | null): string {
+  if (!activity) return "no outreach";
+  if (activity.inbox_count > 0) {
+    return activity.reply_status === "waiting_for_response"
+      ? "Replied — awaiting follow-up"
+      : "Replied";
+  }
+  if (activity.outbox_count > 0) return "No reply";
+  return "no outreach";
+}
+
 function connectionType(s: RosterRow["connection_status"]): "error" | "success" | "warning" | "default" {
   if (s === "accepted") return "success";
   if (s === "sent") return "warning";
@@ -447,10 +470,10 @@ const rosterColumns = computed<DataTableColumns<RosterRow>>(() => [
   {
     title: "Status",
     key: "status",
-    width: 170,
+    width: 200,
     render: (row) =>
       row.activity
-        ? h(NTag, { size: "small", type: statusType(row.activity.reply_status) }, { default: () => row.activity!.reply_status })
+        ? h(NTag, { size: "small", type: statusType(row.activity.reply_status) }, { default: () => replyStatusLabel(row.activity) })
         : h(NText, { depth: 3 }, { default: () => "no outreach" }),
   },
   {

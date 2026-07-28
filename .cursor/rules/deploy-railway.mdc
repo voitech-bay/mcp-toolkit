@@ -1,0 +1,15 @@
+---
+description: Always ship mcp-toolkit changes to Railway production — never leave UI/API work local-only
+alwaysApply: true
+---
+
+# Deploy to Railway (mandatory)
+
+For this repo (`mcp-toolkit` / Voitech on Railway):
+
+1. **Never treat local-only edits as done.** If you change frontend or API behavior the user can see in production, you must get it onto Railway.
+2. **Default ship path:** commit → `git push origin HEAD` (or the active branch that Railway tracks, usually `main`). Railway builds from GitHub; push is the deploy.
+3. **Do this in the same turn** as finishing the feature/fix unless the user explicitly says not to deploy.
+4. **Verify after push:** confirm `origin` is ahead/synced, and check Railway/GitHub deploy status when available. Tell the user the deploy is rolling and what to hard-refresh.
+5. **Do not** claim “fixed” or “filters are there” based only on the working tree. Confirm the change is on the remote branch Railway uses.
+6. If push/deploy is blocked (auth, CI, secrets), say so immediately and what is blocked — do not silently leave work undelivered.

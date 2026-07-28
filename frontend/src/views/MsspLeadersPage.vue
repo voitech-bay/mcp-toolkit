@@ -425,11 +425,11 @@ const filteredCompanies = computed(() => {
 
 const companyColumns = computed<DataTableColumns<CompanyRow>>(() => [
   {
-    title: "Company", key: "company_name", width: 200, fixed: "left", ellipsis: { tooltip: true },
+    title: "Company", key: "company_name", width: 200, fixed: "left",
     sorter: (a, b) => a.company_name.localeCompare(b.company_name),
     render: (row) =>
       row.company_id
-        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: tagUuid.value } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name })
+        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: tagUuid.value } }, class: "mssp-entity-link", title: row.company_name }, { default: () => row.company_name })
         : row.company_name,
   },
   {
@@ -496,17 +496,17 @@ const contactDataColumns = computed<DataTableColumns<LeaderRecord>>(() => [
         : "",
   },
   {
-    title: "Name", key: "name", width: 160, fixed: "left", ellipsis: { tooltip: true },
+    title: "Name", key: "name", width: 160, fixed: "left",
     sorter: (a, b) => a.name.localeCompare(b.name),
-    render: (row) => h(RouterLink, { to: `/contact/${row.uuid}`, style: "color:#2080f0;text-decoration:none" }, { default: () => row.name }),
+    render: (row) => h(RouterLink, { to: `/contact/${row.uuid}`, class: "mssp-entity-link", title: row.name }, { default: () => row.name }),
   },
   { title: "Title", key: "position", width: 190, ellipsis: { tooltip: true }, render: (r) => r.position ?? "—" },
   {
-    title: "Company", key: "company_name", width: 170, ellipsis: { tooltip: true },
+    title: "Company", key: "company_name", width: 170,
     sorter: (a, b) => (a.company_name ?? "").localeCompare(b.company_name ?? ""),
     render: (row) =>
       row.company_id
-        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: tagUuid.value } }, style: "color:#2080f0;text-decoration:none" }, { default: () => row.company_name ?? "—" })
+        ? h(RouterLink, { to: { path: `/company/${row.company_id}`, query: { tag: tagUuid.value } }, class: "mssp-entity-link", title: row.company_name ?? "—" }, { default: () => row.company_name ?? "—" })
         : (row.company_name ?? "—"),
   },
   { title: "Location", key: "location", width: 130, ellipsis: { tooltip: true }, render: (r) => r.location ?? "—" },
@@ -759,3 +759,19 @@ const contactTableScrollX = computed(() =>
   </NCard>
   <OutreachAgentDrawer v-if="outreachContact" v-model:show="outreachOpen" :contact-id="outreachContact.uuid" :contact-name="outreachContact.name" />
 </template>
+
+<style scoped>
+.mssp-entity-link {
+  color: #2080f0;
+  text-decoration: none;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mssp-entity-link:hover {
+  text-decoration: underline;
+}
+</style>

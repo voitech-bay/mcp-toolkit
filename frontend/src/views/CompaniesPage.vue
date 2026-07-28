@@ -28,6 +28,11 @@ import { BuildingIcon, LinkIcon, PlusCircleIcon, FileTextIcon, Pencil, Plus, Tra
 import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import { useResizableTableColumns, type ResizableColumn } from "../composables/useResizableTableColumns";
+import {
+  CONNECTION_STATUS_OPTIONS,
+  OUTREACH_ENROLLMENT_OPTIONS,
+  REPLY_SENTIMENT_OPTIONS,
+} from "../lib/outreachFilters";
 
 const COMPANY_COLUMN_WIDTHS = {
   name: 220,
@@ -162,9 +167,16 @@ const industryFilter = ref("");
 const employeesFilter = ref("");
 const listFilter = ref<string | null>(null);
 const hypothesisFilter = ref<string | null>(null);
+const linkedinOutreachFilter = ref<string | null>(null);
+const emailOutreachFilter = ref<string | null>(null);
+const replyStatusFilter = ref<string | null>(null);
+const connectionStatusFilter = ref<string | null>(null);
 const sortBy = ref("created_at");
 const sortDirection = ref<"asc" | "desc">("desc");
 const listOptions = ref<Array<{ label: string; value: string }>>([]);
+const outreachEnrollmentOptions = [...OUTREACH_ENROLLMENT_OPTIONS];
+const replySentimentOptions = [...REPLY_SENTIMENT_OPTIONS];
+const connectionStatusOptions = [...CONNECTION_STATUS_OPTIONS];
 const editorOpen = ref(false);
 const editorSaving = ref(false);
 const editingCompanyId = ref<string | null>(null);
@@ -215,6 +227,10 @@ async function deleteCompanies(ids: string[]) {
 function clearCompanyFilters() {
   searchInput.value = ""; appliedSearch.value = ""; statusFilter.value = null; industryFilter.value = "";
   employeesFilter.value = ""; listFilter.value = null; hypothesisFilter.value = null;
+  linkedinOutreachFilter.value = null;
+  emailOutreachFilter.value = null;
+  replyStatusFilter.value = null;
+  connectionStatusFilter.value = null;
   sortBy.value = "created_at"; sortDirection.value = "desc"; page.value = 1;
 }
 
@@ -341,6 +357,10 @@ async function fetchCompanies() {
     if (employeesFilter.value.trim()) q.set("employeesRange", employeesFilter.value.trim());
     if (listFilter.value) q.set("listUuid", listFilter.value);
     if (hypothesisFilter.value) q.set("hypothesisId", hypothesisFilter.value);
+    if (linkedinOutreachFilter.value) q.set("linkedinOutreach", linkedinOutreachFilter.value);
+    if (emailOutreachFilter.value) q.set("emailOutreach", emailOutreachFilter.value);
+    if (replyStatusFilter.value) q.set("replyStatus", replyStatusFilter.value);
+    if (connectionStatusFilter.value) q.set("connectionStatus", connectionStatusFilter.value);
     q.set("sortBy", sortBy.value); q.set("sortDirection", sortDirection.value);
 
     let url: string;
@@ -402,7 +422,7 @@ async function fetchCompanies() {
 }
 
 watch(
-  [() => projectStore.selectedProjectId, page, pageSize, appliedSearch, showAll, statusFilter, industryFilter, employeesFilter, listFilter, hypothesisFilter, sortBy, sortDirection],
+  [() => projectStore.selectedProjectId, page, pageSize, appliedSearch, showAll, statusFilter, industryFilter, employeesFilter, listFilter, hypothesisFilter, linkedinOutreachFilter, emailOutreachFilter, replyStatusFilter, connectionStatusFilter, sortBy, sortDirection],
   () => fetchCompanies(),
   { immediate: true }
 );
@@ -440,13 +460,19 @@ const dataColumns = computed((): DataTableColumns<CompanyRow> => [
     title: "Name",
     width: COMPANY_COLUMN_WIDTHS.name,
     sorter: true,
-    ellipsis: { tooltip: true },
+    // Don't use NDataTable ellipsis here — it wraps the cell and swallows
+    // RouterLink clicks. Truncate on the link itself instead.
     render: (row) => {
       const cardId = row.company_id || row.id;
+      const name = companyDisplayName(row);
       const label = h(
         RouterLink,
-        { to: `/company/${cardId}`, style: "color: #2080f0; text-decoration: none" },
-        { default: () => companyDisplayName(row) }
+        {
+          to: `/company/${cardId}`,
+          class: "company-name-link",
+          title: name,
+        },
+        { default: () => name }
       );
       if (!row.in_project) return label;
       return h(NSpace, { align: "center", size: 6, wrap: false }, [
@@ -460,7 +486,6 @@ const dataColumns = computed((): DataTableColumns<CompanyRow> => [
     title: "Website",
     width: COMPANY_COLUMN_WIDTHS.website,
     sorter: true,
-    ellipsis: { tooltip: true },
     render: (row) => {
       const href = companyWebsiteHref(row);
       if (!href) return "—";
@@ -798,6 +823,10 @@ async function submitAddToHypothesis() {
         <NInput v-model:value="employeesFilter" placeholder="Employee range…" clearable size="small" />
         <NSelect v-model:value="listFilter" :options="listOptions" placeholder="Contact list…" clearable filterable size="small" />
         <NSelect v-model:value="hypothesisFilter" :options="hypotheses" placeholder="Hypothesis…" clearable filterable size="small" />
+        <NSelect v-model:value="linkedinOutreachFilter" :options="outreachEnrollmentOptions" placeholder="LinkedIn outreach…" clearable size="small" />
+        <NSelect v-model:value="emailOutreachFilter" :options="outreachEnrollmentOptions" placeholder="Email outreach…" clearable size="small" />
+        <NSelect v-model:value="replyStatusFilter" :options="replySentimentOptions" placeholder="Reply status…" clearable size="small" />
+        <NSelect v-model:value="connectionStatusFilter" :options="connectionStatusOptions" placeholder="LinkedIn connection…" clearable size="small" />
         <NButton size="small" @click="clearCompanyFilters">Clear filters</NButton>
       </div>
 
@@ -1004,7 +1033,7 @@ async function submitAddToHypothesis() {
 
 .company-filters {
   display: grid;
-  grid-template-columns: repeat(5, minmax(140px, 1fr)) auto;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 0.5rem;
   margin-bottom: 0.75rem;
 }
@@ -1032,11 +1061,18 @@ async function submitAddToHypothesis() {
   margin-top: 0.5rem;
 }
 
+.company-name-link,
 .company-website-link {
   color: #2080f0;
   text-decoration: none;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+.company-name-link:hover,
 .company-website-link:hover {
   text-decoration: underline;
 }

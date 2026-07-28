@@ -124,9 +124,32 @@ export function groupMessagesIntoThreads(
   opts?: { messagesPerThread?: number; senderNames?: Map<string, string> }
 ): ConversationThread[] {
   const cap = opts?.messagesPerThread ?? 50;
+  // Prefer a real conversation uuid when some messages for the lead lack one
+  // (common for connection notes), so we don't split one contact into two threads.
+  const newestByConv = new Map<string, string>();
+  for (const m of rows) {
+    const conv = m.linkedin_conversation_uuid?.trim() ?? "";
+    if (!conv) continue;
+    const t = msgTime(m);
+    if (t > (newestByConv.get(conv) ?? "")) newestByConv.set(conv, t);
+  }
+  const primaryConvByLead = new Map<string, string>();
+  for (const m of rows) {
+    const lead = m.lead_uuid?.trim() ?? "";
+    const conv = m.linkedin_conversation_uuid?.trim() ?? "";
+    if (!lead || !conv) continue;
+    const prev = primaryConvByLead.get(lead);
+    if (!prev || (newestByConv.get(conv) ?? "") >= (newestByConv.get(prev) ?? "")) {
+      primaryConvByLead.set(lead, conv);
+    }
+  }
   const byConv = new Map<string, MessageRow[]>();
   for (const m of rows) {
-    const key = m.linkedin_conversation_uuid || `lead:${m.lead_uuid ?? "unknown"}`;
+    const lead = m.lead_uuid?.trim() ?? "";
+    const key =
+      m.linkedin_conversation_uuid?.trim() ||
+      (lead ? primaryConvByLead.get(lead) : undefined) ||
+      `lead:${lead || "unknown"}`;
     const arr = byConv.get(key);
     if (arr) arr.push(m);
     else byConv.set(key, [m]);
@@ -211,9 +234,23 @@ export function summarizeContactActivity(threads: ConversationThread[]): Map<str
     if (!cur.last_message_at || (t.last_message_at ?? "") > cur.last_message_at) {
       cur.last_message_at = t.last_message_at;
       cur.last_message_text = t.last_message_text;
-      cur.reply_status = t.reply_status;
     }
     byLead.set(lead, cur);
+  }
+  // Contact-level reply badge: if they ever replied, keep that visible even when
+  // our follow-up is the chronologically last message (waiting_for_response).
+  for (const cur of byLead.values()) {
+    if (cur.inbox_count === 0) {
+      cur.reply_status = cur.outbox_count > 0 ? "no_response" : "no_response";
+    } else {
+      const lastIsOurs =
+        threads
+          .filter((t) => t.lead_uuid === cur.lead_uuid)
+          .sort((a, b) => (b.last_message_at ?? "").localeCompare(a.last_message_at ?? ""))[0]
+          ?.messages.slice(-1)[0];
+      const lastType = (lastIsOurs?.type ?? "").toLowerCase();
+      cur.reply_status = lastType === "inbox" ? "got_response" : "waiting_for_response";
+    }
   }
   return byLead;
 }
@@ -345,6 +382,110 @@ function jsonArray(value: unknown): Json[] {
   return Array.isArray(value) ? (value as Json[]) : [];
 }
 
+/** Normalize job location whether stored as a string or {city, state, country}. */
+export function formatJobLocation(raw: unknown): string | null {
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const loc = raw as Record<string, unknown>;
+  const city = typeof loc.city === "string" ? loc.city.trim() : "";
+  const state =
+    (typeof loc.state === "string" && loc.state.trim()) ||
+    (typeof loc.region === "string" && loc.region.trim()) ||
+    "";
+  const country = typeof loc.country === "string" ? loc.country.trim() : "";
+  const parts = [city, state].filter(Boolean);
+  if (parts.length) return parts.join(", ") + (country && !state.includes(country) ? `, ${country}` : "");
+  if (country) return country;
+  const formatted = typeof loc.formatted === "string" ? loc.formatted.trim() : "";
+  return formatted || null;
+}
+
+function normalizeJobPostings(value: unknown): Json[] {
+  return jsonArray(value).map((job) => {
+    if (!job || typeof job !== "object" || Array.isArray(job)) return job;
+    const row = job as Json;
+    const location = formatJobLocation(row.location) ?? formatJobLocation(row.city) ?? null;
+    return location ? { ...row, location } : { ...row, location: row.location ?? null };
+  });
+}
+
+/** Generic desktop / language noise from broad employee-tech scrapes. */
+const TECH_STACK_NOISE = new Set(
+  [
+    "microsoft",
+    "microsoft 365",
+    "microsoft office",
+    "microsoft intune",
+    "windows",
+    "windows 10",
+    "macos",
+    "css",
+    "html",
+    "javascript",
+    "typescript",
+    "gulp",
+    "grunt",
+    "webpack",
+    "mvc",
+    "linq",
+    "sql",
+    "react",
+    "angular",
+    "github",
+    "adobe",
+    "adobe premiere pro",
+    "onedrive",
+    "openai",
+    "helpdesk",
+    "microservices",
+    "recognize",
+    "continua",
+  ].map((s) => s.toLowerCase())
+);
+
+function pushTech(out: string[], seen: Set<string>, raw: unknown, opts?: { dropNoise?: boolean }): void {
+  for (const item of jsonArray(raw)) {
+    const label = String(item ?? "").trim();
+    if (!label) continue;
+    const key = label.toLowerCase();
+    if (seen.has(key)) continue;
+    if (opts?.dropNoise && TECH_STACK_NOISE.has(key)) continue;
+    seen.add(key);
+    out.push(label);
+  }
+}
+
+/**
+ * Prefer the latest curated stack, then fill gaps from company_intel and prior
+ * deep-research runs (without reintroducing scrape noise like "CSS" / "Windows 10").
+ */
+function collectTechStack(pov: Json, rows: Json[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  pushTech(out, seen, pov.tech_stack);
+  const companyIntel =
+    pov.company_intel && typeof pov.company_intel === "object" && !Array.isArray(pov.company_intel)
+      ? (pov.company_intel as Json)
+      : {};
+  pushTech(out, seen, companyIntel.tech_stack, { dropNoise: true });
+  for (const row of rows) {
+    const wf = String(row.workflow_name ?? "");
+    if (wf !== "velvetech-company-deep-research" && wf !== "velvetech-pov") continue;
+    const result = row.result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) continue;
+    const r = result as Json;
+    // Latest POV/deep-research already contributed above when row is current;
+    // additional rows (if callers pass history) only fill gaps, noise-filtered.
+    pushTech(out, seen, r.tech_stack, { dropNoise: true });
+    const intel =
+      r.company_intel && typeof r.company_intel === "object" && !Array.isArray(r.company_intel)
+        ? (r.company_intel as Json)
+        : {};
+    pushTech(out, seen, intel.tech_stack, { dropNoise: true });
+  }
+  return out;
+}
+
 // Latest velvetech-pov result row, if present. latestResults is already
 // newest-first-per-workflow, so the first pov row is the current one.
 function povResultFromLatestResults(rows: Json[]): Json | null {
@@ -404,7 +545,10 @@ function deriveFallbackNarrative(pov: Json): string {
 
 // Project the latest POV row into the typed dossier the CompanyDossier tile
 // renders. Native contract fields win; fallback derives them for older rows.
-function dossierFromLatestResults(rows: Json[]): Json | null {
+function dossierFromLatestResults(
+  rows: Json[],
+  opts?: { techHistory?: Json[]; companyWebsite?: string | null; companyDomain?: string | null }
+): Json | null {
   const pov = povResultFromLatestResults(rows);
   if (!pov) return null;
   const fitContacts = jsonArray(pov.fit_contacts);
@@ -412,6 +556,31 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
   const fromContract = headlineFacts.length > 0;
   if (!fromContract) headlineFacts = deriveFallbackHeadlineFacts(pov);
   const discovery = jsonArray(pov.discovery_questions).map((x) => String(x)).filter(Boolean);
+
+  const companyWebsiteHref = (() => {
+    const raw = (opts?.companyWebsite ?? "").trim() || (opts?.companyDomain ?? "").trim();
+    if (!raw) return null;
+    return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  })();
+
+  // POV often labels sources as "company data" / "LinkedIn profile" instead of URLs.
+  // Resolve those to clickable links when we can; keep true URLs as-is.
+  headlineFacts = headlineFacts.map((fact) => {
+    if (!fact || typeof fact !== "object" || Array.isArray(fact)) return fact;
+    const row = fact as Json;
+    const source = stringField(row.source);
+    if (!source) return row;
+    if (/^https?:\/\//i.test(source)) return row;
+    const lower = source.toLowerCase();
+    if ((lower === "company data" || lower === "company website" || lower === "website") && companyWebsiteHref) {
+      return { ...row, source: companyWebsiteHref };
+    }
+    if (lower.includes("linkedin") && typeof pov.target === "object" && pov.target && !Array.isArray(pov.target)) {
+      const li = stringField((pov.target as Json).linkedin_url);
+      if (li) return { ...row, source: li };
+    }
+    return row;
+  });
 
   let hook = stringField(pov.hook);
   if (!hook) {
@@ -472,6 +641,8 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
   const jobsWindowMonths =
     typeof pov.jobs_window_months === "number" ? pov.jobs_window_months : 24;
 
+  const techRows = [...rows, ...(opts?.techHistory ?? [])];
+
   return {
     pov_ok: pov.pov_ok === true,
     from_contract: fromContract,
@@ -481,7 +652,7 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
     lead_question: leadQuestion,
     headline_facts: headlineFacts,
     target,
-    tech_stack: jsonArray(pov.tech_stack),
+    tech_stack: collectTechStack(pov, techRows),
     fit_contacts_by_persona: byPersona,
     fit_score: pov.fit_score ?? null,
     score_rationale: stringField(pov.score_rationale),
@@ -491,8 +662,8 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
     data_integration_pain: jsonArray(pov.data_integration_pain),
     transformation_signals: jsonArray(pov.transformation_signals),
     discovery_questions: discovery,
-    job_postings: jsonArray(pov.job_postings),
-    leadership_openings: jsonArray(pov.leadership_openings),
+    job_postings: normalizeJobPostings(pov.job_postings),
+    leadership_openings: normalizeJobPostings(pov.leadership_openings),
     jobs_error: stringField(pov.jobs_error) ?? "",
     active_job_postings_count: activeJobCount,
     job_postings_researched_count: researchedJobCount,
@@ -503,7 +674,15 @@ function dossierFromLatestResults(rows: Json[]): Json | null {
         : fitContacts.length,
     discovery_error: stringField(pov.discovery_error) ?? "",
     research_source_urls: Array.from(
-      new Set(jsonArray(pov.research_source_urls).map((u) => String(u)).filter(Boolean))
+      new Set(
+        [
+          ...jsonArray(pov.research_source_urls).map((u) => String(u)).filter(Boolean),
+          ...headlineFacts
+            .map((f) => (f && typeof f === "object" ? stringField((f as Json).source) : null))
+            .filter((u): u is string => !!u && /^https?:\/\//i.test(u)),
+          ...(companyWebsiteHref ? [companyWebsiteHref] : []),
+        ]
+      )
     ),
     team_signal: {
       dept_headcount:
@@ -727,6 +906,16 @@ export async function buildCompanyCard(
     company as Json,
     latestRes.data
   );
+  // Latest-per-workflow alone drops prior deep-research systems (e.g. Turvo)
+  // when a later CoreSignal-cleaned run replaces the stack. Pull a short history
+  // so the fingerprint can fill gaps without re-running research.
+  const { data: researchHistory } = await client
+    .from(N8N_WORKFLOW_RESULTS_TABLE)
+    .select("id, workflow_name, result, created_at, execution_id")
+    .eq("company_id", id)
+    .in("workflow_name", ["velvetech-company-deep-research", "velvetech-pov"])
+    .order("created_at", { ascending: false })
+    .limit(8);
   const companyWithResearch = {
     ...(company as Json),
     research_company_one_liner: companyOneLinerFromLatestResults(latestResults),
@@ -736,7 +925,11 @@ export async function buildCompanyCard(
     data: {
       company: companyWithResearch,
       latest_results: latestResults,
-      dossier: dossierFromLatestResults(latestResults),
+      dossier: dossierFromLatestResults(latestResults, {
+        techHistory: (researchHistory ?? []) as Json[],
+        companyWebsite: stringField((company as Json).website),
+        companyDomain: stringField((company as Json).domain),
+      }),
       contacts: rosterWithActivity,
       conversations: threads,
       context_entries: plainContextEntries,

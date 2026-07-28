@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import crypto from "node:crypto";
 import { CONTACTS_TABLE, N8N_WORKFLOW_RESULTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
 import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
 import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, normalizeOutreachMessageChannel, normalizeSequenceStep, parseEmailStudioChannelFilter, reanchorQuote, stableResearchPoints, validateDraft, validateDraftForProject, type EmailStatus, type OutreachMessageChannel } from "./services/email-studio.js";
@@ -10,6 +11,13 @@ import { reconcileSmartleadLead } from "./services/smartlead-reconcile.js";
 
 type Json = Record<string, unknown>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function uuidFromKey(key: string): string {
+  const bytes = Buffer.from(crypto.createHash("sha256").update(key).digest().subarray(0, 16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
 function send(res: ServerResponse, status: number, data: unknown) { res.writeHead(status, { "Content-Type": "application/json" }); res.end(JSON.stringify(data)); }
 async function body(req: IncomingMessage): Promise<Json> { const chunks: Buffer[] = []; for await (const c of req) chunks.push(c as Buffer); try { const x = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}"); return x && typeof x === "object" && !Array.isArray(x) ? x as Json : {}; } catch { return {}; } }
 function url(req: IncomingMessage) { return new URL(req.url ?? "", "http://localhost"); }
@@ -584,6 +592,73 @@ export async function handleSmartleadEmailEvent(req: IncomingMessage, res: Serve
       return send(res, 409, { error: e instanceof Error ? e.message : "Delivery status failed", event: ins.data });
     }
   }
+
+  // Reply webhooks: mirror into LinkedinMessages so contact/company cards show the
+  // email reply in Account Conversations (channel_label resolves via subject/type).
+  const replyEvents = new Set([
+    "email_reply",
+    "reply",
+    "replied",
+    "lead_replied",
+    "email_replied",
+    "REPLY",
+    "EMAIL_REPLY",
+  ].map((s) => s.toLowerCase()));
+  if (candidates.length === 1 && replyEvents.has(eventType)) {
+    const email = candidates[0];
+    const contactId = str(email.contact_id);
+    const projectId = str(email.project_id);
+    const replyText = String(
+      b.reply_message ??
+      b.reply_body ??
+      b.reply_text ??
+      b.message ??
+      b.body ??
+      b.email_body ??
+      b.text ??
+      ""
+    ).trim();
+    const replySubject = String(
+      b.reply_subject ?? b.subject ?? b.email_subject ?? email.current_subject ?? "Email reply"
+    ).trim();
+    if (contactId && projectId && replyText) {
+      const replyUuid = uuidFromKey(`smartlead-reply:${eventId}`);
+      const convUuid = uuidFromKey(
+        `smartlead-thread:${projectId}:${contactId}:${campaignId || email.smartlead_campaign_id || email.id}`
+      );
+      await client.from("LinkedinMessages").upsert(
+        {
+          uuid: replyUuid,
+          lead_uuid: contactId,
+          project_id: projectId,
+          linkedin_conversation_uuid: convUuid,
+          type: "inbox",
+          linkedin_type: "email",
+          subject: replySubject.slice(0, 500),
+          text: replyText.slice(0, 20000),
+          status: "done",
+          automation: "smartlead_webhook",
+          sent_at: occurred,
+          created_at: occurred,
+          updated_at: new Date().toISOString(),
+          reply_received: true,
+        },
+        { onConflict: "uuid" }
+      );
+      // Bump GetSales-style email inbox marker so list filters can see the reply.
+      const { data: contactRow } = await client
+        .from("Contacts")
+        .select("email_inbox_count")
+        .eq("uuid", contactId)
+        .maybeSingle();
+      const prev = Number((contactRow as Json | null)?.email_inbox_count ?? 0);
+      await client
+        .from("Contacts")
+        .update({ email_inbox_count: prev + 1, markers_synced_at: new Date().toISOString() })
+        .eq("uuid", contactId);
+    }
+  }
+
   return send(res, 202, { data: ins.data, matchStatus, matchedEmailId: candidates.length === 1 ? candidates[0].id : null });
 }
 

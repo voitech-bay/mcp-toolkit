@@ -7,9 +7,15 @@ type PainItem = { claim?: string; source?: string };
 type JobItem = {
   title?: string;
   date?: string;
-  location?: string;
+  location?: string | Record<string, unknown> | null;
+  city?: string | Record<string, unknown> | null;
   department?: string;
   status?: string;
+  snippet?: string;
+  description?: string;
+  content?: string;
+  url?: string;
+  source_url?: string;
 };
 type Target = {
   name?: string;
@@ -84,6 +90,40 @@ function decodeEntities(s: string): string {
     .replace(/&#39;/g, "'")
     .replace(/\s+/g, " ")
     .trim();
+}
+function jobLocation(job: JobItem): string {
+  const raw = job.location ?? job.city;
+  if (typeof raw === "string" && raw.trim()) return raw.trim();
+  if (!raw || typeof raw !== "object") return "";
+  const city = typeof raw.city === "string" ? raw.city.trim() : "";
+  const state =
+    (typeof raw.state === "string" && raw.state.trim()) ||
+    (typeof raw.region === "string" && raw.region.trim()) ||
+    "";
+  const country = typeof raw.country === "string" ? raw.country.trim() : "";
+  const parts = [city, state].filter(Boolean);
+  if (parts.length) return parts.join(", ");
+  if (country) return country;
+  return typeof raw.formatted === "string" ? raw.formatted.trim() : "";
+}
+function jobUrl(job: JobItem): string | null {
+  const raw = String(job.source_url || job.url || "").trim();
+  if (!raw) return null;
+  return /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+}
+function jobBody(job: JobItem): string {
+  const candidates = [job.description, job.snippet, job.content];
+  let best = "";
+  for (const c of candidates) {
+    const t = String(c ?? "").trim();
+    if (t.length > best.length) best = t;
+  }
+  return best;
+}
+function jobBodyPreview(job: JobItem, max = 280): string {
+  const body = decodeEntities(jobBody(job));
+  if (!body) return "";
+  return body.length > max ? `${body.slice(0, max).trim()}…` : body;
 }
 function isUrl(s?: string): boolean {
   return !!s && /^https?:\/\//i.test(s);
@@ -395,17 +435,25 @@ function isHighlighted(c: Record<string, unknown>): boolean {
             IT/data + leadership, last {{ jobsWindowMonths }} months (active and historical)
           </div>
           <div v-for="(j, ji) in jobs" :key="'j' + ji" class="job-item">
-            {{ decodeEntities(String(j.title ?? "")) }}
-            <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
-            <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
-            <span v-if="j.status" class="tile-source"> · {{ j.status }}</span>
+            <div>
+              <a v-if="jobUrl(j)" :href="jobUrl(j)!" target="_blank" rel="noopener" class="job-title job-link">{{ decodeEntities(String(j.title ?? "")) }}</a>
+              <span v-else class="job-title">{{ decodeEntities(String(j.title ?? "")) }}</span>
+              <span v-if="jobLocation(j)" class="job-location"> · {{ jobLocation(j) }}</span>
+              <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
+              <span v-if="j.status" class="tile-source"> · {{ j.status }}</span>
+            </div>
+            <div v-if="jobBodyPreview(j)" class="job-snippet">{{ jobBodyPreview(j) }}</div>
           </div>
           <div v-for="(j, ji) in leadOpenings" :key="'l' + ji" class="job-item">
-            {{ decodeEntities(String(j.title ?? "")) }}
-            <span class="tile-contact-title"> · leadership</span>
-            <span v-if="j.location" class="tile-contact-title"> · {{ j.location }}</span>
-            <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
-            <span v-if="j.status" class="tile-source"> · {{ j.status }}</span>
+            <div>
+              <a v-if="jobUrl(j)" :href="jobUrl(j)!" target="_blank" rel="noopener" class="job-title job-link">{{ decodeEntities(String(j.title ?? "")) }}</a>
+              <span v-else class="job-title">{{ decodeEntities(String(j.title ?? "")) }}</span>
+              <span class="tile-contact-title"> · leadership</span>
+              <span v-if="jobLocation(j)" class="job-location"> · {{ jobLocation(j) }}</span>
+              <span v-if="j.date" class="tile-source"> · {{ j.date }}</span>
+              <span v-if="j.status" class="tile-source"> · {{ j.status }}</span>
+            </div>
+            <div v-if="jobBodyPreview(j)" class="job-snippet">{{ jobBodyPreview(j) }}</div>
           </div>
         </template>
         <div v-else class="tile-fact">
@@ -595,6 +643,25 @@ function isHighlighted(c: Record<string, unknown>): boolean {
 .job-item {
   font-size: 13px;
   margin-top: 2px;
+}
+.job-title {
+  font-weight: 500;
+}
+.job-location {
+  opacity: 0.85;
+  font-weight: 450;
+}
+.job-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.job-snippet {
+  margin-top: 2px;
+  font-size: 12px;
+  opacity: 0.72;
+  line-height: 1.35;
+  white-space: pre-wrap;
 }
 .team-flag {
   font-weight: 500;

@@ -179,12 +179,14 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/project-company-records" || pathname === "/api/project-contact-records") return true;
   if (pathname === "/api/supabase-table-query") return true;
   if (pathname === "/api/companies" || pathname === "/api/companies/by-ids" || pathname === "/api/project-companies") return true;
+  if (pathname === "/api/project-contacts") return true;
   if (pathname === "/api/contact-lists" || pathname === "/api/pipeline-stages/contacts") return true;
   if (pathname === "/api/company-context" || pathname === "/api/company-context-counts") return true;
   if (pathname === "/api/contact-context" || pathname === "/api/contact-context-counts") return true;
   if (pathname === "/api/conversations" || pathname === "/api/conversation" || pathname === "/api/conversations/refresh") return true;
   if (pathname === "/api/contacts/by-company" || pathname === "/api/contacts/find-by-uuid") return true;
   if (pathname === "/api/cards/company" || pathname === "/api/cards/contact") return true;
+  if (pathname === "/api/cards/company-summary") return true;
   if (pathname === "/api/hypotheses") return true;
   if (/^\/api\/hypotheses\/[^/]+\/targets$/.test(pathname)) return true;
   if (/^\/api\/companies\/[^/]+\/hypotheses$/.test(pathname)) return true;
@@ -199,6 +201,8 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/n8n/workflow-results" || pathname === "/api/n8n/workflow-results/query") return true;
   if (pathname === "/api/n8n/workflow-results/executions") return true;
   if (/^\/api\/n8n\/workflow-results\/executions\/[^/]+$/.test(pathname)) return true;
+  // Email Studio → LinkedIn tab (VelvetechLinkedInDraftsPanel).
+  if (pathname === "/api/n8n/velvetech/drafts" || pathname === "/api/n8n/velvetech/drafts/approve") return true;
   if (pathname === "/api/velvetech/research-csv/preview") return true;
   if (pathname === "/api/velvetech/research-csv/launch") return true;
 

@@ -39,6 +39,7 @@ import {
   updateProjectContactRecord,
   deleteProjectContactRecords,
   getProjectCompanies,
+  getProjectContacts,
   getHypothesesWithCounts,
   getProjectGtmContext,
   getContextMapInsights,
@@ -208,6 +209,7 @@ import { getWorkersUiSnapshot } from "./services/worker-ui-snapshot.js";
 import { broadcastEnrichmentBatchStarted } from "./services/enrichment-realtime.js";
 import { getAuthSession } from "./services/auth.js";
 import { VELVETECH_PROJECT_ID } from "./services/n8n-trigger.js";
+import { upsertJobPostingSnapshotsFromResult } from "./services/job-posting-snapshots.js";
 import {
   verifyFirefliesHubSignature,
   normalizeFirefliesPayload,
@@ -2881,6 +2883,10 @@ export async function handleGetProjectCompanies(
   const industry = params.get("industry") ?? undefined;
   const employeesRange = params.get("employeesRange") ?? undefined;
   const hypothesisId = params.get("hypothesisId") ?? undefined;
+  const linkedinOutreach = params.get("linkedinOutreach") ?? undefined;
+  const emailOutreach = params.get("emailOutreach") ?? undefined;
+  const replyStatus = params.get("replyStatus") ?? undefined;
+  const connectionStatus = params.get("connectionStatus") ?? undefined;
   const allowedSort = ["created_at", "name", "domain", "industry", "employees_range", "status"] as const;
   const requestedSort = params.get("sortBy");
   const sortBy = allowedSort.find((value) => value === requestedSort);
@@ -2890,6 +2896,60 @@ export async function handleGetProjectCompanies(
   const result = await getProjectCompanies(client, projectId, {
     search, limit, offset, companyId, listUuid, status, industry, employeesRange,
     hypothesisId, sortBy, sortDirection,
+    linkedinOutreach, emailOutreach, replyStatus, connectionStatus,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: [], total: 0, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+export async function handleGetProjectContacts(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  const projectId = params.get("projectId");
+  if (!projectId) {
+    res.writeHead(400);
+    res.end(JSON.stringify({ error: "Missing query param: projectId" }));
+    return;
+  }
+  const allowedSort = ["created_at", "first_name", "last_name", "position", "work_email", "company_name", "location"] as const;
+  const requestedSort = params.get("sortBy");
+  const sortBy = allowedSort.find((value) => value === requestedSort) ?? "created_at";
+  const sortDirection = params.get("sortDirection") === "asc" ? "asc" : "desc";
+  const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
+  const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const result = await getProjectContacts(client, projectId, {
+    search: params.get("search") ?? undefined,
+    listUuid: params.get("listUuid") ?? undefined,
+    position: params.get("position") ?? undefined,
+    workEmail: params.get("workEmail") ?? undefined,
+    linkedinOutreach: params.get("linkedinOutreach") ?? undefined,
+    emailOutreach: params.get("emailOutreach") ?? undefined,
+    replyStatus: params.get("replyStatus") ?? undefined,
+    connectionStatus: params.get("connectionStatus") ?? undefined,
+    sortBy,
+    sortDirection,
+    limit,
+    offset,
   });
   if (result.error) {
     res.writeHead(500);
@@ -4631,6 +4691,30 @@ export async function handlePostN8nWorkflowResults(
 
   const rowsInserted = await n8nInsertWorkflowResultsBatched(client, insertRows, errors);
 
+  // Persist curated vacancy full text (storage only — messaging must not use these bodies).
+  const snapshotProjectId = projectId || VELVETECH_PROJECT_ID;
+  let jobSnapshotsUpserted = 0;
+  if (snapshotProjectId) {
+    for (const row of insertRows) {
+      const wf = String(row.workflow_name ?? "");
+      const companyId = typeof row.company_id === "string" ? row.company_id : "";
+      const result = row.result;
+      if (!companyId || !result || typeof result !== "object" || Array.isArray(result)) continue;
+      const snap = await upsertJobPostingSnapshotsFromResult(client, {
+        projectId: snapshotProjectId,
+        companyId,
+        workflowName: wf,
+        result: result as Record<string, unknown>,
+      });
+      if (snap.error) {
+        const idx = typeof row._n8n_index === "number" ? row._n8n_index : 0;
+        errors.push({ index: idx, message: `job posting snapshots: ${snap.error}` });
+      } else {
+        jobSnapshotsUpserted += snap.upserted;
+      }
+    }
+  }
+
   res.writeHead(200);
   res.end(
     JSON.stringify({
@@ -4639,6 +4723,7 @@ export async function handlePostN8nWorkflowResults(
       contactsSkipped,
       leadsHydratedFromGetSales,
       rowsInserted,
+      jobSnapshotsUpserted,
       errors,
     })
   );

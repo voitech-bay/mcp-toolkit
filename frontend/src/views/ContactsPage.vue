@@ -27,6 +27,11 @@ import { RouterLink } from "vue-router";
 import { useProjectStore } from "../stores/project";
 import AttachCompanyModal from "../components/AttachCompanyModal.vue";
 import { useResizableTableColumns } from "../composables/useResizableTableColumns";
+import {
+  CONNECTION_STATUS_OPTIONS,
+  OUTREACH_ENROLLMENT_OPTIONS,
+  REPLY_SENTIMENT_OPTIONS,
+} from "../lib/outreachFilters";
 
 const CONTACT_COLUMN_WIDTHS = {
   avatar: 54,
@@ -119,9 +124,16 @@ function resetColumns() {
 const roleFilter = ref("");
 const emailFilter = ref("");
 const listFilter = ref<string | null>(null);
+const linkedinOutreachFilter = ref<string | null>(null);
+const emailOutreachFilter = ref<string | null>(null);
+const replyStatusFilter = ref<string | null>(null);
+const connectionStatusFilter = ref<string | null>(null);
 const sortBy = ref("created_at");
 const sortDirection = ref<"asc" | "desc">("desc");
 const listOptions = ref<Array<{ label: string; value: string }>>([]);
+const outreachEnrollmentOptions = [...OUTREACH_ENROLLMENT_OPTIONS];
+const replySentimentOptions = [...REPLY_SENTIMENT_OPTIONS];
+const connectionStatusOptions = [...CONNECTION_STATUS_OPTIONS];
 const editorOpen = ref(false);
 const editorSaving = ref(false);
 const editingContactId = ref<string | null>(null);
@@ -171,7 +183,12 @@ async function deleteContacts(ids: string[]) {
 
 function clearFilters() {
   searchInput.value = ""; appliedSearch.value = ""; roleFilter.value = ""; emailFilter.value = "";
-  listFilter.value = null; sortBy.value = "created_at"; sortDirection.value = "desc"; page.value = 1;
+  listFilter.value = null;
+  linkedinOutreachFilter.value = null;
+  emailOutreachFilter.value = null;
+  replyStatusFilter.value = null;
+  connectionStatusFilter.value = null;
+  sortBy.value = "created_at"; sortDirection.value = "desc"; page.value = 1;
 }
 
 const debouncedSearch = useDebounceFn(() => {
@@ -347,20 +364,22 @@ async function fetchContacts() {
   loading.value = true;
   error.value = "";
   try {
-    const filterValues: Record<string, string> = { project_id: projectId };
-    if (roleFilter.value.trim()) filterValues.position = roleFilter.value.trim();
-    if (emailFilter.value.trim()) filterValues.work_email = emailFilter.value.trim();
-    if (listFilter.value) filterValues.list_uuid = listFilter.value;
     const q = new URLSearchParams({
-      table: "contacts",
-      filters: encodeURIComponent(JSON.stringify(filterValues)),
+      projectId,
       limit: String(pageSize.value),
       offset: String((page.value - 1) * pageSize.value),
+      sortBy: sortBy.value,
+      sortDirection: sortDirection.value,
     });
     if (appliedSearch.value) q.set("search", appliedSearch.value);
-    q.set("sortBy", sortBy.value);
-    q.set("sortDirection", sortDirection.value);
-    const r = await fetch(`/api/supabase-table-query?${q.toString()}`);
+    if (roleFilter.value.trim()) q.set("position", roleFilter.value.trim());
+    if (emailFilter.value.trim()) q.set("workEmail", emailFilter.value.trim());
+    if (listFilter.value) q.set("listUuid", listFilter.value);
+    if (linkedinOutreachFilter.value) q.set("linkedinOutreach", linkedinOutreachFilter.value);
+    if (emailOutreachFilter.value) q.set("emailOutreach", emailOutreachFilter.value);
+    if (replyStatusFilter.value) q.set("replyStatus", replyStatusFilter.value);
+    if (connectionStatusFilter.value) q.set("connectionStatus", connectionStatusFilter.value);
+    const r = await fetch(`/api/project-contacts?${q.toString()}`);
     const j = await r.json();
     if (!r.ok) {
       error.value = j.error ?? "Request failed";
@@ -368,7 +387,11 @@ async function fetchContacts() {
       total.value = 0;
       return;
     }
-    data.value = j.data ?? [];
+    data.value = (j.data ?? []).map((row: ContactRow & { uuid?: string }) => ({
+      ...row,
+      id: row.uuid ?? row.id,
+      uuid: row.uuid ?? row.id,
+    }));
     total.value = j.total ?? 0;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Request failed";
@@ -380,7 +403,21 @@ async function fetchContacts() {
 }
 
 watch(
-  () => [projectStore.selectedProjectId, page.value, pageSize.value, appliedSearch.value, roleFilter.value, emailFilter.value, listFilter.value, sortBy.value, sortDirection.value],
+  () => [
+    projectStore.selectedProjectId,
+    page.value,
+    pageSize.value,
+    appliedSearch.value,
+    roleFilter.value,
+    emailFilter.value,
+    listFilter.value,
+    linkedinOutreachFilter.value,
+    emailOutreachFilter.value,
+    replyStatusFilter.value,
+    connectionStatusFilter.value,
+    sortBy.value,
+    sortDirection.value,
+  ],
   () => {
     checkedKeys.value = [];
     fetchContacts();
@@ -431,14 +468,15 @@ const dataColumns = computed((): DataTableColumns<ContactRow> => [
     title: "Name",
     sorter: true,
     width: 200,
-    ellipsis: { tooltip: true },
+    // Don't use NDataTable ellipsis — it wraps the cell and swallows RouterLink clicks.
     render: (row) => {
       const uuid = row.uuid ?? row.id;
-      if (!uuid) return fullName(row);
+      const name = fullName(row);
+      if (!uuid) return name;
       return h(
         RouterLink,
-        { to: `/contact/${uuid}`, style: "color: #2080f0; text-decoration: none" },
-        { default: () => fullName(row) }
+        { to: `/contact/${uuid}`, class: "contact-name-link", title: name },
+        { default: () => name }
       );
     },
   },
@@ -454,10 +492,19 @@ const dataColumns = computed((): DataTableColumns<ContactRow> => [
     key: "company_id",
     title: "Company(from sync)",
     width: 180,
-    ellipsis: { tooltip: true },
     render: (row) => {
       if (row.company_name) {
-        return h(NTag, { title: row.company_name, type: "error", bordered: false, size: "small" }, row.company_name);
+        const label = h(
+          NTag,
+          { title: row.company_name, type: "error", bordered: false, size: "small" },
+          { default: () => row.company_name }
+        );
+        if (!row.company_uuid) return label;
+        return h(
+          RouterLink,
+          { to: `/company/${row.company_uuid}`, class: "contact-company-link", title: row.company_name },
+          { default: () => label }
+        );
       }
       return h(NButton, {
         size: "tiny",
@@ -475,7 +522,14 @@ const dataColumns = computed((): DataTableColumns<ContactRow> => [
       // Show resolved name if company_uuid is set (even while cache is loading)
       if (row.company_uuid) {
         const name = resolvedCompanyName(row);
-        return h(NTag, { title: name, type: "success", bordered: false, size: "small" }, name);
+        return h(
+          RouterLink,
+          { to: `/company/${row.company_uuid}`, class: "contact-company-link", title: name },
+          {
+            default: () =>
+              h(NTag, { title: name, type: "success", bordered: false, size: "small" }, { default: () => name }),
+          }
+        );
       }
       return h(
         NButton,
@@ -616,6 +670,10 @@ const tableScrollX = computed(() =>
         <NInput v-model:value="roleFilter" placeholder="Exact role…" clearable size="small" />
         <NInput v-model:value="emailFilter" placeholder="Exact work email…" clearable size="small" />
         <NSelect v-model:value="listFilter" :options="listOptions" placeholder="Contact list…" clearable filterable size="small" />
+        <NSelect v-model:value="linkedinOutreachFilter" :options="outreachEnrollmentOptions" placeholder="LinkedIn outreach…" clearable size="small" />
+        <NSelect v-model:value="emailOutreachFilter" :options="outreachEnrollmentOptions" placeholder="Email outreach…" clearable size="small" />
+        <NSelect v-model:value="replyStatusFilter" :options="replySentimentOptions" placeholder="Reply status…" clearable size="small" />
+        <NSelect v-model:value="connectionStatusFilter" :options="connectionStatusOptions" placeholder="LinkedIn connection…" clearable size="small" />
         <NButton size="small" @click="clearFilters">Clear filters</NButton>
         <NButton v-if="checkedKeys.length" size="small" type="error" @click="deleteContacts(checkedKeys.map(String))">
           Delete {{ checkedKeys.length }}
@@ -715,8 +773,31 @@ const tableScrollX = computed(() =>
 <style scoped>
 .filters {
   display: grid;
-  grid-template-columns: repeat(3, minmax(150px, 1fr)) auto auto;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 0.5rem;
   margin-top: 0.75rem;
+}
+
+.contact-name-link {
+  color: #2080f0;
+  text-decoration: none;
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.contact-name-link:hover {
+  text-decoration: underline;
+}
+
+.contact-company-link {
+  color: inherit;
+  text-decoration: none;
+}
+
+.contact-company-link:hover :deep(.n-tag) {
+  opacity: 0.85;
 }
 </style>

@@ -7,6 +7,7 @@ import {
   messageChannelLabel,
   companyReplyContacts,
   contactConnectionStatus,
+  formatJobLocation,
   type MessageRow,
 } from "./account-context.js";
 
@@ -14,7 +15,8 @@ function msg(partial: Partial<MessageRow>): MessageRow {
   return {
     uuid: partial.uuid ?? Math.random().toString(36).slice(2),
     lead_uuid: partial.lead_uuid ?? "lead-1",
-    linkedin_conversation_uuid: partial.linkedin_conversation_uuid ?? "conv-1",
+    linkedin_conversation_uuid:
+      partial.linkedin_conversation_uuid === undefined ? "conv-1" : partial.linkedin_conversation_uuid,
     sender_profile_uuid: partial.sender_profile_uuid ?? "sender-1",
     text: partial.text ?? "hello",
     subject: partial.subject ?? null,
@@ -152,4 +154,36 @@ test("parseAccountSummaryEntry: parses typed entries, ignores plain notes", () =
   assert.equal(parseAccountSummaryEntry({ rootContext: "met them at SaaStr, likes Reddit ads" }), null);
   assert.equal(parseAccountSummaryEntry({ rootContext: null }), null);
   assert.equal(parseAccountSummaryEntry({ rootContext: '{"kind":"other"}' }), null);
+});
+
+test("groupMessagesIntoThreads: merges null conversation uuid into lead primary thread", () => {
+  const threads = groupMessagesIntoThreads([
+    msg({
+      lead_uuid: "lead-a",
+      linkedin_conversation_uuid: null,
+      type: "outbox",
+      sent_at: "2026-07-03T15:00:00Z",
+      text: "connection note",
+    }),
+    msg({
+      lead_uuid: "lead-a",
+      linkedin_conversation_uuid: "conv-real",
+      type: "inbox",
+      sent_at: "2026-07-13T13:00:00Z",
+      text: "retired, apologies",
+    }),
+  ]);
+  assert.equal(threads.length, 1);
+  assert.equal(threads[0].conversation_uuid, "conv-real");
+  assert.equal(threads[0].message_count, 2);
+  assert.equal(threads[0].inbox_count, 1);
+  assert.equal(threads[0].outbox_count, 1);
+});
+
+test("formatJobLocation: string and city/state object shapes", () => {
+  assert.equal(formatJobLocation("Charlotte, NC"), "Charlotte, NC");
+  assert.equal(formatJobLocation({ city: "Rock Hill", state: "SC" }), "Rock Hill, SC");
+  assert.equal(formatJobLocation({ city: "Charlotte", region: "North Carolina" }), "Charlotte, North Carolina");
+  assert.equal(formatJobLocation(null), null);
+  assert.equal(formatJobLocation({}), null);
 });

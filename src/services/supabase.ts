@@ -3370,6 +3370,10 @@ export async function getProjectCompanies(
     hypothesisId?: string | null;
     sortBy?: "created_at" | "name" | "domain" | "industry" | "employees_range" | "status";
     sortDirection?: "asc" | "desc";
+    linkedinOutreach?: string | null;
+    emailOutreach?: string | null;
+    replyStatus?: string | null;
+    connectionStatus?: string | null;
   }
 ): Promise<{ data: ProjectCompanyRow[]; total: number; error: string | null }> {
   const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
@@ -3380,6 +3384,125 @@ export async function getProjectCompanies(
   if (search.length > 0) {
     const escaped = search.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
     searchPattern = `%${escaped}%`;
+  }
+
+  const hasOutreach =
+    Boolean(options?.linkedinOutreach?.trim()) ||
+    Boolean(options?.emailOutreach?.trim()) ||
+    Boolean(options?.replyStatus?.trim()) ||
+    Boolean(options?.connectionStatus?.trim());
+
+  if (hasOutreach) {
+    const { data: pageRows, error: pageErr } = await client.rpc(
+      "filter_project_company_ids_by_outreach",
+      {
+        p_project_id: projectId,
+        p_linkedin_outreach: options?.linkedinOutreach?.trim() || null,
+        p_email_outreach: options?.emailOutreach?.trim() || null,
+        p_reply_status: options?.replyStatus?.trim() || null,
+        p_connection_status: options?.connectionStatus?.trim() || null,
+        p_list_uuid: options?.listUuid?.trim() || null,
+        p_search_pattern: searchPattern,
+        p_status: options?.status ?? null,
+        p_industry: options?.industry ?? null,
+        p_employees_range: options?.employeesRange ?? null,
+        p_hypothesis_id: options?.hypothesisId ?? null,
+        p_limit: limit,
+        p_offset: offset,
+        p_sort_by: options?.sortBy ?? "created_at",
+        p_sort_direction: options?.sortDirection ?? "desc",
+      }
+    );
+    if (pageErr) return { data: [], total: 0, error: pageErr.message };
+
+    const pairs = (pageRows ?? []) as Array<{ pc_id: string; company_id: string; total_count: number | string }>;
+    const total =
+      pairs.length > 0
+        ? Number.parseInt(String(pairs[0].total_count ?? 0), 10) || 0
+        : 0;
+    if (pairs.length === 0) return { data: [], total, error: null };
+
+    const pcIds = pairs.map((p) => p.pc_id);
+    const orderIndex = new Map(pcIds.map((id, i) => [id, i]));
+
+    const { data: rawRowsData, error: fetchErr } = await client
+      .from(PROJECT_COMPANIES_TABLE)
+      .select(
+        `id, status, created_at, company_id,
+         companies!inner(id, name, domain, linkedin, tags, website, industry, employees_range),
+         hypothesis_targets(hypothesis_id, hypotheses(id, name))`
+      )
+      .eq("project_id", projectId)
+      .in("id", pcIds);
+
+    if (fetchErr) return { data: [], total: 0, error: fetchErr.message };
+
+    const rawRows = (rawRowsData ?? []) as Array<Record<string, unknown>>;
+    rawRows.sort((a, b) => {
+      const ia = orderIndex.get(a.id as string) ?? 0;
+      const ib = orderIndex.get(b.id as string) ?? 0;
+      return ia - ib;
+    });
+
+    const companyIds = rawRows
+      .map((r) => {
+        const c = r.companies as Record<string, unknown> | null;
+        return (c?.id ?? r.company_id) as string;
+      })
+      .filter(Boolean);
+
+    const contactsByCompany: Record<string, ProjectCompanyContact[]> = {};
+    const contactCountByCompany: Record<string, number> = {};
+    if (companyIds.length > 0) {
+      const { data: contactData } = await client
+        .from(CONTACTS_TABLE)
+        .select("company_uuid, first_name, last_name, position, project_id")
+        .in("company_uuid", companyIds)
+        .order("created_at", { ascending: false })
+        .limit(companyIds.length * 10);
+
+      for (const c of (contactData ?? []) as Array<Record<string, unknown>>) {
+        const cid = c.company_uuid as string;
+        if (!contactsByCompany[cid]) contactsByCompany[cid] = [];
+        contactCountByCompany[cid] = (contactCountByCompany[cid] ?? 0) + 1;
+        if (contactsByCompany[cid].length < 10) {
+          contactsByCompany[cid].push({
+            first_name: (c.first_name as string) ?? null,
+            last_name: (c.last_name as string) ?? null,
+            position: (c.position as string) ?? null,
+            project_id: (c.project_id as string) ?? null,
+          });
+        }
+      }
+    }
+
+    const rows: ProjectCompanyRow[] = rawRows.map((row) => {
+      const company = (row.companies as Record<string, unknown> | null) ?? {};
+      const companyId = (company.id ?? row.company_id) as string;
+      const targets = (row.hypothesis_targets as Array<Record<string, unknown>> | null) ?? [];
+      const hypotheses = targets
+        .map((t) => t.hypotheses as Record<string, unknown> | null)
+        .filter((h): h is Record<string, unknown> => h != null && typeof h.id === "string")
+        .map((h) => ({ id: h.id as string, name: h.name as string }));
+      return {
+        project_company_id: row.id as string,
+        company_id: companyId,
+        status: (row.status as string) ?? null,
+        created_at: row.created_at as string,
+        name: (company.name as string) ?? null,
+        domain: (company.domain as string) ?? null,
+        linkedin: (company.linkedin as string) ?? null,
+        website: (company.website as string) ?? null,
+        industry: (company.industry as string) ?? null,
+        employees_range: (company.employees_range as string) ?? null,
+        tags: parseCompanyTagsColumn(company.tags),
+        hypotheses,
+        contact_count: contactCountByCompany[companyId] ?? 0,
+        contacts_preview: contactsByCompany[companyId] ?? [],
+      };
+    });
+
+    return { data: rows, total, error: null };
   }
 
   const listFilter = options?.listUuid?.trim();
@@ -3601,6 +3724,79 @@ export async function getProjectCompanies(
   });
 
   return { data: rows, total: count ?? 0, error: null };
+}
+
+export interface ProjectContactListRow {
+  uuid: string;
+  first_name: string | null;
+  last_name: string | null;
+  name: string | null;
+  position: string | null;
+  avatar_url: string | null;
+  company_name: string | null;
+  work_email: string | null;
+  email: string | null;
+  company_uuid: string | null;
+  project_id: string | null;
+  created_at: string | null;
+}
+
+export async function getProjectContacts(
+  client: SupabaseClient,
+  projectId: string,
+  options?: {
+    search?: string | null;
+    limit?: number;
+    offset?: number;
+    listUuid?: string | null;
+    position?: string | null;
+    workEmail?: string | null;
+    sortBy?: string;
+    sortDirection?: "asc" | "desc";
+    linkedinOutreach?: string | null;
+    emailOutreach?: string | null;
+    replyStatus?: string | null;
+    connectionStatus?: string | null;
+  }
+): Promise<{ data: ProjectContactListRow[]; total: number; error: string | null }> {
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
+  const offset = Math.max(options?.offset ?? 0, 0);
+  const { data, error } = await client.rpc("filter_project_contact_ids", {
+    p_project_id: projectId,
+    p_linkedin_outreach: options?.linkedinOutreach?.trim() || null,
+    p_email_outreach: options?.emailOutreach?.trim() || null,
+    p_reply_status: options?.replyStatus?.trim() || null,
+    p_connection_status: options?.connectionStatus?.trim() || null,
+    p_list_uuid: options?.listUuid?.trim() || null,
+    p_position: options?.position?.trim() || null,
+    p_work_email: options?.workEmail?.trim() || null,
+    p_search: options?.search?.trim() || null,
+    p_limit: limit,
+    p_offset: offset,
+    p_sort_by: options?.sortBy ?? "created_at",
+    p_sort_direction: options?.sortDirection ?? "desc",
+  });
+  if (error) return { data: [], total: 0, error: error.message };
+  const rows = (data ?? []) as Array<Record<string, unknown>>;
+  const total = rows.length > 0 ? Number.parseInt(String(rows[0].total_count ?? 0), 10) || 0 : 0;
+  return {
+    data: rows.map((r) => ({
+      uuid: String(r.uuid),
+      first_name: (r.first_name as string) ?? null,
+      last_name: (r.last_name as string) ?? null,
+      name: (r.name as string) ?? null,
+      position: (r.position as string) ?? null,
+      avatar_url: (r.avatar_url as string) ?? null,
+      company_name: (r.company_name as string) ?? null,
+      work_email: (r.work_email as string) ?? null,
+      email: (r.email as string) ?? null,
+      company_uuid: (r.company_uuid as string) ?? null,
+      project_id: (r.project_id as string) ?? null,
+      created_at: (r.created_at as string) ?? null,
+    })),
+    total,
+    error: null,
+  };
 }
 
 export interface HypothesisRow {
@@ -5435,6 +5631,8 @@ export async function listN8nWorkflowResultsFilteredPageRpc(
 export type VelvetechExecutionSummaryRow = {
   id: string;
   run_id: string;
+  /** Human label e.g. "38 logistics / 21.07.26" (falls back to run_id). */
+  display_name: string;
   execution_id: string | null;
   created_at: string;
   status: string;
@@ -5842,6 +6040,136 @@ function numFromResult(j: Record<string, unknown>, key: string): number | null {
   return null;
 }
 
+function formatRunDateLabel(iso: string): string {
+  const d = new Date(iso);
+  if (!Number.isFinite(d.getTime())) return "";
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const yy = String(d.getUTCFullYear()).slice(-2);
+  return `${dd}.${mm}.${yy}`;
+}
+
+/** Turn launch list / CSV names into a short theme token. */
+function themeFromSourceListName(name: string | null | undefined): string | null {
+  if (!name || !String(name).trim()) return null;
+  let s = String(name).trim();
+  s = s.replace(/^CSV\s*(upload|test)\s*:\s*/i, "");
+  s = s.replace(/\.(csv|xlsx?)$/i, "");
+  // Prefer a trailing parenthetical or last path segment if present.
+  const paren = s.match(/\(([^)]+)\)\s*$/);
+  if (paren?.[1]) s = paren[1];
+  s = s.replace(/\b(company-only|companies|batch|research|upload|test)\b/gi, " ").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  // Keep it short for the table.
+  const words = s.split(/\s+/).filter(Boolean);
+  if (words.length <= 3) return s.toLowerCase();
+  return words.slice(0, 3).join(" ").toLowerCase();
+}
+
+export function buildVelvetechRunDisplayName(args: {
+  runId: string;
+  createdAt: string;
+  funnel: Record<string, number>;
+  theme?: string | null;
+}): string {
+  const count =
+    Number(args.funnel.companies_launched) ||
+    Number(args.funnel.companies_icp) ||
+    Number(args.funnel.companies_pov) ||
+    0;
+  const date = formatRunDateLabel(args.createdAt);
+  const theme = (args.theme || "").trim().toLowerCase() || "research";
+  if (count > 0 && date) return `${count} ${theme} / ${date}`;
+  if (date) return `${theme} / ${date}`;
+  return args.runId || "run";
+}
+
+async function enrichVelvetechExecutionDisplayNames(
+  client: SupabaseClient,
+  rows: VelvetechExecutionSummaryRow[]
+): Promise<void> {
+  if (!rows.length) return;
+  const runIds = [...new Set(rows.map((r) => r.run_id).filter(Boolean))];
+  const uuidIds = runIds.filter((id) =>
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)
+  );
+
+  const listThemeByRun = new Map<string, string>();
+  if (uuidIds.length) {
+    const { data: launches } = await client
+      .from("n8n_launch_runs")
+      .select("id, source_list_name")
+      .in("id", uuidIds);
+    for (const row of (launches ?? []) as Array<Record<string, unknown>>) {
+      const id = String(row.id ?? "");
+      const theme = themeFromSourceListName(
+        typeof row.source_list_name === "string" ? row.source_list_name : null
+      );
+      if (id && theme) listThemeByRun.set(id, theme);
+    }
+  }
+
+  const verticalCounts = new Map<string, Map<string, number>>();
+  const orFilter = runIds
+    .slice(0, 40)
+    .map((id) => `result->>run_id.eq.${id}`)
+    .join(",");
+  if (orFilter) {
+    const { data: stageRows } = await client
+      .from(N8N_WORKFLOW_RESULTS_TABLE)
+      .select("result, workflow_name")
+      .in("workflow_name", ["velvetech-icp-gate", "velvetech-pov"])
+      .or(orFilter)
+      .limit(3000);
+    for (const raw of (stageRows ?? []) as Array<Record<string, unknown>>) {
+      const j = (raw.result as Record<string, unknown>) ?? {};
+      const runId = String(j.run_id ?? "").trim();
+      const vertical = String(j.vertical ?? "")
+        .trim()
+        .toLowerCase();
+      if (!runId || !vertical || vertical === "other") continue;
+      const m = verticalCounts.get(runId) ?? new Map<string, number>();
+      m.set(vertical, (m.get(vertical) ?? 0) + 1);
+      verticalCounts.set(runId, m);
+    }
+  }
+
+  const dominantVertical = (runId: string): string | null => {
+    const m = verticalCounts.get(runId);
+    if (!m || !m.size) return null;
+    let best = "";
+    let bestN = 0;
+    for (const [k, n] of m) {
+      if (n > bestN) {
+        best = k;
+        bestN = n;
+      }
+    }
+    return best || null;
+  };
+
+  for (const row of rows) {
+    const theme =
+      listThemeByRun.get(row.run_id) ||
+      dominantVertical(row.run_id) ||
+      (row.run_id.includes("trucking")
+        ? "trucking"
+        : row.run_id.includes("riverstone")
+          ? "riverstone"
+          : row.run_id.includes("qual")
+            ? "qual"
+            : row.run_id.includes("dossier")
+              ? "dossier"
+              : null);
+    row.display_name = buildVelvetechRunDisplayName({
+      runId: row.run_id,
+      createdAt: row.created_at,
+      funnel: row.funnel,
+      theme,
+    });
+  }
+}
+
 function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSummaryRow {
   const j = (raw.result as Record<string, unknown>) ?? {};
   const funnelRaw = j.funnel;
@@ -5863,11 +6191,14 @@ function mapBillingResultRow(raw: Record<string, unknown>): VelvetechExecutionSu
     tokensRaw && typeof tokensRaw === "object" && !Array.isArray(tokensRaw)
       ? (tokensRaw as Record<string, number>)
       : null;
+  const run_id = String(j.run_id ?? j.entity_key ?? "");
+  const created_at = String(raw.created_at ?? "");
   return {
     id: String(raw.id ?? ""),
-    run_id: String(j.run_id ?? j.entity_key ?? ""),
+    run_id,
+    display_name: buildVelvetechRunDisplayName({ runId: run_id, createdAt: created_at, funnel }),
     execution_id: (raw.execution_id as string | null) ?? null,
-    created_at: String(raw.created_at ?? ""),
+    created_at,
     status: String(j.status ?? "unknown"),
     duration_sec: numFromResult(j, "duration_sec"),
     cost_usd: numFromResult(j, "cost_usd_total"),
@@ -5939,11 +6270,13 @@ export async function listVelvetechExecutionSummaries(
       const runId = String(j.run_id ?? j.launch_id ?? "").trim();
       if (!runId || seen.has(runId) || orphans.has(runId)) continue;
       if (isRunIdArtifactKey(runId, runId)) continue;
+      const created_at = String(raw.created_at ?? "");
       orphans.set(runId, {
         id: String(raw.id ?? ""),
         run_id: runId,
+        display_name: buildVelvetechRunDisplayName({ runId, createdAt: created_at, funnel: {} }),
         execution_id: (raw.execution_id as string | null) ?? null,
-        created_at: String(raw.created_at ?? ""),
+        created_at,
         status: "legacy",
         duration_sec: null,
         cost_usd: null,
@@ -5962,7 +6295,9 @@ export async function listVelvetechExecutionSummaries(
     deduped.sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)));
   }
 
-  return { rows: deduped.slice(offset, offset + limit), total: deduped.length, error: null };
+  const page = deduped.slice(offset, offset + limit);
+  await enrichVelvetechExecutionDisplayNames(client, page);
+  return { rows: page, total: deduped.length, error: null };
 }
 
 export type VelvetechExecutionDetail = {
@@ -6093,6 +6428,11 @@ export async function getVelvetechExecutionDetail(
     summary = {
       id: first.id,
       run_id: runId,
+      display_name: buildVelvetechRunDisplayName({
+        runId,
+        createdAt: first.created_at,
+        funnel: computedFunnel,
+      }),
       execution_id: first.execution_id,
       created_at: first.created_at,
       status: "legacy",
@@ -6107,6 +6447,10 @@ export async function getVelvetechExecutionDetail(
     };
   } else if (summary && funnelLooksEmpty(summary.funnel)) {
     summary = { ...summary, funnel: computedFunnel };
+  }
+
+  if (summary) {
+    await enrichVelvetechExecutionDisplayNames(client, [summary]);
   }
 
   return {

@@ -218,6 +218,8 @@ const router = useRouter();
 type ExecutionSummary = {
   id: string;
   run_id: string;
+  /** e.g. "38 logistics / 21.07.26" */
+  display_name?: string;
   execution_id: string | null;
   created_at: string;
   status: string;
@@ -1022,17 +1024,27 @@ function openEntityDetail(row: Record<string, unknown>, label: string) {
   drawerOpen.value = true;
 }
 
+function executionLabel(row: ExecutionSummary): string {
+  return row.display_name || row.run_id || row.execution_id || row.id;
+}
+
 const execColumns: DataTableColumns<ExecutionSummary> = [
   {
     title: "Run",
-    key: "run_id",
+    key: "display_name",
     minWidth: 220,
     ellipsis: { tooltip: true },
     render(row) {
       return h(
         NButton,
-        { text: true, type: "primary", size: "small", onClick: () => openExecution(row) },
-        { default: () => row.run_id || row.execution_id || row.id }
+        {
+          text: true,
+          type: "primary",
+          size: "small",
+          title: row.run_id || undefined,
+          onClick: () => openExecution(row),
+        },
+        { default: () => executionLabel(row) }
       );
     },
   },
@@ -1837,7 +1849,12 @@ const detailVendorMetrics = computed(() => {
       <NAlert v-if="detailError" type="error">{{ detailError }}</NAlert>
       <template v-if="detail?.summary">
         <NSpace wrap>
-          <NTag type="info">{{ detail.summary.run_id }}</NTag>
+          <NTag type="info" :title="detail.summary.run_id">
+            {{ detail.summary.display_name || detail.summary.run_id }}
+          </NTag>
+          <NTag v-if="detail.summary.display_name" :title="detail.summary.run_id">
+            {{ detail.summary.run_id }}
+          </NTag>
           <NTag>exec {{ detail.summary.execution_id ?? "—" }}</NTag>
           <NTag :type="detail.summary.status === 'success' ? 'success' : 'default'">
             {{ detail.summary.status }}
