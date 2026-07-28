@@ -137,7 +137,7 @@ function loadVisibleColumnKeys(): string[] {
   try {
     const raw = localStorage.getItem(COLUMN_STORAGE_KEY);
     const parsed = raw ? JSON.parse(raw) : null;
-    return Array.isArray(parsed) && parsed.every((v) => typeof v === "string")
+    return Array.isArray(parsed) && parsed.length > 0 && parsed.every((v) => typeof v === "string")
       ? parsed
       : [...DEFAULT_VISIBLE_COLUMN_KEYS];
   } catch {
@@ -619,7 +619,12 @@ const columnOptions = computed<SelectOption[]>(() =>
 
 const visibleDataColumns = computed(() => {
   const visibleKeys = new Set(visibleColumnKeys.value);
-  return dataColumns.value.filter((column) => "key" in column && visibleKeys.has(String(column.key)));
+  const selected = dataColumns.value.filter((column) => "key" in column && visibleKeys.has(String(column.key)));
+  // A stored selection that matches nothing (emptied by hand, or written before a
+  // column was renamed) would render a table of blank rows, so fall back to defaults.
+  if (selected.length > 0) return selected;
+  const defaults = new Set<string>(DEFAULT_VISIBLE_COLUMN_KEYS);
+  return dataColumns.value.filter((column) => "key" in column && defaults.has(String(column.key)));
 });
 
 const actionColumn = computed((): DataTableColumns<CompanyRow> =>

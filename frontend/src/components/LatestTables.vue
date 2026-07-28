@@ -60,7 +60,10 @@ function getVisibleColumnsFromStorage(table: string): string[] | null {
     const raw = localStorage.getItem(`${STORAGE_KEY_PREFIX}/${String(table)}`);
     if (raw == null) return null;
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) && parsed.every((x) => typeof x === "string") ? parsed : null;
+    // An empty stored array would hide every column, so treat it as "no preference".
+    return Array.isArray(parsed) && parsed.length > 0 && parsed.every((x) => typeof x === "string")
+      ? parsed
+      : null;
   } catch {
     return null;
   }
