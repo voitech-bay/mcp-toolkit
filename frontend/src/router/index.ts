@@ -85,6 +85,18 @@ const router = createRouter({
       meta: { title: "Sequence Studio | Voitech" },
     },
     {
+      path: "/plays",
+      name: "Plays",
+      component: () => import("../views/PlaysPage.vue"),
+      meta: { title: "Plays | Voitech" },
+    },
+    {
+      path: "/plays/:playId",
+      name: "PlayRunner",
+      component: () => import("../views/PlayRunnerPage.vue"),
+      meta: { title: "Play | Voitech" },
+    },
+    {
       path: "/how-to-guide",
       name: "HowToGuide",
       component: () => import("../views/HowToGuidePage.vue"),

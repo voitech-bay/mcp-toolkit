@@ -140,6 +140,7 @@ const VELVETECH_PATHS = [
   "/n8n/workflow-results",
   "/email-studio",
   "/sequence-studio",
+  "/plays",
   "/how-to-guide",
   "/analytics",
   "/hypotheses",
@@ -155,6 +156,7 @@ function pathInGroup(path: string, group: readonly string[]): boolean {
 
 function isVelvetechAllowedPath(path: string): boolean {
   if (VELVETECH_PATHS.includes(path as (typeof VELVETECH_PATHS)[number])) return true;
+  if (path.startsWith("/plays/")) return true;
   if (path.startsWith("/company/") || path.startsWith("/contact/")) return true;
   if (path.startsWith("/analytics/") || path.startsWith("/enrichment/")) return true;
   if (path.startsWith("/hypothesis-tag-contacts")) return true;
@@ -939,6 +941,10 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                   <NButton quaternary :type="route.path === '/sequence-studio' ? 'primary' : undefined" size="small" @click="router.push('/sequence-studio')">
                     <SendIcon :size="14" style="margin-right: 4px" />
                     Sequence Studio
+                  </NButton>
+                  <NButton quaternary :type="route.path.startsWith('/plays') ? 'primary' : undefined" size="small" @click="router.push('/plays')">
+                    <LayersIcon :size="14" style="margin-right: 4px" />
+                    Plays
                   </NButton>
                   <NButton quaternary :type="route.path === '/how-to-guide' ? 'primary' : undefined" size="small" @click="router.push('/how-to-guide')">
                     <BookOpenIcon :size="14" style="margin-right: 4px" />
