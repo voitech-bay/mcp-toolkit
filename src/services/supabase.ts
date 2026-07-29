@@ -928,6 +928,39 @@ export async function markSyncRunFinishedIfStillRunning(
   return { updated: (rows?.length ?? 0) > 0, error: null };
 }
 
+/**
+ * Most recent log-entry timestamp per run, used by the reaper as a liveness heartbeat.
+ *
+ * A healthy sync writes log entries continuously (a single run emits hundreds), so recent
+ * log activity proves it is alive. Unlike the in-process registry this survives a restart
+ * and works across replicas, and it is the signal that matters: a run with no log activity
+ * for the stale window is genuinely dead regardless of what any process believes.
+ */
+export async function getLatestSyncLogEntryAt(
+  client: SupabaseClient,
+  runIds: string[]
+): Promise<{ data: Record<string, string>; error: string | null }> {
+  const unique = [...new Set(runIds.filter(Boolean))];
+  if (unique.length === 0) return { data: {}, error: null };
+  const entries = await Promise.all(
+    unique.map(async (runId) => {
+      const { data } = await client
+        .from(SYNC_LOG_ENTRIES_TABLE)
+        .select("created_at")
+        .eq("run_id", runId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      const row = data as { created_at?: string } | null;
+      return [runId, row?.created_at ?? ""] as const;
+    })
+  );
+  return {
+    data: Object.fromEntries(entries.filter(([, at]) => at)),
+    error: null,
+  };
+}
+
 export interface ProjectSyncFreshness {
   project_id: string;
   /** Latest run that reached a terminal state, whatever the outcome. */

@@ -16,7 +16,11 @@
  * `sync_runs` that the running sync bumps periodically.
  */
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getRunningSyncRuns, markSyncRunFinishedIfStillRunning } from "./supabase.js";
+import {
+  getLatestSyncLogEntryAt,
+  getRunningSyncRuns,
+  markSyncRunFinishedIfStillRunning,
+} from "./supabase.js";
 import {
   clearSyncCancellation,
   listLocalSyncRunIds,
@@ -68,6 +72,13 @@ export interface StaleRunSelection {
   localMaxMs: number;
   /** Ms since this process registered the run; undefined when this process does not own it. */
   localAgeMs: (runId: string) => number | undefined;
+  /**
+   * ISO timestamp of the run's most recent log entry, if any. This is the primary
+   * liveness signal: a running sync writes log entries continuously, so recent activity
+   * means it is alive even when the in-process registry says otherwise (which is exactly
+   * how a live Velvetech run got reaped on 2026-07-29).
+   */
+  lastLogAt?: (runId: string) => string | undefined;
 }
 
 /**
@@ -81,6 +92,13 @@ export function selectStaleRunIds(runs: StaleRunInput[], opts: StaleRunSelection
   const nowMs = opts.now.getTime();
   const stale: string[] = [];
   for (const run of runs) {
+    // Liveness first, and it outranks everything: recent log activity means the sync is
+    // demonstrably still working, so it must never be closed no matter how old the row is.
+    const lastLog = opts.lastLogAt?.(run.id);
+    if (lastLog) {
+      const lastLogMs = Date.parse(lastLog);
+      if (Number.isFinite(lastLogMs) && nowMs - lastLogMs < opts.staleAfterMs) continue;
+    }
     const localAge = opts.localAgeMs(run.id);
     if (localAge !== undefined && localAge < opts.localMaxMs) continue;
     const startedMs = Date.parse(run.started_at);
@@ -144,11 +162,18 @@ export async function reapStaleSyncRuns(
   if (error) return { candidates: 0, reaped: [], error };
   if (runs.length === 0) return { candidates: 0, reaped: [], error: null };
 
+  // Heartbeat lookup for the candidates only, so the common (empty) case costs nothing.
+  const { data: lastLogByRun } = await getLatestSyncLogEntryAt(
+    client,
+    runs.map((r) => r.id)
+  );
+
   const staleIds = selectStaleRunIds(runs, {
     now,
     staleAfterMs: config.staleAfterMs,
     localMaxMs: config.localMaxMs,
     localAgeMs: (runId) => localSyncRunAgeMs(runId, nowMs),
+    lastLogAt: (runId) => lastLogByRun[runId],
   });
 
   const reaped: string[] = [];

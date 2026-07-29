@@ -252,8 +252,17 @@ function createSyncLogger(
             ? (data.response as { body?: unknown }).body
             : undefined;
         if (typeof rb === "string" && rb.length > 0) {
-          console.error(`${LOG_PREFIX} --- full HTTP response body (GetSales / API) ---`);
-          console.error(rb);
+          // Cap the console dump. An upstream error page can be a megabyte of HTML, and
+          // unattended hourly syncing turned that into a log flood that blew the platform
+          // rate limit (668k messages dropped on 2026-07-29) and buried real signal.
+          // The untruncated body still reaches sync_log_entries for debugging.
+          const MAX_CONSOLE_BODY = 4000;
+          console.error(`${LOG_PREFIX} --- HTTP response body (GetSales / API) ---`);
+          console.error(
+            rb.length > MAX_CONSOLE_BODY
+              ? `${rb.slice(0, MAX_CONSOLE_BODY)}\n...[truncated, ${rb.length} chars total; see sync_log_entries]`
+              : rb
+          );
         }
         const req = data.request;
         if (req && typeof req === "object" && req !== null) {

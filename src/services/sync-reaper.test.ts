@@ -88,6 +88,39 @@ test("a local registration past the ceiling is reaped as leaked", () => {
   assert.deepEqual(selected, ["leaked"]);
 });
 
+test("a run with recent log activity is never reaped, whatever its age", () => {
+  // Regression: on 2026-07-29 a live Velvetech run (which went on to finish successfully,
+  // writing 1317 log entries) was reaped at the 15m mark because the in-process registry
+  // check did not protect it. Log activity is the authoritative liveness signal.
+  const runs = [runStartedMinutesAgo("alive", 120)];
+  const selected = selectStaleRunIds(
+    runs,
+    opts({
+      localAgeMs: () => undefined, // registry says nothing, as it did in the incident
+      lastLogAt: () => new Date(NOW.getTime() - 30_000).toISOString(),
+    })
+  );
+  assert.deepEqual(selected, []);
+});
+
+test("a run whose log activity has itself gone stale is reaped", () => {
+  const runs = [runStartedMinutesAgo("dead", 120)];
+  const selected = selectStaleRunIds(
+    runs,
+    opts({
+      localAgeMs: () => undefined,
+      lastLogAt: () => new Date(NOW.getTime() - 60 * MINUTE).toISOString(),
+    })
+  );
+  assert.deepEqual(selected, ["dead"]);
+});
+
+test("an unparseable last-log timestamp falls through to the other checks", () => {
+  const runs = [runStartedMinutesAgo("weird", 120)];
+  const selected = selectStaleRunIds(runs, opts({ lastLogAt: () => "not-a-date" }));
+  assert.deepEqual(selected, ["weird"]);
+});
+
 test("an unparseable started_at is reaped rather than wedging forever", () => {
   const runs = [{ id: "bad", started_at: "not-a-timestamp" }];
   assert.deepEqual(selectStaleRunIds(runs, opts()), ["bad"]);
