@@ -634,18 +634,49 @@ export async function getProjectLatestRows(
  * Check if any sync run is currently active (status = 'running').
  * Returns the active run row if one exists, or null.
  */
+/**
+ * Newest run still marked `running`.
+ *
+ * Defaults to a GLOBAL check (no project filter) because callers depend on seeing
+ * another project's lock: the Sync page renders its "another sync is running" banner
+ * and the "Clear stuck sync lock" button from it, and the MCP status tool reports
+ * `belongs_to_this_project`. Pass `projectId` only where a per-project lock is wanted.
+ */
 export async function getActiveSyncRun(
-  client: SupabaseClient
+  client: SupabaseClient,
+  options?: { projectId?: string }
 ): Promise<{ data: (SyncRunRow & { project_id: string | null }) | null; error: string | null }> {
-  const { data, error } = await client
+  let query = client
     .from(SYNC_RUNS_TABLE)
     .select("*")
-    .eq("status", "running")
+    .eq("status", "running");
+  if (options?.projectId) query = query.eq("project_id", options.projectId);
+  const { data, error } = await query
     .order("started_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) return { data: null, error: error.message };
   return { data: data as (SyncRunRow & { project_id: string | null }) | null, error: null };
+}
+
+/**
+ * All runs still marked `running`, oldest first, for the stale-run reaper.
+ *
+ * `getActiveSyncRun` is limit(1) descending and therefore cannot see older stuck rows
+ * hiding behind a newer one. Ascending order here means the oldest wedge is repaired
+ * first when several have accumulated.
+ */
+export async function getRunningSyncRuns(
+  client: SupabaseClient,
+  options?: { olderThanIso?: string; limit?: number }
+): Promise<{ data: Array<SyncRunRow & { project_id: string | null }>; error: string | null }> {
+  let query = client.from(SYNC_RUNS_TABLE).select("*").eq("status", "running");
+  if (options?.olderThanIso) query = query.lt("started_at", options.olderThanIso);
+  const { data, error } = await query
+    .order("started_at", { ascending: true })
+    .limit(options?.limit ?? 50);
+  if (error) return { data: [], error: error.message };
+  return { data: (data ?? []) as Array<SyncRunRow & { project_id: string | null }>, error: null };
 }
 
 export interface SyncHistoryEntry {
@@ -895,6 +926,65 @@ export async function markSyncRunFinishedIfStillRunning(
   if (error) return { updated: false, error: error.message };
   const rows = data as { id: string }[] | null;
   return { updated: (rows?.length ?? 0) > 0, error: null };
+}
+
+export interface ProjectSyncFreshness {
+  project_id: string;
+  /** Latest run that reached a terminal state, whatever the outcome. */
+  last_completed_at: string | null;
+  last_successful_at: string | null;
+  last_status: SyncRunStatus | null;
+}
+
+/**
+ * Latest sync run per project, for the staleness indicator.
+ *
+ * Two separate timestamps on purpose. The DB check constraint only allows
+ * running|success|error and `syncRunStatusForDatabase` folds `partial` into `error`, so a
+ * project with one chronically failing entity would show "never synced successfully" and
+ * sit permanently red. Age is therefore keyed off `last_completed_at` while colour is
+ * keyed off `last_status`.
+ */
+export async function getLatestSyncRunPerProject(
+  client: SupabaseClient,
+  projectIds: string[]
+): Promise<{ data: Record<string, ProjectSyncFreshness>; error: string | null }> {
+  const unique = [...new Set(projectIds.filter(Boolean))];
+  if (unique.length === 0 || unique.length > 50) return { data: {}, error: null };
+
+  const entries = await Promise.all(
+    unique.map(async (projectId) => {
+      const [completed, successful] = await Promise.all([
+        client
+          .from(SYNC_RUNS_TABLE)
+          .select("status, finished_at, started_at")
+          .eq("project_id", projectId)
+          .not("finished_at", "is", null)
+          .order("started_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        client
+          .from(SYNC_RUNS_TABLE)
+          .select("finished_at, started_at")
+          .eq("project_id", projectId)
+          .eq("status", "success")
+          .order("started_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ]);
+      const completedRow = completed.data as { status?: string; finished_at?: string } | null;
+      const successfulRow = successful.data as { finished_at?: string } | null;
+      const freshness: ProjectSyncFreshness = {
+        project_id: projectId,
+        last_completed_at: completedRow?.finished_at ?? null,
+        last_successful_at: successfulRow?.finished_at ?? null,
+        last_status: (completedRow?.status as SyncRunStatus | undefined) ?? null,
+      };
+      return [projectId, freshness] as const;
+    })
+  );
+
+  return { data: Object.fromEntries(entries), error: null };
 }
 
 /**

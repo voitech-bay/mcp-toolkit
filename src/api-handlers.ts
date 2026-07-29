@@ -16,6 +16,7 @@ import {
   addContactContextEntry,
   getContactContextCounts,
   getProjects,
+  getLatestSyncRunPerProject,
   getProjectById,
   updateProjectCredentials,
   getProjectIntegrationSecret,
@@ -204,6 +205,7 @@ import {
   SyncCancelledError,
   isLocalSyncRunActive,
 } from "./services/sync-cancellation.js";
+import { reapStaleSyncRuns } from "./services/sync-reaper.js";
 import {
   getActiveWorkers,
   isWorkerHeartbeatAuthOk,
@@ -410,6 +412,9 @@ export async function handleSupabaseSync(
   syncSupabaseFromSource(projectId, runId, {
     ...(entities !== undefined ? { entities } : {}),
     ...(syncDateRange !== undefined ? { syncDateRange } : {}),
+  }).then((result) => {
+    // A returned error is not thrown, so .catch() below never sees it.
+    if (result.error) console.error(`[sync] run ${runId} finished with error: ${result.error}`);
   }).catch((err) => {
     if (err instanceof SyncCancelledError) {
       console.log(`[sync] run ${runId} cancelled`);
@@ -2542,13 +2547,35 @@ export async function handleGetProjects(
     return;
   }
   const session = getAuthSession(req);
-  if (session?.role === "velvetech") {
-    res.writeHead(200);
-    res.end(JSON.stringify({ data: result.data.filter((p) => p.id === VELVETECH_PROJECT_ID) }));
-    return;
+  const projects =
+    session?.role === "velvetech"
+      ? result.data.filter((p) => p.id === VELVETECH_PROJECT_ID)
+      : result.data;
+
+  // Sync freshness is advisory only: /api/projects must never break because sync_runs
+  // is unavailable, so a failure here just omits the fields.
+  let data: unknown[] = projects;
+  try {
+    const freshness = await getLatestSyncRunPerProject(
+      client,
+      projects.map((p) => p.id)
+    );
+    data = projects.map((project) => {
+      const entry = freshness.data[project.id];
+      if (!entry) return project;
+      return {
+        ...project,
+        last_completed_sync_at: entry.last_completed_at,
+        last_successful_sync_at: entry.last_successful_at,
+        last_sync_status: entry.last_status,
+      };
+    });
+  } catch (error) {
+    console.error("[projects] sync freshness lookup failed:", error);
   }
+
   res.writeHead(200);
-  res.end(JSON.stringify({ data: result.data }));
+  res.end(JSON.stringify({ data }));
 }
 
 export async function handleUpdateProjectCredentials(
@@ -2927,6 +2954,11 @@ export async function handleSyncPreflight(
     res.end(JSON.stringify({ error: "Missing query param: projectId" }));
     return;
   }
+  // Self-heal before reading the lock below: opening the Sync page clears a stale lock,
+  // so Start Sync is enabled without anyone having to know the Clear button exists.
+  await reapStaleSyncRuns(client).catch((error) => {
+    console.error("[sync-reaper] preflight sweep failed:", error);
+  });
   const [countsResult, latestResult, activeRunResult, projectResult, credentialsResult] = await Promise.all([
     getProjectEntityCounts(client, projectId),
     getProjectLatestRows(client, projectId, 3),

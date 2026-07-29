@@ -109,6 +109,9 @@ export function registerStartProjectSyncTool(server: McpServer): void {
       // Fire-and-forget: mirrors handleSupabaseSync. Do NOT await.
       void syncSupabaseFromSource(args.projectId, runId, {
         syncDateRange: { from: dateFrom, to: dateTo },
+      }).then((result) => {
+        // A returned error is not thrown, so .catch() below never sees it.
+        if (result.error) console.error(`[sync] run ${runId} finished with error: ${result.error}`);
       }).catch((err: unknown) => {
         if (err instanceof SyncCancelledError) {
           console.log(`[sync] run ${runId} cancelled`);

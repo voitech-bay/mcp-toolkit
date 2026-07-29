@@ -83,6 +83,10 @@ export interface Project {
   created_at: string;
   /** From `Projects.image_url`; null or omitted when unset. */
   image_url?: string | null;
+  /** Sync freshness, merged in by /api/projects. Optional: omitted if sync_runs is unavailable. */
+  last_completed_sync_at?: string | null;
+  last_successful_sync_at?: string | null;
+  last_sync_status?: "running" | "success" | "partial" | "error" | "cancelled" | null;
 }
 
 export interface SyncLogEntry {
