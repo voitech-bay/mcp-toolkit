@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, ref, watch } from "vue";
+import { computed, h, onUnmounted, ref, watch } from "vue";
 import { useDark } from "@vueuse/core";
 import { useRoute, useRouter } from "vue-router";
 import {
@@ -15,6 +15,7 @@ import {
   NModal,
   NInput,
   NText,
+  NTooltip,
 } from "naive-ui";
 import type { SelectOption, DropdownOption } from "naive-ui";
 import { darkTheme, lightTheme } from "naive-ui";
@@ -47,6 +48,7 @@ import {
   BookOpenIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
+import { syncFreshness } from "./sync-freshness";
 import { VELVETECH_PROJECT_ID, isFeasibleProjectId } from "./project-ids";
 
 type AuthSession = {
@@ -456,6 +458,39 @@ function toggleTheme() {
   isDark.value = !isDark.value;
 }
 
+// --- Sync freshness indicator ---------------------------------------------------
+// Data now refreshes on a schedule, so "the data is stale" has to be visible rather
+// than something someone happens to notice. This value changes at most once an hour,
+// so a slow poll is enough; no websocket.
+const freshnessNow = ref(new Date());
+const FRESHNESS_REFRESH_MS = 5 * 60 * 1000;
+const freshnessTimer = window.setInterval(() => {
+  freshnessNow.value = new Date();
+  void projectStore.loadProjects();
+}, FRESHNESS_REFRESH_MS);
+onUnmounted(() => window.clearInterval(freshnessTimer));
+
+const syncFreshnessInfo = computed(() => {
+  const project = projectStore.selectedProject;
+  if (!project || project.last_completed_sync_at === undefined) return null;
+  return syncFreshness(project.last_completed_sync_at, freshnessNow.value);
+});
+
+const syncFreshnessTooltip = computed(() => {
+  const project = projectStore.selectedProject;
+  const info = syncFreshnessInfo.value;
+  if (!project || !info) return "";
+  if (info.level === "unknown") return "This project has never completed a sync.";
+  const when = project.last_completed_sync_at
+    ? new Date(project.last_completed_sync_at).toLocaleString()
+    : "unknown";
+  const status = project.last_sync_status ?? "unknown";
+  const lastGood = project.last_successful_sync_at
+    ? new Date(project.last_successful_sync_at).toLocaleString()
+    : "never";
+  return `Last sync ${info.label} (${when}) · status: ${status} · last fully successful: ${lastGood}`;
+});
+
 async function loadAppData(preferredProjectId?: string | null) {
   await projectStore.loadProjects();
   if (isVelvetechLogin.value) {
@@ -791,6 +826,12 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
               <NSelect v-if="!isVelvetechLogin" v-model:value="selectedProjectId" :options="projectOptions" :loading="projectStore.loading"
                 :render-label="renderProjectLabel" placeholder="Select project…" clearable size="small"
                 style="width: 220px" />
+              <NTooltip v-if="syncFreshnessInfo" trigger="hover">
+                <template #trigger>
+                  <span class="sync-freshness-dot" :class="`sync-freshness-dot--${syncFreshnessInfo.level}`" />
+                </template>
+                {{ syncFreshnessTooltip }}
+              </NTooltip>
               <NButton v-else quaternary size="small" @click="router.push('/')">
                 <RocketIcon :size="14" style="margin-right: 4px" />
                 Velvetech
@@ -1081,6 +1122,28 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
   gap: 0.5rem;
   flex-wrap: wrap;
   min-width: 0;
+}
+
+.sync-freshness-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  cursor: help;
+  background: var(--n-text-color-disabled, #999);
+}
+
+.sync-freshness-dot--fresh {
+  background: #18a058;
+}
+
+.sync-freshness-dot--stale {
+  background: #f0a020;
+}
+
+.sync-freshness-dot--critical {
+  background: #d03050;
 }
 
 .header-brand-img-btn {

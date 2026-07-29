@@ -172,8 +172,16 @@ import {
 import { attachEnrichmentTableSocket } from "./services/enrichment-realtime.js";
 import { createMcpHandler } from "./server.js";
 import { CHARTS_PUBLIC_DIR } from "./services/charts-public.js";
-import { startScheduledGetSalesSync } from "./services/getsales-sync-scheduler.js";
-import { assertSupabaseConfigured } from "./services/supabase.js";
+import {
+  startScheduledGetSalesSync,
+  stopScheduledGetSalesSync,
+} from "./services/getsales-sync-scheduler.js";
+import {
+  closeLocalSyncRunsForShutdown,
+  startSyncReaper,
+  stopSyncReaper,
+} from "./services/sync-reaper.js";
+import { assertSupabaseConfigured, getSupabase } from "./services/supabase.js";
 import { assertAuthConfigured, getAuthSession, isN8nMachineAuth, isPublicAuthPath, isPublicWebhookPath, isVelvetechAllowedApiPath, sendAuthError } from "./services/auth.js";
 import { VELVETECH_PROJECT_ID } from "./services/n8n-trigger.js";
 import {
@@ -1483,5 +1491,41 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  WS   /api/sync-ws?runId=<id>");
   console.log("  WS   /api/workers-ws?role=worker|subscribe");
   console.log("  WS   /api/enrichment-ws?projectId=<id>");
+  // Ungated by the scheduler flag: manually started syncs orphan their run rows too.
+  startSyncReaper(() => getSupabase());
   startScheduledGetSalesSync();
 });
+
+/**
+ * Release DB sync locks on shutdown so a redeploy cannot leave a run wedged as 'running'.
+ * Registered at module scope rather than inside the listen callback because a signal can
+ * arrive before that callback fires during a fast redeploy.
+ */
+const SHUTDOWN_BUDGET_MS = Number.parseInt(process.env.SYNC_SHUTDOWN_TIMEOUT_MS ?? "", 10) || 5000;
+let shuttingDown = false;
+
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[api-server] ${signal} received; releasing active sync run locks`);
+  stopScheduledGetSalesSync();
+  stopSyncReaper();
+  const client = getSupabase();
+  if (client) {
+    try {
+      const { closed, timedOut } = await closeLocalSyncRunsForShutdown(client, {
+        timeoutMs: SHUTDOWN_BUDGET_MS,
+      });
+      if (closed.length > 0) console.log(`[api-server] closed sync run(s): ${closed.join(", ")}`);
+      if (timedOut) console.warn("[api-server] shutdown lock release timed out; reaper will clean up");
+    } catch (error) {
+      console.error("[api-server] shutdown lock release failed:", error);
+    }
+  }
+  server.close(() => process.exit(0));
+  // Never block the platform's kill window waiting on in-flight work.
+  setTimeout(() => process.exit(0), SHUTDOWN_BUDGET_MS).unref();
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));

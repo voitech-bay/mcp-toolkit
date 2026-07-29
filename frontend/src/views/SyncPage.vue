@@ -18,6 +18,7 @@ import type {
 import { ALL_SYNC_ENTITY_KEYS, defaultSyncEntitySelection } from "../types";
 import { SYNC_ENTITY_LABELS } from "../sync-entities";
 import { useProjectStore } from "../stores/project";
+import { syncFreshness } from "../sync-freshness";
 
 // --- State ---
 const message = useMessage();
@@ -26,6 +27,14 @@ const projectStore = useProjectStore();
 
 const selectedProjectId = computed(() => projectStore.selectedProjectId);
 const selectedProject = computed(() => projectStore.selectedProject);
+
+/** "Last sync 42m ago" beside the idle indicator, from the freshness fields on /api/projects. */
+const lastSyncLabel = computed(() => {
+  const completedAt = projectStore.selectedProject?.last_completed_sync_at;
+  if (!completedAt) return "";
+  const info = syncFreshness(completedAt);
+  return info.level === "unknown" ? "" : `last sync ${info.label}`;
+});
 
 
 const credBaseUrl = ref(projectStore.selectedProject?.source_api_base_url ?? "");
@@ -1040,6 +1049,7 @@ const preflightRows = computed(() => {
             <template v-else>
               <span class="idle-dot" />
               <NText depth="3">Idle</NText>
+              <NText v-if="lastSyncLabel" depth="3">· {{ lastSyncLabel }}</NText>
             </template>
           </div>
 

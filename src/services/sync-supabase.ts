@@ -29,6 +29,7 @@ import {
   createSyncRun,
   reconcileHypothesisGetSalesTags,
   updateSyncRun,
+  markSyncRunFinishedIfStillRunning,
   insertSyncLogEntry,
   type SyncRunStatus,
   getCollectedAnalyticsDays,
@@ -1012,6 +1013,12 @@ export async function syncSupabaseFromSource(
     return result;
   }
 
+  // Bind the caller's run BEFORE any early return below, so every exit path closes the
+  // row rather than leaking the global lock. Stays null while we are the ones checking
+  // the lock, so losing a lock race can never close somebody else's active run.
+  let runId: string | null = existingRunId ?? null;
+
+  try {
   // When called without a pre-created run, check sync lock ourselves
   if (!existingRunId) {
     const { data: activeRun, error: lockCheckError } = await getActiveSyncRun(client);
@@ -1045,7 +1052,6 @@ export async function syncSupabaseFromSource(
     credentials = credentialsResult.credentials ?? undefined;
   }
 
-  let runId: string | null = existingRunId ?? null;
   if (!runId) {
     const runResult = await createSyncRun(client, projectId);
     if (runResult.id) runId = runResult.id;
@@ -1751,6 +1757,23 @@ export async function syncSupabaseFromSource(
   return result;
   } finally {
     if (runId) unregisterLocalSyncRun(runId);
+  }
+  } finally {
+    // Compare-and-set, so this is a genuine no-op whenever the normal path already wrote
+    // a terminal status. It exists to catch the early returns above (bad project, missing
+    // credentials, Supabase blip) and any throw that escapes the inner handlers, each of
+    // which would otherwise leave the row 'running' and wedge the global lock forever.
+    if (runId) {
+      try {
+        await markSyncRunFinishedIfStillRunning(client, runId, {
+          error: result.error ?? "Sync ended without writing a terminal status",
+        });
+      } catch (closeError) {
+        console.error(`${LOG_PREFIX} failed to close sync run ${runId}:`, closeError);
+      }
+      unregisterLocalSyncRun(runId);
+      clearSyncCancellation(runId);
+    }
   }
 }
 
