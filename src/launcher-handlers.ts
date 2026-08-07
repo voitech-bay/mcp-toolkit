@@ -25,6 +25,7 @@ import {
   triggerWorkflowPayload,
   VELVETECH_PROJECT_ID,
 } from "./services/n8n-trigger.js";
+import { welloreCompanyUuid } from "./services/wellore-messaging/ids.js";
 import { getAuthSession } from "./services/auth.js";
 import { fetchAllSenders, sendLinkedInMessage } from "./services/source-api.js";
 import { computeAndEmitBilling, findResearchParentsMissingBilling, snapshotOpenRouterCredits } from "./services/velvetech-billing.js";
@@ -415,6 +416,94 @@ async function buildVelvetechMessagingPayloads(
 }
 
 /**
+ * Wellore messaging launch: unlike Velvetech, research already lives in the
+ * wellore_* schema (company POV + signals from the WLR n8n pipeline), not in
+ * n8n_workflow_results. wellore.companies / wellore.signals are keyed by the
+ * original bigint id, while bridge-wellore-to-canonical.ts gives each company a
+ * deterministic uuid (md5('wellore:company:'||id)::uuid) for the canonical
+ * companies table. Reverse the hash by fetching all wellore company ids and
+ * recomputing, since the hash cannot be inverted directly.
+ */
+async function buildWelloreMessagingPayloads(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  args: { projectId: string; launchId: string; leadUuids: string[] }
+): Promise<{ ok: true; payloads: Json[] } | { ok: false; status: number; error: string }> {
+  const { contacts, error } = await getContactsByUuidsForProject(client, args.projectId, args.leadUuids);
+  if (error) return { ok: false, status: 500, error };
+  const contactRows = args.leadUuids.map((uuid) => contacts[uuid]).filter((row): row is Json => !!row);
+  const missing = args.leadUuids.length - contactRows.length;
+  if (missing > 0) return { ok: false, status: 400, error: `${missing} selected lead(s) are not synced in Contacts` };
+
+  const idRes = await client.from("wellore_companies").select("id");
+  if (idRes.error) return { ok: false, status: 500, error: idRes.error.message };
+  const wolreCompanyIdByUuid = new Map<string, number>();
+  for (const row of (idRes.data ?? []) as Array<{ id: number }>) wolreCompanyIdByUuid.set(welloreCompanyUuid(row.id), row.id);
+
+  const neededWelloreIds = [...new Set(contactRows.map((c) => wolreCompanyIdByUuid.get(str(c, "company_uuid"))).filter((id): id is number => id != null))];
+  const povRes = neededWelloreIds.length
+    ? await client.from("wellore_companies").select("id,pov").in("id", neededWelloreIds)
+    : { data: [], error: null };
+  if (povRes.error) return { ok: false, status: 500, error: povRes.error.message };
+  const povById = new Map<number, Json>((povRes.data ?? []).map((r: Json) => [Number(r.id), (r.pov as Json) ?? {}]));
+
+  const signalsRes = neededWelloreIds.length
+    ? await client.from("wellore_signals").select("company_id,type,date,summary,url,outcome").in("company_id", neededWelloreIds).eq("outcome", "found").order("date", { ascending: false })
+    : { data: [], error: null };
+  if (signalsRes.error) return { ok: false, status: 500, error: signalsRes.error.message };
+  const signalsByCompany = new Map<number, Json[]>();
+  for (const s of (signalsRes.data ?? []) as Json[]) {
+    const id = Number(s.company_id);
+    const list = signalsByCompany.get(id) ?? [];
+    list.push({ type: s.type, date: s.date, summary: s.summary, url: s.url });
+    signalsByCompany.set(id, list);
+  }
+
+  const payloads: Json[] = [];
+  const missingResearch: string[] = [];
+  for (const c of contactRows) {
+    const leadUuid = str(c, "uuid");
+    const companyUuidStr = str(c, "company_uuid");
+    const welloreId = wolreCompanyIdByUuid.get(companyUuidStr);
+    const pov = welloreId != null ? povById.get(welloreId) : undefined;
+    if (welloreId == null || !pov || pov.status !== "ok") {
+      missingResearch.push(`${contactName(c) || leadUuid}: no usable Wellore POV (run the WLR research pipeline for this company first)`);
+      continue;
+    }
+    const companyName = strAny(c, "company_name") || String(pov.company_name ?? "");
+    payloads.push({
+      run_id: `${args.launchId}-${leadUuid.slice(0, 8)}`,
+      launch_id: args.launchId,
+      project_id: args.projectId,
+      batch_name: args.launchId,
+      company_key: companyUuidStr,
+      company_name: companyName,
+      company_uuid: companyUuidStr,
+      research: {
+        pov_summary: String(pov.summary ?? ""),
+        pov_hook: pov.hook ?? null,
+        pov_wellore_angle: pov.wellore_angle ?? null,
+        verified_signals: (signalsByCompany.get(welloreId) ?? []).slice(0, 8),
+      },
+      lead: {
+        lead_uuid: leadUuid,
+        contact_id: leadUuid,
+        company_uuid: companyUuidStr,
+        name: contactName(c),
+        first_name: firstName(c),
+        title: str(c, "title"),
+        linkedin: str(c, "linkedin_url"),
+        email: str(c, "work_email"),
+      },
+      sequence_mode: "standard",
+    });
+  }
+  if (missingResearch.length > 0) {
+    return { ok: false, status: 409, error: `Wellore research required before messaging: ${missingResearch.join("; ")}` };
+  }
+  return { ok: true, payloads };
+}
+
+/**
  * Accept-triggered LinkedIn sequence (D0.2): assembles the full context the n8n
  * accept parent (`velvetech-accept-linkedin-trigger`) requires — it throws on a
  * bare GetSales event, so pov + deep_research + lead + channel_state must be
@@ -663,6 +752,21 @@ export async function handleN8nLaunch(req: IncomingMessage, res: ServerResponse)
     trig = failed ? { ok: false, status: 502, error: failed } : { ok: true, status: 200 };
   } else if (wf.adapter === "velvetech_accept_linkedin") {
     const built = await buildVelvetechAcceptLinkedinPayloads(client, { projectId, launchId, leadUuids });
+    if (!built.ok) {
+      await client
+        .from(LAUNCH_RUNS_TABLE)
+        .update({ status: "failed", error_message: built.error, finished_at: new Date().toISOString() })
+        .eq("id", launchId);
+      return sendJson(res, built.status, { error: built.error, launchId });
+    }
+    let failed: string | null = null;
+    for (const payload of built.payloads) {
+      const one = await triggerWorkflowPayload(workflowKey, payload);
+      if (!one.ok) failed = one.error ?? "Trigger failed";
+    }
+    trig = failed ? { ok: false, status: 502, error: failed } : { ok: true, status: 200 };
+  } else if (wf.adapter === "wellore_messaging") {
+    const built = await buildWelloreMessagingPayloads(client, { projectId, launchId, leadUuids });
     if (!built.ok) {
       await client
         .from(LAUNCH_RUNS_TABLE)

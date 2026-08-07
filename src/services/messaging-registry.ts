@@ -29,6 +29,8 @@ export interface MessagingRegistryEntry {
   defaultModel: string;
   /** Key registered in n8n-trigger.ts WORKFLOW_REGISTRY for Sequence Studio's Generate button. */
   sequenceWorkflowKey: string;
+  /** external_target prefix stamped on ingested email rows (e.g. "smartlead" -> "smartlead:body_1"). */
+  emailPushTarget: string;
   /** Channels this project's messaging module has locked rules for. */
   channels: readonly RegistryChannel[];
   /** Returns null when the channel is not covered by this project's locked voice (caller should fall back to the generic prompt). */
@@ -41,6 +43,7 @@ const velvetechEntry: MessagingRegistryEntry = {
   projectId: VELVETECH_PROJECT_ID,
   defaultModel: "openai/gpt-5.5",
   sequenceWorkflowKey: "velvetech_messaging",
+  emailPushTarget: "smartlead",
   channels: ["email", "linkedin_dm", "inmail", "reply"],
   buildSystemPrompt: (channel, opts) =>
     buildVelvetechSystemPrompt(
@@ -60,6 +63,7 @@ const welloreEntry: MessagingRegistryEntry = {
   projectId: WELLORE_PROJECT_ID,
   defaultModel: "openai/gpt-5.6-terra",
   sequenceWorkflowKey: "wellore_messaging",
+  emailPushTarget: "instantly",
   channels: ["email"],
   buildSystemPrompt: (channel, opts) => (channel === "email" ? buildWelloreSystemPrompt("email", opts.sequenceStep) : null),
   validateDraft: (channel, subject, body, opts) =>

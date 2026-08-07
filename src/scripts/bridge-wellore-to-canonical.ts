@@ -12,20 +12,13 @@
  * (omit --apply for a dry run that only prints counts)
  */
 import "dotenv/config";
-import { createHash } from "node:crypto";
 import { getSupabase } from "../services/supabase.js";
+import { welloreCompanyUuid as companyUuid, welloreContactUuid as contactUuid } from "../services/wellore-messaging/ids.js";
 
 const WELLORE_PROJECT_ID = process.env.WELLORE_PROJECT_ID?.trim() || "0038d0db-aab2-40f1-9f6e-38d38e157f8f";
 const apply = process.argv.includes("--apply");
 
 type Json = Record<string, unknown>;
-
-function deterministicUuid(prefix: string, id: number | string): string {
-  const hex = createHash("md5").update(`${prefix}${id}`).digest("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
-const companyUuid = (id: number | string) => deterministicUuid("wellore:company:", id);
-const contactUuid = (id: number | string) => deterministicUuid("wellore:contact:", id);
 
 async function main(): Promise<void> {
   const client = getSupabase();

@@ -404,12 +404,13 @@ export async function handleEmailStudioIngestFromN8n(req: IncomingMessage, res: 
   const critique = b.critique && typeof b.critique === "object" ? (b.critique as Json) : {};
   const pass = critique.pass === true;
   const status: EmailStatus = pass ? "needs_review" : "generation_failed";
+  const emailPushTarget = getMessagingEntry(projectId)?.emailPushTarget ?? "smartlead";
   const campaignId = str(b.campaignId) || "velvetech-proactive";
   const rows: Array<{ channel: OutreachMessageChannel; sequence_step: number; subject: string; body: string; external_target: string | null }> = [];
 
   for (const touch of (Array.isArray(b.emailSequence) ? b.emailSequence : []) as IngestTouch[]) {
     const step = Math.max(1, Number(touch.step ?? rows.length + 1));
-    rows.push({ channel: "email", sequence_step: step, subject: str(touch.subject), body: str(touch.body), external_target: `smartlead:body_${step}` });
+    rows.push({ channel: "email", sequence_step: step, subject: str(touch.subject), body: str(touch.body), external_target: `${emailPushTarget}:body_${step}` });
   }
   const liMsgFields = b.liMsgFields && typeof b.liMsgFields === "object" ? b.liMsgFields as Record<string, unknown> : null;
   if (liMsgFields) {

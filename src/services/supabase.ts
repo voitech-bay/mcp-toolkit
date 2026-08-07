@@ -2260,7 +2260,7 @@ export async function getContactsByUuidsForProject(
     const { data, error } = await client
       .from(CONTACTS_TABLE)
       .select(
-        "uuid, name, first_name, last_name, company_name, company_uuid, position, linkedin, work_email"
+        "uuid, name, first_name, last_name, company_name, company_uuid, position, title, linkedin, linkedin_url, work_email"
       )
       .eq("project_id", projectId)
       .in("uuid", chunk);

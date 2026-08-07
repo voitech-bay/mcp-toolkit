@@ -15,13 +15,15 @@ const N8N_BASE = (process.env.N8N_BASE_URL?.trim() || "https://primary-productio
 );
 export const FEASIBLE_PROJECT_ID = "94dc3b92-1cae-4360-a958-917a58063309";
 export const VELVETECH_PROJECT_ID = "51cc22a1-868e-42c4-974f-9a7c5f5dce20";
+export const WELLORE_PROJECT_ID = "0038d0db-aab2-40f1-9f6e-38d38e157f8f";
 
 export type WorkflowLaunchAdapter =
   | "feasible_list"
   | "velvetech_research"
   | "velvetech_reply"
   | "velvetech_messaging"
-  | "velvetech_accept_linkedin";
+  | "velvetech_accept_linkedin"
+  | "wellore_messaging";
 
 export interface WorkflowRegistryEntry {
   /** Stable key used in API bodies and the launch record. */
@@ -88,6 +90,14 @@ export const WORKFLOW_REGISTRY: WorkflowRegistryEntry[] = [
     workflowId: "iGITkIAZFMtyMykX",
     project: VELVETECH_PROJECT_ID,
     adapter: "velvetech_accept_linkedin",
+  },
+  {
+    key: "wellore_messaging",
+    label: "Wellore — Proactive sequence",
+    webhookUrlEnv: "N8N_WELLORE_MESSAGING_WEBHOOK_URL",
+    workflowId: "KZCg2KKFplQdVEYU",
+    project: WELLORE_PROJECT_ID,
+    adapter: "wellore_messaging",
   },
 ];
 
@@ -185,6 +195,7 @@ export function resolveWebhookUrl(wf: WorkflowRegistryEntry): string {
   if (wf.key === "velvetech_messaging") return `${N8N_BASE}/webhook/velvetech-messaging-trigger`;
   if (wf.key === "velvetech_full") return `${N8N_BASE}/webhook/velvetech-full-trigger`;
   if (wf.key === "velvetech_accept_linkedin") return `${N8N_BASE}/webhook/velvetech-accept-linkedin-trigger`;
+  if (wf.key === "wellore_messaging") return `${N8N_BASE}/webhook/wellore-messaging-trigger`;
   return "";
 }
 
