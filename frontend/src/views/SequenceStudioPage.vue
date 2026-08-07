@@ -91,6 +91,8 @@ const selectedContactId = ref("");
 const actionLoading = ref("");
 const expandedIds = ref<Set<string>>(new Set());
 const factComments = ref<Record<string, string>>({});
+const instantlyCampaignId = ref(localStorage.getItem("mcp-toolkit/instantlyCampaignId") ?? "");
+watch(instantlyCampaignId, (v) => localStorage.setItem("mcp-toolkit/instantlyCampaignId", v));
 
 const allSelectedOnPage = computed(
   () => rows.value.length > 0 && rows.value.every((row) => selectedIds.value.includes(row.contact.uuid))
@@ -187,6 +189,10 @@ function approvedLinkedInCount(row: StudioLead) {
 
 function detailApprovedLinkedInCount() {
   return messages.value.filter((message) => ["linkedin_dm", "linkedin_inmail"].includes(String(message.channel)) && message.status === "approved").length;
+}
+
+function detailApprovedEmailCount() {
+  return messages.value.filter((message) => message.channel === "email" && message.status === "approved").length;
 }
 
 function messageTitle(message: Json) {
@@ -513,6 +519,68 @@ async function pushSequenceToGetSales(contactId: string) {
   });
 }
 
+async function previewSequencePushInstantly(contactId: string) {
+  if (!store.selectedProjectId) return;
+  actionLoading.value = `preview-instantly:${contactId}`;
+  try {
+    const r = await fetch("/api/sequence-studio/push-instantly-sequence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projectId: store.selectedProjectId, contactId, campaignId: instantlyCampaignId.value, dryRun: true }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Preview failed");
+    dialog.info({
+      title: "Instantly variable preview",
+      content: () => h("div", { class: "preview-dialog" }, [
+        h("p", { class: "muted" }, `Lead ${j.email}`),
+        ...Object.entries(j.variables ?? {}).map(([name, value]) => h("div", { class: "field-preview" }, [
+          h("strong", name),
+          h("pre", String(value)),
+        ])),
+      ]),
+      positiveText: "Close",
+    });
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Preview failed");
+  } finally {
+    actionLoading.value = "";
+  }
+}
+
+async function pushSequenceToInstantly(contactId: string) {
+  if (!store.selectedProjectId) return;
+  if (!instantlyCampaignId.value.trim()) {
+    toast.warning("Enter the target Instantly campaign ID first");
+    return;
+  }
+  dialog.warning({
+    title: "Push approved sequence to Instantly?",
+    content: `This creates or updates a lead in campaign ${instantlyCampaignId.value} with the approved email subjects/bodies as custom variables. It does not send anything by itself — sending depends on whether that campaign is active.`,
+    positiveText: "Push",
+    negativeText: "Cancel",
+    onPositiveClick: async () => {
+      actionLoading.value = `push-instantly:${contactId}`;
+      try {
+        const r = await fetch("/api/sequence-studio/push-instantly-sequence", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projectId: store.selectedProjectId, contactId, campaignId: instantlyCampaignId.value, dryRun: false }),
+        });
+        const j = await r.json();
+        if (!r.ok) throw new Error(j.error ?? "Push failed");
+        toast.success(`Pushed ${j.updatedDrafts ?? 0} approved email${j.updatedDrafts === 1 ? "" : "s"} to Instantly`);
+        await refreshDetail();
+        await load();
+      } catch (e) {
+        toast.error(e instanceof Error ? e.message : "Push failed", { duration: 9000 });
+      } finally {
+        actionLoading.value = "";
+      }
+    },
+  });
+}
+
 function openEmailStudio() {
   void router.push("/email-studio");
 }
@@ -791,6 +859,35 @@ onMounted(async () => {
                     </NButton>
                   </NSpace>
                 </div>
+                <div v-if="messages.some((m) => m.channel === 'email')" class="panel-head" style="margin-top: 8px">
+                  <NInput
+                    v-model:value="instantlyCampaignId"
+                    size="small"
+                    placeholder="Instantly campaign ID"
+                    style="max-width: 260px"
+                  />
+                  <NSpace size="small">
+                    <NButton
+                      size="small"
+                      secondary
+                      :disabled="!detailApprovedEmailCount() || !detail?.contact?.uuid"
+                      :loading="actionLoading === `preview-instantly:${detail?.contact?.uuid}`"
+                      @click="detail?.contact?.uuid && previewSequencePushInstantly(detail.contact.uuid)"
+                    >
+                      Preview Instantly
+                    </NButton>
+                    <NButton
+                      size="small"
+                      type="primary"
+                      :disabled="!detailApprovedEmailCount() || !detail?.contact?.uuid"
+                      :loading="actionLoading === `push-instantly:${detail?.contact?.uuid}`"
+                      @click="detail?.contact?.uuid && pushSequenceToInstantly(detail.contact.uuid)"
+                    >
+                      <template #icon><SendIcon :size="14" /></template>
+                      Push to Instantly
+                    </NButton>
+                  </NSpace>
+                </div>
                 <div v-if="messages.length" class="message-list">
                   <article v-for="message in messages" :key="message.id" class="message-item">
                     <div class="message-head">
@@ -821,6 +918,7 @@ onMounted(async () => {
                       </NButton>
                       <NTag v-if="message.external_pushed_at" size="small" type="success">Pushed {{ fmt(message.external_pushed_at) }}</NTag>
                     </NSpace>
+                    <NTag v-if="message.channel === 'email' && message.external_pushed_at" size="small" type="success">Pushed to Instantly {{ fmt(message.external_pushed_at) }}</NTag>
                   </article>
                 </div>
                 <NEmpty v-else description="No drafts yet" />

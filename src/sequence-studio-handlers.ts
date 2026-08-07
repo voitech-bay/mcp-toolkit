@@ -5,6 +5,8 @@ import { GETSALES_INMAIL_FIELD_NAMES, arrangeGetSalesFields } from "./services/i
 import { normalizeOutreachMessageChannel } from "./services/email-studio.js";
 import { linkedinSlugFromUrl } from "./services/n8n-entity-link.js";
 import { extractPovFacts, loadLatestPovRows, resolveCompanyKeys } from "./services/pov-facts.js";
+import { htmlToPlaintext } from "./services/html-plaintext.js";
+import { upsertLeadWithVariables } from "./services/instantly.js";
 
 type Json = Record<string, unknown>;
 
@@ -707,6 +709,67 @@ export async function handleEmailStudioPushGetSalesLinkedinSequence(req: Incomin
       .select("id");
     if (update.error) return send(res, 500, { error: update.error.message });
     return send(res, 200, { ok: true, leadUuid: contactId, fields, updatedDrafts: update.data?.length ?? 0 });
+  } catch (e) {
+    return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/**
+ * Push all approved email-channel drafts for a contact to Instantly as one lead
+ * (find-or-create by email, then merge email_subject_N / email_body_N custom
+ * variables). Mirrors handleSequenceStudioPushLinkedinSequence's shape, but
+ * Instantly campaigns need every step's variables set together on one lead
+ * rather than one field write per touch, so there is no single-touch variant.
+ */
+export async function handleSequenceStudioPushInstantlySequence(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const body = await readBody(req);
+  const projectId = str(body.projectId);
+  const contactId = str(body.contactId);
+  const campaignId = str(body.campaignId);
+  const dryRun = body.dryRun !== false;
+  if (!validUuid(projectId) || !validUuid(contactId)) return send(res, 400, { error: "projectId and contactId are required" });
+  if (!dryRun && !campaignId) return send(res, 400, { error: "campaignId is required to push" });
+
+  const [contactRes, emailsRes] = await Promise.all([
+    client.from(CONTACTS_TABLE).select("uuid, name, first_name, last_name, company_name, work_email").eq("project_id", projectId).eq("uuid", contactId).maybeSingle(),
+    client.from("outreach_emails").select("*").eq("project_id", projectId).eq("contact_id", contactId).eq("channel", "email").order("step_number", { ascending: true }),
+  ]);
+  if (contactRes.error) return send(res, 500, { error: contactRes.error.message });
+  if (!contactRes.data) return send(res, 404, { error: "Contact not found" });
+  if (emailsRes.error) return send(res, 500, { error: emailsRes.error.message });
+
+  const drafts = ((emailsRes.data ?? []) as Json[]).filter((email) => str(email.status) === "approved");
+  if (!drafts.length) return send(res, 409, { error: "No approved email drafts found for this contact" });
+
+  const contact = contactRes.data as Json;
+  const email = str(contact.work_email);
+  if (!email) return send(res, 400, { error: "Contact has no work email" });
+
+  const variables: Record<string, string> = {};
+  for (const draft of drafts) {
+    const step = Math.max(1, Math.trunc(Number(draft.step_number ?? draft.sequence_step ?? 1)));
+    variables[`email_subject_${step}`] = str(draft.current_subject);
+    variables[`email_body_${step}`] = htmlToPlaintext(draft.current_body);
+  }
+
+  const leadPayload: { email: string; first_name?: string; last_name?: string; company_name?: string } = { email };
+  const firstName = str(contact.first_name) || str(contact.name).split(/\s+/)[0];
+  if (firstName) leadPayload.first_name = firstName;
+  if (str(contact.last_name)) leadPayload.last_name = str(contact.last_name);
+  if (str(contact.company_name)) leadPayload.company_name = str(contact.company_name);
+
+  if (dryRun) return send(res, 200, { dryRun: true, email, variables, draftIds: drafts.map((d) => d.id) });
+
+  try {
+    const lead = await upsertLeadWithVariables(campaignId, leadPayload, variables);
+    const at = new Date().toISOString();
+    const pushLog = { at, channel: "email_sequence", campaignId, leadId: lead.id, email, variables, source: "sequence-studio-instantly" };
+    const ids = drafts.map((d) => str(d.id)).filter(Boolean);
+    const update = await client.from("outreach_emails").update({ external_pushed_at: at, external_push_log: pushLog, updated_at: at }).in("id", ids).select("id");
+    if (update.error) return send(res, 500, { error: update.error.message });
+    return send(res, 200, { ok: true, leadId: lead.id, email, variables, updatedDrafts: update.data?.length ?? 0 });
   } catch (e) {
     return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
   }
