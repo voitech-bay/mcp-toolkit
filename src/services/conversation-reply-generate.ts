@@ -23,9 +23,7 @@ import {
   listCompanyContextsByCompanyId,
   listContactContextsByContactId,
 } from "./supabase.js";
-import { isVelvetechProjectId } from "./velvetech-messaging/types.js";
-import { buildVelvetechSystemPrompt } from "./velvetech-messaging/prompt.js";
-import { validateVelvetechDraft } from "./velvetech-messaging/validate.js";
+import { getMessagingEntry } from "./messaging-registry.js";
 import { generateOpenRouterMessage } from "./openrouter.js";
 
 type Json = Record<string, unknown>;
@@ -180,13 +178,14 @@ export async function generateReplyVariants(args: {
   knowledge: Json[];
 }): Promise<{ variants: ReplyVariantResult[]; usage: Json | null; prompt: ReturnType<typeof buildGeneratedMessagePrompt> }> {
   const prompt = buildGeneratedMessagePrompt({ ...args.promptInput, multiVariant: true });
-  const velvetech = isVelvetechProjectId(args.projectId);
+  const entry = getMessagingEntry(args.projectId);
+  const replyPrefix = entry?.buildSystemPrompt("reply", {});
   const knowledgeBlock = args.knowledge
     .map((d) => `## ${d.kind}: ${d.title} (v${d.version})\n${d.content_markdown}`)
     .join("\n\n");
 
-  const system = velvetech
-    ? `${buildVelvetechSystemPrompt("reply")}\n\n${prompt.systemPrompt}\n\nWrite exactly three genuinely distinct LinkedIn reply variants. Return JSON only: {"variants":[{"subject":null,"body":string,"rationale":string}, ... exactly 3]}.`
+  const system = replyPrefix
+    ? `${replyPrefix}\n\n${prompt.systemPrompt}\n\nWrite exactly three genuinely distinct LinkedIn reply variants. Return JSON only: {"variants":[{"subject":null,"body":string,"rationale":string}, ... exactly 3]}.`
     : `${prompt.systemPrompt}${knowledgeBlock ? `\n\nACTIVE KNOWLEDGE:\n${knowledgeBlock}` : ""}`;
 
   const call = await structuredCall({
@@ -205,8 +204,8 @@ export async function generateReplyVariants(args: {
   const variants = call.value.variants.map((v) => {
     const subject = null;
     const warnings = validateVariant("message", { subject, body: v.body });
-    if (velvetech) {
-      warnings.push(...validateVelvetechDraft("linkedin_dm", subject, v.body).map((r) => r.message));
+    if (entry) {
+      warnings.push(...entry.validateDraft("linkedin_dm", subject, v.body, {}).map((r) => r.message));
     }
     const quality = evaluateGeneratedMessageQuality(v.body, args.promptInput);
     warnings.push(...quality.warnings);
@@ -228,8 +227,9 @@ export async function refineReplyDraft(args: {
   const base = args.baseContent.trim();
   if (!base) throw new Error("baseContent is required");
 
-  const system = isVelvetechProjectId(args.projectId)
-    ? `${buildVelvetechSystemPrompt("reply")} Revise the LinkedIn reply per the operator instructions. Keep it a natural continuation of the thread. Return final message text only.`
+  const replyPrefix = getMessagingEntry(args.projectId)?.buildSystemPrompt("reply", {});
+  const system = replyPrefix
+    ? `${replyPrefix} Revise the LinkedIn reply per the operator instructions. Keep it a natural continuation of the thread. Return final message text only.`
     : "You revise LinkedIn reply drafts. Apply the operator instructions precisely. Keep factual grounding. Do not invent claims. Return final message text only.";
 
   const llm = await generateOpenRouterMessage({

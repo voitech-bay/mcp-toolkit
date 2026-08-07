@@ -1,6 +1,5 @@
 import { z } from "zod";
-import { isVelvetechProjectId } from "./velvetech-messaging/types.js";
-import { validateVelvetechDraft } from "./velvetech-messaging/validate.js";
+import { getMessagingEntry, type RegistryChannel } from "./messaging-registry.js";
 
 export const EMAIL_STATUSES = [
   "research_ready", "ai_draft_made", "needs_review", "comments_made", "regenerated",
@@ -109,24 +108,18 @@ export function validateDraftForProject(
   annotations: Array<Omit<z.infer<typeof EmailAnnotationSchema>, "warnings"> & { warnings?: string[] }>,
   allowedResearchIds?: Set<string>,
   allowedInstructionIds?: Set<string>,
-  sequenceMode: import("./velvetech-messaging/types.js").VelvetechSequenceMode = "standard",
+  sequenceMode: string = "standard",
 ) {
   const generic = validateDraft(subject, body, annotations, allowedResearchIds, allowedInstructionIds);
-  if (!isVelvetechProjectId(projectId)) return generic;
+  const entry = getMessagingEntry(projectId);
+  if (!entry) return generic;
   const normalizedChannel = normalizeOutreachMessageChannel(channel);
-  const mappedChannel =
+  const mappedChannel: RegistryChannel =
     normalizedChannel === "linkedin_dm" ? "linkedin_dm" :
     normalizedChannel === "linkedin_inmail" ? "inmail" :
     normalizedChannel === "reply" ? "reply" :
     "email";
-  return [
-    ...generic,
-    ...validateVelvetechDraft(mappedChannel, subject, body, { sequenceStep, sequenceMode }).map((r) => ({
-      code: `velvetech_${r.code}`,
-      severity: r.severity,
-      message: r.message,
-    })),
-  ];
+  return [...generic, ...entry.validateDraft(mappedChannel, subject, body, { sequenceStep, sequenceMode })];
 }
 
 export function normalizeAnnotationRanges<T extends { text: string; start: number; end: number }>(body: string, annotations: T[]): T[] {

@@ -3,8 +3,7 @@ import crypto from "node:crypto";
 import { CONTACTS_TABLE, N8N_WORKFLOW_RESULTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
 import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
 import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, normalizeOutreachMessageChannel, normalizeSequenceStep, parseEmailStudioChannelFilter, reanchorQuote, stableResearchPoints, validateDraft, validateDraftForProject, type EmailStatus, type OutreachMessageChannel } from "./services/email-studio.js";
-import { buildVelvetechSystemPrompt } from "./services/velvetech-messaging/prompt.js";
-import { isVelvetechProjectId } from "./services/velvetech-messaging/types.js";
+import { getMessagingEntry, type RegistryChannel } from "./services/messaging-registry.js";
 import { loadPriorityAnchors, type PriorityAnchor } from "./services/pov-facts.js";
 import { htmlToPlaintext, plaintextToHtml } from "./services/html-plaintext.js";
 import { reconcileSmartleadLead } from "./services/smartlead-reconcile.js";
@@ -282,8 +281,8 @@ export async function handleEmailStudioStatus(req: IncomingMessage, res: ServerR
 
 async function generateDraft(client: NonNullable<ReturnType<typeof getSupabase>>, email: Json, prompt: string, previous?: Json, comments: Json[] = [], includedResearchPointIds: string[] = [], styleSourceId?: unknown) {
   const settings = await client.from("project_outreach_settings").select("*").eq("project_id", email.project_id).maybeSingle(); if (settings.error || !settings.data?.enabled) throw new Error("Outreach Agent is not enabled for this project");
-  const velvetech = isVelvetechProjectId(email.project_id);
-  const model = String(settings.data.default_model ?? (velvetech ? "openai/gpt-5.5" : "openai/gpt-5.2")); const context = await assembleOutreachContext(client, String(email.contact_id), Number(settings.data.contact_message_limit ?? 100), Number(settings.data.company_message_limit ?? 100));
+  const registryEntry = getMessagingEntry(email.project_id);
+  const model = String(settings.data.default_model ?? registryEntry?.defaultModel ?? "openai/gpt-5.2"); const context = await assembleOutreachContext(client, String(email.contact_id), Number(settings.data.contact_message_limit ?? 100), Number(settings.data.company_message_limit ?? 100));
   const researchResult = email.research_snapshot_id ? await client.from("outreach_research_snapshots").select("*").eq("id", email.research_snapshot_id).single() : null;
   const research = researchResult?.data ?? (await getOrCreateResearch(client, { projectId: String(email.project_id), contactId: String(email.contact_id), companyId: email.company_id ? String(email.company_id) : null, model, ttlDays: Number(settings.data.research_ttl_days ?? 30), context, force: false })).snapshot;
   const knowledge = await loadKnowledge(client, String(email.project_id)); const points = stableResearchPoints(research as Json); const allowed = includedResearchPointIds.length ? points.filter((p) => includedResearchPointIds.includes(String(p.id))) : points;
@@ -302,9 +301,10 @@ async function generateDraft(client: NonNullable<ReturnType<typeof getSupabase>>
   const styleDirective = styleSource
     ? ` Apply the selected style technique: ${str(styleSource.name)}. ${str(styleSource.prompt_block)}`
     : "";
-  const systemPrompt = velvetech
-    ? buildVelvetechSystemPrompt(channel === "linkedin_inmail" ? "inmail" : channel === "linkedin_dm" ? "linkedin_dm" : "email", sequenceStep, String(email.persona ?? ""), "standard")
-    : "Write one research-based cold email. Return JSON only matching the supplied schema. Annotations use zero-based offsets into body only and exact text. Use concise user-facing audit explanations, never hidden chain-of-thought. Verified claims must reference supplied research IDs. Follow active project knowledge. Do not send or schedule anything.";
+  const registryChannel: RegistryChannel = channel === "linkedin_inmail" ? "inmail" : channel === "linkedin_dm" ? "linkedin_dm" : "email";
+  const systemPrompt =
+    registryEntry?.buildSystemPrompt(registryChannel, { sequenceStep, persona: String(email.persona ?? ""), sequenceMode: "standard" }) ??
+    "Write one research-based cold email. Return JSON only matching the supplied schema. Annotations use zero-based offsets into body only and exact text. Use concise user-facing audit explanations, never hidden chain-of-thought. Verified claims must reference supplied research IDs. Follow active project knowledge. Do not send or schedule anything.";
   const call = await structuredCall({ model, schema: EmailDraftSchema, trace: { feature: "email-studio", stage: previous ? "regenerate" : "generate", project_id: email.project_id, contact_id: email.contact_id },
     system: systemPrompt,
     user: JSON.stringify({ task: `${prompt}${anchorDirective}${styleDirective}`, recipient_context: context, research_points: anchoredAllowed, priority_anchors: priorityAnchors, selected_style_source: styleSource, active_knowledge: knowledge.documents, previous_version: previous ?? null, unresolved_comments: comments.map((c) => ({ id: c.id, selected_quote: c.selected_quote, body: c.body })), required_comment_ids: comments.map((c) => c.id), sequence_step: sequenceStep, step_number: sequenceStep }) });

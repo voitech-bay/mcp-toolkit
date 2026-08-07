@@ -56,7 +56,7 @@ const route = useRoute();
 const router = useRouter();
 const toast = useMessage();
 const dialog = useDialog();
-const { launching, loadWorkflows, launch: launchWorkflow } = useWorkflowLaunch();
+const { launching, workflows, loadWorkflows, launch: launchWorkflow } = useWorkflowLaunch();
 
 const rows = ref<StudioLead[]>([]);
 const total = ref(0);
@@ -307,13 +307,18 @@ function generateSequences() {
     toast.warning("Select at least one contact");
     return;
   }
+  const messagingWorkflow = workflows.value.find((w) => w.key.endsWith("_messaging"));
+  if (!messagingWorkflow) {
+    toast.error("No messaging workflow is registered for this project");
+    return;
+  }
   dialog.warning({
     title: "Generate sequences",
-    content: `Launch Velvetech messaging (n8n) for ${leadUuids.length} selected contact${leadUuids.length === 1 ? "" : "s"}? Full multi-step sequences will be composed and ingested into Email Studio when complete.`,
+    content: `Launch ${messagingWorkflow.label} (n8n) for ${leadUuids.length} selected contact${leadUuids.length === 1 ? "" : "s"}? Full multi-step sequences will be composed and ingested into Email Studio when complete.`,
     positiveText: "Generate",
     negativeText: "Cancel",
     onPositiveClick: async () => {
-      const launchId = await launchWorkflow("velvetech_messaging", leadUuids, {
+      const launchId = await launchWorkflow(messagingWorkflow.key, leadUuids, {
         successMessage: `Proactive sequence started for ${leadUuids.length} contact${leadUuids.length === 1 ? "" : "s"}. Results will ingest into Email Studio when n8n completes.`,
       });
       if (launchId) selectedIds.value = [];
