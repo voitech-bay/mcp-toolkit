@@ -23,7 +23,7 @@ const documents = [
 9. Don't imply the prospect has the case-study company's problem. The case is proof of Wellore's work only — never "studios like you" or "stuck just like you".
 10. Plain language, no consultant abstractions: never use "map", "land", "stretch", "bandwidth", "creative bar", "keep landing", "modular handoff", "combat fantasy". Prefer concrete verbs ("worth exploring...").
 11. E2 has research signal + a different proof dimension than E1, soft note only, no offer.
-12. E3: adjacent expertise + "happy for an intro" + a CEO close naming portfolio clients only. Never name Tencent, G5, or Activision/Blizzard in send copy — those are real partnerships but are locked out of this campaign; proof comes only from the 10 cleared case studies. Don't reuse that contact's E1/E2 case companies in the E3 close.
+12. E3: adjacent expertise + "happy for an intro" + a CEO close naming portfolio clients by default. Don't reuse that contact's E1/E2 case companies in the E3 close. Large-studio exception (added 7 Aug): when the contact's own company is itself a large studio or publisher, naming Wellore's real AAA partnerships/credits (Tencent, Activision/Blizzard, THQ Nordic, G5, and portfolio credits Call of Duty, Battlefield 2042, Diablo series, SEI) is allowed where relevant — matched-scale proof reads as more credible to that audience than a smaller portfolio case. Still never invent discipline-level work claims on those IPs, state only that Wellore is credited/partnered. For a small or indie studio contact, keep using the 10 cleared case studies only. This exception is forward-looking; it does not change the already-locked 5-studio campaign copy (Nitro, LoadComplete, Playdigious, Gameduo, GFD Studio/CAS.AI).
 13. Vary "team stayed on..." phrasing. Ban AI-ish filler: "split", "cleanly", "quietly", "the call is", "useful talk", "intro works".
 14. One close per email — never stack two CTAs or a CTA plus a fallback close.
 15. Never fabricate proof: don't confuse a prospect's own research dossier with a Wellore client case, and don't invent discipline-level credits on logo IPs (e.g. never claim "we did character art on Battlefield 2042" — Wellore is only known to be credited generally, with no discipline-level detail available).
@@ -35,7 +35,7 @@ Anti-patterns actually seen and corrected in this campaign:
 - "you still need campaign worlds..." — invented problem. Fix: "if ... still open..."
 - "map content pipeline / stretch art" — abstract. Fix: "worth exploring extra art capacity..."
 - "creative bar" / "keep landing" — unclear jargon. Fix: plain verbs like ship, open, overload.
-- E3 name-dropping Tencent/G5/Activision — banned for send. Fix: portfolio case studios only.
+- E3 name-dropping Tencent/G5/Activision to a small/indie studio contact — mismatched-scale proof. Fix: portfolio case studios only (AAA names are OK only when the contact's own company is itself a large studio/publisher).
 - "pre-reg" — hyphen ban. Fix: "pre reg".`,
   },
   {
@@ -65,7 +65,7 @@ Tone: casual lowercase body copy. Preserve proper product/platform casing where 
     source_path: "projects/Wellore/context/Wellore_Услуги_по_этапам_ПОЛНЫЙ.pdf, Wellore_Проблемы_по_этапам.pdf",
     content: `Wellore Limited (Hong Kong): 14+ years in game development, outsourcing, and startup acceleration. Full-cycle development on Unity and Unreal, or targeted team augmentation on any single part of the pipeline, from prototype to LiveOps.
 
-Do not name AAA publisher partnerships (Tencent, Activision/Blizzard, THQ Nordic, G5) or portfolio IP credits (Call of Duty, Battlefield 2042, Diablo series) in outreach copy. These are real but locked out of this campaign — proof in send copy comes only from the 10 cleared portfolio cases.
+Real AAA publisher partnerships: Tencent, Activision/Blizzard, THQ Nordic, G5. Real portfolio IP credits: Call of Duty, Battlefield 2042, Diablo series, SEI (credited generally, no discipline-level detail known — never invent specifics like "we did character art on Battlefield 2042"). Default proof in outreach copy is the 10 cleared portfolio cases. Naming these AAA partnerships/credits is allowed, and can land better than a portfolio case, specifically when the contact's own company is itself a large studio or publisher — matched-scale proof reads as credible to that audience. For a small or indie studio contact, keep using the 10 cleared cases only, not these names.
 
 Wellore's own 6-stage delivery lifecycle (distinct from the announcement/in_production/playable_build/pre_release prospect-stage ladder used for diagnostic questions) with the core pain each stage closes:
 
@@ -132,14 +132,14 @@ Bad -> good:
 - "you still need campaign worlds and Chaos VFX" -> "if GP art is still open beside App Store, happy to help on production volume"
 - "what if we map how ... without stretching art?" -> "worth exploring extra art capacity so ... can ship to Google Play on time?"
 - "are Android builds on the same creative bar..." -> "is Google Play art still open, or is Android locked to what you already approved for App Store?"
-- CEO close with Tencent/G5/Activision -> CEO close with Traplight/Estoty/Flying Oak/etc.`,
+- CEO close with Tencent/G5/Activision sent to a small/indie studio -> CEO close with Traplight/Estoty/Flying Oak/etc. (AAA names are fine when the contact's own company is itself a large studio/publisher)`,
   },
   {
     kind: "icp_angle_framework",
     title: "E3 adjacent capability by contact lane",
     priority: 40,
     source_path: ".cursor/skills/wellore-email-copywriting/SKILL.md",
-    content: `E3 must name one Wellore capability adjacent to (not inside) the contact's own lane, then ask for an intro to whoever owns that adjacent work. Never pitch only the contact's own specialty across the full sequence.
+    content: `E3 must name one Wellore capability adjacent to (not inside) the contact's own lane, then ask for an intro to whoever owns that adjacent work. Never pitch only the contact's own specialty across the full sequence. CEO close defaults to portfolio clients; when the contact's own company is itself a large studio/publisher, naming Wellore's real AAA partnerships/credits (Tencent, Activision/Blizzard, THQ Nordic, G5, Call of Duty, Battlefield 2042, Diablo series, SEI) is allowed instead, without inventing discipline-level claims.
 
 By contact lane:
 - art / creative -> adjacent capability: Unity/Unreal integration, packing, performance -> intro to engineering
