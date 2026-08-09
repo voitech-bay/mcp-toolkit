@@ -46,6 +46,7 @@ import {
   LayersIcon,
   LogOutIcon,
   BookOpenIcon,
+  BotIcon,
 } from "lucide-vue-next";
 import { useProjectStore } from "./stores/project";
 import { syncFreshness } from "./sync-freshness";
@@ -128,6 +129,7 @@ const PIPELINE_PATHS = [
   "/inmail-review",
   "/email-studio",
   "/sequence-studio",
+  "/agents/hermes",
   "/how-to-guide",
   "/calls/cold-n8n",
 ] as const;
@@ -287,6 +289,11 @@ const pipelineMenuOptions: DropdownOption[] = [
     label: "Sequence Studio",
     key: "/sequence-studio",
     icon: () => h(SendIcon, { size: 14 }),
+  },
+  {
+    label: "Hermes Agent",
+    key: "/agents/hermes",
+    icon: () => h(BotIcon, { size: 14 }),
   },
   {
     label: "How-to Guide",

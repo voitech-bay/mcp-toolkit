@@ -123,6 +123,12 @@ import {
   handlePostDifyContactsLookup,
 } from "./api-handlers.js";
 import {
+  handleHermesChat,
+  handleHermesHealth,
+  handleHermesModels,
+  handleHermesPresets,
+} from "./hermes-handlers.js";
+import {
   handleInmailReviewItems,
   handleInmailReviewOpen,
   handleInmailReviewComment,
@@ -1235,6 +1241,38 @@ const server = createServer(async (req, res) => {
       case "/api/openrouter/stream-chat":
         if (req.method === "POST") {
           await handlePostOpenRouterStreamChat(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/hermes/health":
+        if (req.method === "GET") {
+          await handleHermesHealth(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/hermes/models":
+        if (req.method === "GET") {
+          await handleHermesModels(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/hermes/presets":
+        if (req.method === "GET") {
+          await handleHermesPresets(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/hermes/chat":
+        if (req.method === "POST") {
+          await handleHermesChat(req, res);
         } else {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));

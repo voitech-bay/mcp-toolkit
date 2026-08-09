@@ -233,6 +233,10 @@ export function isVelvetechAllowedApiPath(pathname: string): boolean {
   if (pathname === "/api/sequence-studio/style-sources") return true;
   if (pathname === "/api/sequence-studio/push-linkedin") return true;
   if (pathname === "/api/sequence-studio/push-linkedin-sequence") return true;
+
+  // Hermes Wellore agent (Voitech proxy).
+  if (pathname === "/api/hermes/health" || pathname === "/api/hermes/models") return true;
+  if (pathname === "/api/hermes/presets" || pathname === "/api/hermes/chat") return true;
   return false;
 }
 
