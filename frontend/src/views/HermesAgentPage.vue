@@ -53,10 +53,10 @@ function applyPreset(): void {
   const p = presets.value.find((x) => x.id === selectedPreset.value);
   if (!p) return;
   draft.value = p.prompt
-    .replaceAll("{{company}}", company.value.trim() || "<company name>")
-    .replaceAll("{{slug}}", slug.value.trim() || "<slug-or-domain>")
-    .replaceAll("{{contactId}}", contactId.value.trim() || "<contact-uuid>")
-    .replaceAll("{{contactName}}", contactName.value.trim() || "<contact name>");
+    .split("{{company}}").join(company.value.trim() || "<company name>")
+    .split("{{slug}}").join(slug.value.trim() || "<slug-or-domain>")
+    .split("{{contactId}}").join(contactId.value.trim() || "<contact-uuid>")
+    .split("{{contactName}}").join(contactName.value.trim() || "<contact name>");
 }
 
 async function refreshHealth(): Promise<void> {
