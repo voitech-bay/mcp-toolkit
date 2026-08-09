@@ -152,8 +152,11 @@ export async function hermesChatCompletions(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<HermesChatResult> {
+  // "auto" → Hermes profile model (supports tools). Do not pin a chat-only OpenRouter id.
   const model =
-    input.model && input.model !== "auto" ? input.model.trim() : HERMES_PINNED_MODELS.find((m) => m.role === "mid")?.id || "nousresearch/hermes-4-70b";
+    input.model && input.model !== "auto"
+      ? input.model.trim()
+      : "hermes-agent";
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
