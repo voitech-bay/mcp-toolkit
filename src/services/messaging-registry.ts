@@ -64,11 +64,12 @@ const welloreEntry: MessagingRegistryEntry = {
   defaultModel: "openai/gpt-5.6-terra",
   sequenceWorkflowKey: "wellore_messaging",
   emailPushTarget: "instantly",
-  channels: ["email"],
-  buildSystemPrompt: (channel, opts) => (channel === "email" ? buildWelloreSystemPrompt("email", opts.sequenceStep) : null),
+  channels: ["email", "linkedin_dm"],
+  buildSystemPrompt: (channel, opts) =>
+    channel === "email" || channel === "linkedin_dm" ? buildWelloreSystemPrompt(channel, opts.sequenceStep) : null,
   validateDraft: (channel, subject, body, opts) =>
-    channel === "email"
-      ? validateWelloreDraft("email", subject, body, { sequenceStep: opts.sequenceStep }).map((r) => ({ code: `wellore_${r.code}`, severity: r.severity, message: r.message }))
+    channel === "email" || channel === "linkedin_dm"
+      ? validateWelloreDraft(channel, subject, body, { sequenceStep: opts.sequenceStep }).map((r) => ({ code: `wellore_${r.code}`, severity: r.severity, message: r.message }))
       : [],
 };
 

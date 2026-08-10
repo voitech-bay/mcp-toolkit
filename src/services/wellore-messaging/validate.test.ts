@@ -70,3 +70,46 @@ test("missing subject is an error", () => {
   const results = validateWelloreDraft("email", "", "Hi Name, short body.", { sequenceStep: 1 });
   assert.ok(results.some((r) => r.code === "subject_required" && r.severity === "error"));
 });
+
+// LinkedIn: locked 4-message structure (Wellore Phase 11). Steps 1-2 must not ask a
+// question; steps 3-4 must ask exactly one.
+test("LinkedIn step 1 (observation, soft close) passes with zero errors", () => {
+  const results = validateWelloreDraft("linkedin_dm", null, "bold Warhammer campaign for mobile, nice pickup after Boltgun. happy to exchange notes on mobile art pipelines.", { sequenceStep: 1 });
+  assert.deepEqual(results.filter((r) => r.severity === "error"), []);
+});
+
+test("LinkedIn step 1 with a question is an error", () => {
+  const results = validateWelloreDraft("linkedin_dm", null, "bold Warhammer campaign for mobile. how is the art pipeline going?", { sequenceStep: 1 });
+  assert.ok(results.some((r) => r.code === "question_not_allowed" && r.severity === "error"));
+});
+
+test("LinkedIn step 2 (expertise, curiosity line) passes with zero errors", () => {
+  const results = validateWelloreDraft("linkedin_dm", null, "we ran production on Battle Legion for Traplight through soft launch. curious how you handle content velocity on Boltgun.", { sequenceStep: 2 });
+  assert.deepEqual(results.filter((r) => r.severity === "error"), []);
+});
+
+test("LinkedIn step 3 needs exactly one question", () => {
+  const zero = validateWelloreDraft("linkedin_dm", null, "still thinking about the art pipeline on Boltgun.", { sequenceStep: 3 });
+  assert.ok(zero.some((r) => r.code === "question_required" && r.severity === "error"));
+
+  const two = validateWelloreDraft("linkedin_dm", null, "is the art pipeline the bottleneck, or is it engineering? worth exploring either way?", { sequenceStep: 3 });
+  assert.ok(two.some((r) => r.code === "question_required" && r.severity === "error"));
+
+  const one = validateWelloreDraft("linkedin_dm", null, "is the art pipeline still the bottleneck on Boltgun?", { sequenceStep: 3 });
+  assert.deepEqual(one.filter((r) => r.severity === "error"), []);
+});
+
+test("LinkedIn step 4 (problem hypothesis) needs exactly one question", () => {
+  const results = validateWelloreDraft("linkedin_dm", null, "teams doing a licensed mobile adaptation often hit an art capacity wall near soft launch. how are you solving that today?", { sequenceStep: 4 });
+  assert.deepEqual(results.filter((r) => r.severity === "error"), []);
+});
+
+test("LinkedIn draft with a subject is an error", () => {
+  const results = validateWelloreDraft("linkedin_dm", "production partners", "is the art pipeline still open?", { sequenceStep: 3 });
+  assert.ok(results.some((r) => r.code === "subject_not_allowed" && r.severity === "error"));
+});
+
+test("LinkedIn draft over 3 sentences is an error", () => {
+  const results = validateWelloreDraft("linkedin_dm", null, "one sentence here. two sentences here. three sentences here. four sentences here.", { sequenceStep: 1 });
+  assert.ok(results.some((r) => r.code === "sentence_count" && r.severity === "error"));
+});
