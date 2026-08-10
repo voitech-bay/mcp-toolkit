@@ -307,7 +307,22 @@ function toggleSelectAllOnPage(checked: boolean) {
   selectedIds.value = selectedIds.value.filter((id) => !drop.has(id));
 }
 
-function generateSequences() {
+async function findUnapprovedWelloreContacts(contactIds: string[]): Promise<string[]> {
+  if (!store.selectedProjectId) return [];
+  const params = new URLSearchParams({ projectId: store.selectedProjectId });
+  const r = await fetch(`/api/sequence-studio/research-snapshots?${params}`);
+  const j = await r.json();
+  if (!r.ok) return contactIds; // fail closed: treat as unapproved if the check itself fails
+  const byId = new Map<string, Json>((j.data ?? []).map((row: Json) => [row.contact.uuid, row]));
+  return contactIds
+    .filter((id) => {
+      const row = byId.get(id);
+      return !row?.snapshot?.reviewed_at;
+    })
+    .map((id) => byId.get(id)?.contact?.display_name || id);
+}
+
+async function generateSequences() {
   const leadUuids = [...selectedIds.value];
   if (!leadUuids.length) {
     toast.warning("Select at least one contact");
@@ -318,6 +333,23 @@ function generateSequences() {
     toast.error("No messaging workflow is registered for this project");
     return;
   }
+
+  if (messagingWorkflow.key === "wellore_messaging") {
+    const unapproved = await findUnapprovedWelloreContacts(leadUuids);
+    if (unapproved.length) {
+      const url = router.resolve({ path: "/wellore/research" }).href;
+      dialog.warning({
+        title: "Research not approved",
+        content: () => h("div", {}, [
+          h("p", {}, `${unapproved.length} selected contact${unapproved.length === 1 ? "" : "s"} ${unapproved.length === 1 ? "has" : "have"} no approved research: ${unapproved.join(", ")}.`),
+          h("a", { href: url, target: "_blank", rel: "noopener" }, "Review and approve on the Wellore research page"),
+        ]),
+        positiveText: "Close",
+      });
+      return;
+    }
+  }
+
   dialog.warning({
     title: "Generate sequences",
     content: `Launch ${messagingWorkflow.label} (n8n) for ${leadUuids.length} selected contact${leadUuids.length === 1 ? "" : "s"}? Full multi-step sequences will be composed and ingested into Email Studio when complete.`,

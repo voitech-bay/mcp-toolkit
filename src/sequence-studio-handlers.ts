@@ -7,6 +7,7 @@ import { linkedinSlugFromUrl } from "./services/n8n-entity-link.js";
 import { extractPovFacts, loadLatestPovRows, resolveCompanyKeys } from "./services/pov-facts.js";
 import { htmlToPlaintext } from "./services/html-plaintext.js";
 import { upsertLeadWithVariables } from "./services/instantly.js";
+import { assembleWelloreResearch } from "./launcher-handlers.js";
 
 type Json = Record<string, unknown>;
 
@@ -773,4 +774,104 @@ export async function handleSequenceStudioPushInstantlySequence(req: IncomingMes
   } catch (e) {
     return send(res, 502, { error: e instanceof Error ? e.message : String(e) });
   }
+}
+
+/**
+ * List Wellore contacts with their research-snapshot state, for WelloreResearchPage.vue.
+ * Deliberately lighter than handleSequenceStudioLeads (no message/status-summary join) --
+ * this page is about research review, not sequence status.
+ */
+export async function handleListWelloreResearch(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "GET") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const q = reqUrl(req).searchParams;
+  const projectId = q.get("projectId") ?? "";
+  if (!validUuid(projectId)) return send(res, 400, { error: "projectId is required" });
+  const search = str(q.get("search"));
+
+  let contactsQuery = client
+    .from(CONTACTS_TABLE)
+    .select("uuid, name, first_name, last_name, title, company_name, company_uuid, work_email, linkedin_url")
+    .eq("project_id", projectId)
+    .order("company_name", { ascending: true })
+    .limit(1000);
+  if (search) contactsQuery = contactsQuery.or(`name.ilike.%${search}%,company_name.ilike.%${search}%,work_email.ilike.%${search}%`);
+  const contactsRes = await contactsQuery;
+  if (contactsRes.error) return send(res, 500, { error: contactsRes.error.message });
+  const contacts = (contactsRes.data ?? []) as Json[];
+  const contactIds = contacts.map((c) => str(c.uuid)).filter(Boolean);
+
+  const snapRes = contactIds.length
+    ? await client.from("wellore_research_snapshots").select("*").eq("project_id", projectId).in("contact_id", contactIds)
+    : { data: [], error: null };
+  if (snapRes.error) return send(res, 500, { error: snapRes.error.message });
+  const snapshotByContact = new Map<string, Json>((snapRes.data ?? []).map((r: Json) => [String(r.contact_id), r]));
+
+  const rows = contacts.map((c) => ({
+    contact: { ...c, display_name: contactName(c) },
+    snapshot: snapshotByContact.get(str(c.uuid)) ?? null,
+  }));
+  return send(res, 200, { data: rows });
+}
+
+/**
+ * Wellore research-review gate (Phase 10). Assemble writes/upserts an unreviewed snapshot
+ * per contact (always resets reviewed_at to null, even on re-assemble, so a changed research
+ * bundle never silently inherits a stale approval); Approve stamps reviewed_at/reviewed_by.
+ * buildWelloreMessagingPayloads (launcher-handlers.ts) refuses to draft from anything that
+ * hasn't been through Approve.
+ */
+export async function handleAssembleWelloreResearch(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const body = await readBody(req);
+  const projectId = str(body.projectId);
+  const contactIds = Array.isArray(body.contactIds) ? body.contactIds.map((x) => str(x)).filter(Boolean) : [];
+  if (!validUuid(projectId) || !contactIds.length) return send(res, 400, { error: "projectId and contactIds[] are required" });
+
+  const built = await assembleWelloreResearch(client, { projectId, leadUuids: contactIds });
+  if (!built.ok) return send(res, built.status, { error: built.error });
+
+  const assembledBy = actorUserId(req) ?? "unknown";
+  const now = new Date().toISOString();
+  const okResults = built.results.filter((r) => r.ok);
+  const failed = built.results.filter((r) => !r.ok);
+  if (okResults.length) {
+    const rows = okResults.map((r) => ({
+      project_id: projectId,
+      contact_id: r.leadUuid,
+      company_uuid: r.companyUuid,
+      research: r.research,
+      assembled_at: now,
+      assembled_by: assembledBy,
+      reviewed_at: null,
+      reviewed_by: null,
+    }));
+    const upsert = await client.from("wellore_research_snapshots").upsert(rows, { onConflict: "project_id,contact_id" }).select("*");
+    if (upsert.error) return send(res, 500, { error: upsert.error.message });
+    return send(res, 200, { ok: true, assembled: upsert.data ?? [], failed });
+  }
+  return send(res, 200, { ok: true, assembled: [], failed });
+}
+
+export async function handleApproveWelloreResearch(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" });
+  const body = await readBody(req);
+  const projectId = str(body.projectId);
+  const contactIds = Array.isArray(body.contactIds) ? body.contactIds.map((x) => str(x)).filter(Boolean) : [];
+  if (!validUuid(projectId) || !contactIds.length) return send(res, 400, { error: "projectId and contactIds[] are required" });
+  const reviewedBy = str(body.reviewedBy) || actorUserId(req) || "unknown";
+
+  const now = new Date().toISOString();
+  const update = await client
+    .from("wellore_research_snapshots")
+    .update({ reviewed_at: now, reviewed_by: reviewedBy })
+    .eq("project_id", projectId)
+    .in("contact_id", contactIds)
+    .select("contact_id");
+  if (update.error) return send(res, 500, { error: update.error.message });
+  const approvedIds = new Set((update.data ?? []).map((r: { contact_id: string }) => r.contact_id));
+  const skipped = contactIds.filter((id) => !approvedIds.has(id));
+  return send(res, 200, { ok: true, approved: update.data ?? [], skipped });
 }

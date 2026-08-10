@@ -219,7 +219,10 @@ import {
   handleEmailStudioIngestFromN8n,
 } from "./email-studio-handlers.js";
 import {
+  handleApproveWelloreResearch,
+  handleAssembleWelloreResearch,
   handleEmailStudioPushGetSalesLinkedinSequence,
+  handleListWelloreResearch,
   handlePovFactMarks,
   handleSequenceStudioLead,
   handleSequenceStudioLeads,
@@ -500,6 +503,9 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/sequence-studio/push-linkedin") { await handleSequenceStudioPushLinkedin(req, res); return; }
     if (pathname === "/api/sequence-studio/push-linkedin-sequence") { await handleSequenceStudioPushLinkedinSequence(req, res); return; }
     if (pathname === "/api/sequence-studio/push-instantly-sequence") { await handleSequenceStudioPushInstantlySequence(req, res); return; }
+    if (pathname === "/api/sequence-studio/research-snapshots") { await handleListWelloreResearch(req, res); return; }
+    if (pathname === "/api/sequence-studio/assemble-research") { await handleAssembleWelloreResearch(req, res); return; }
+    if (pathname === "/api/sequence-studio/approve-research") { await handleApproveWelloreResearch(req, res); return; }
     if (pathname === "/api/users") { await handleUsers(req, res); return; }
     if (pathname === "/api/velvetech/research-csv/preview") { await handleVelvetechResearchCsvPreview(req, res); return; }
     if (pathname === "/api/velvetech/research-csv/launch") { await handleVelvetechResearchCsvLaunch(req, res); return; }

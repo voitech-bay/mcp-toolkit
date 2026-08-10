@@ -85,6 +85,12 @@ const router = createRouter({
       meta: { title: "Sequence Studio | Voitech" },
     },
     {
+      path: "/wellore/research",
+      name: "WelloreResearch",
+      component: () => import("../views/WelloreResearchPage.vue"),
+      meta: { title: "Wellore research | Voitech" },
+    },
+    {
       path: "/agents/hermes",
       name: "HermesAgent",
       component: () => import("../views/HermesAgentPage.vue"),

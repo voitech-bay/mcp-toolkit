@@ -415,19 +415,26 @@ async function buildVelvetechMessagingPayloads(
   return { ok: true, payloads };
 }
 
+export type WelloreResearchResult =
+  | { leadUuid: string; ok: true; companyUuid: string; companyName: string; research: Json }
+  | { leadUuid: string; ok: false; reason: string };
+
 /**
- * Wellore messaging launch: unlike Velvetech, research already lives in the
- * wellore_* schema (company POV + signals from the WLR n8n pipeline), not in
- * n8n_workflow_results. wellore.companies / wellore.signals are keyed by the
- * original bigint id, while bridge-wellore-to-canonical.ts gives each company a
- * deterministic uuid (md5('wellore:company:'||id)::uuid) for the canonical
- * companies table. Reverse the hash by fetching all wellore company ids and
- * recomputing, since the hash cannot be inverted directly.
+ * Assemble Wellore's research bundle (company POV + verified signals) for a set of
+ * contacts, straight from the wellore_* schema. wellore.companies / wellore.signals are
+ * keyed by the original bigint id, while bridge-wellore-to-canonical.ts gives each company
+ * a deterministic uuid (md5('wellore:company:'||id)::uuid) for the canonical companies
+ * table. Reverse the hash by fetching all wellore company ids and recomputing, since the
+ * hash cannot be inverted directly.
+ *
+ * This is the "research review" step (Wellore Phase 10) -- it does not touch n8n or
+ * outreach_emails. Callers upsert the result into wellore_research_snapshots for human
+ * review before buildWelloreMessagingPayloads is ever allowed to draft from it.
  */
-async function buildWelloreMessagingPayloads(
+export async function assembleWelloreResearch(
   client: NonNullable<ReturnType<typeof getSupabase>>,
-  args: { projectId: string; launchId: string; leadUuids: string[] }
-): Promise<{ ok: true; payloads: Json[] } | { ok: false; status: number; error: string }> {
+  args: { projectId: string; leadUuids: string[] }
+): Promise<{ ok: true; results: WelloreResearchResult[] } | { ok: false; status: number; error: string }> {
   const { contacts, error } = await getContactsByUuidsForProject(client, args.projectId, args.leadUuids);
   if (error) return { ok: false, status: 500, error };
   const contactRows = args.leadUuids.map((uuid) => contacts[uuid]).filter((row): row is Json => !!row);
@@ -458,32 +465,74 @@ async function buildWelloreMessagingPayloads(
     signalsByCompany.set(id, list);
   }
 
-  const payloads: Json[] = [];
-  const missingResearch: string[] = [];
-  for (const c of contactRows) {
+  const results: WelloreResearchResult[] = contactRows.map((c) => {
     const leadUuid = str(c, "uuid");
     const companyUuidStr = str(c, "company_uuid");
     const welloreId = wolreCompanyIdByUuid.get(companyUuidStr);
     const pov = welloreId != null ? povById.get(welloreId) : undefined;
     if (welloreId == null || !pov || pov.status !== "ok") {
-      missingResearch.push(`${contactName(c) || leadUuid}: no usable Wellore POV (run the WLR research pipeline for this company first)`);
-      continue;
+      return { leadUuid, ok: false, reason: `${contactName(c) || leadUuid}: no usable Wellore POV (run the WLR research pipeline for this company first)` };
     }
     const companyName = strAny(c, "company_name") || String(pov.company_name ?? "");
-    payloads.push({
-      run_id: `${args.launchId}-${leadUuid.slice(0, 8)}`,
-      launch_id: args.launchId,
-      project_id: args.projectId,
-      batch_name: args.launchId,
-      company_key: companyUuidStr,
-      company_name: companyName,
-      company_uuid: companyUuidStr,
+    return {
+      leadUuid,
+      ok: true,
+      companyUuid: companyUuidStr,
+      companyName,
       research: {
         pov_summary: String(pov.summary ?? ""),
         pov_hook: pov.hook ?? null,
         pov_wellore_angle: pov.wellore_angle ?? null,
         verified_signals: (signalsByCompany.get(welloreId) ?? []).slice(0, 8),
       },
+    };
+  });
+  return { ok: true, results };
+}
+
+/**
+ * Wellore messaging launch: reads only approved wellore_research_snapshots rows (Phase 10's
+ * research-review gate), never wellore.companies/wellore.signals live -- what a human
+ * approved on the research page is exactly what gets drafted from, with no drift.
+ */
+async function buildWelloreMessagingPayloads(
+  client: NonNullable<ReturnType<typeof getSupabase>>,
+  args: { projectId: string; launchId: string; leadUuids: string[] }
+): Promise<{ ok: true; payloads: Json[] } | { ok: false; status: number; error: string }> {
+  const { contacts, error } = await getContactsByUuidsForProject(client, args.projectId, args.leadUuids);
+  if (error) return { ok: false, status: 500, error };
+  const contactRows = args.leadUuids.map((uuid) => contacts[uuid]).filter((row): row is Json => !!row);
+  const missing = args.leadUuids.length - contactRows.length;
+  if (missing > 0) return { ok: false, status: 400, error: `${missing} selected lead(s) are not synced in Contacts` };
+
+  const snapRes = await client
+    .from("wellore_research_snapshots")
+    .select("contact_id,company_uuid,research,reviewed_at")
+    .eq("project_id", args.projectId)
+    .in("contact_id", args.leadUuids)
+    .not("reviewed_at", "is", null);
+  if (snapRes.error) return { ok: false, status: 500, error: snapRes.error.message };
+  const snapshotByContact = new Map<string, Json>((snapRes.data ?? []).map((r: Json) => [String(r.contact_id), r]));
+
+  const payloads: Json[] = [];
+  const missingResearch: string[] = [];
+  for (const c of contactRows) {
+    const leadUuid = str(c, "uuid");
+    const snapshot = snapshotByContact.get(leadUuid);
+    if (!snapshot) {
+      missingResearch.push(`${contactName(c) || leadUuid}: no approved research (assemble and approve on the Wellore research page first)`);
+      continue;
+    }
+    const companyUuidStr = String(snapshot.company_uuid ?? str(c, "company_uuid"));
+    payloads.push({
+      run_id: `${args.launchId}-${leadUuid.slice(0, 8)}`,
+      launch_id: args.launchId,
+      project_id: args.projectId,
+      batch_name: args.launchId,
+      company_key: companyUuidStr,
+      company_name: strAny(c, "company_name"),
+      company_uuid: companyUuidStr,
+      research: snapshot.research,
       lead: {
         lead_uuid: leadUuid,
         contact_id: leadUuid,
