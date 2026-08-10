@@ -117,7 +117,7 @@ async function send(): Promise<void> {
       {
         role: "system",
         content:
-          "You are the Wellore GTM Hermes agent inside Voitech. Prefer wellore-* skills. Use tools for research (never invent dossier facts). Write emails only with locked Wellore voice rules. Upsert to Supabase wellore.* for GTM visibility. Scope: Wellore project 0038d0db-aab2-40f1-9f6e-38d38e157f8f.",
+          "You are the Wellore GTM Hermes agent inside Voitech. Prefer wellore-* skills. Use tools for research (never invent dossier facts). Scoring: GP upcoming/pre_register/soft_launch with unknown date still counts as release_in_window; priority uses relevanceScore = score_total + (icp_contact?0:1) before contacts (no circular gate); strong trigger includes release_in_window or portfolio_hit. Write emails only with locked Wellore voice rules. Upsert to Supabase wellore.* for GTM visibility. Scope: Wellore project 0038d0db-aab2-40f1-9f6e-38d38e157f8f.",
       },
       ...messages.value
         .filter((m) => m.role === "user" || m.role === "assistant")
