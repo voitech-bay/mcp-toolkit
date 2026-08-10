@@ -22,6 +22,17 @@ type ChatMsg = { role: ChatRole; content: string; at: string; model?: string | n
 
 type Preset = { id: string; label: string; prompt: string };
 type ModelOpt = { label: string; value: string };
+type HermesJob = {
+  id: string;
+  status: "queued" | "running" | "complete" | "failed";
+  stage: string;
+  progress: number;
+  content?: string | null;
+  model?: string | null;
+  error?: string | null;
+  degradedReasons?: string[];
+  stages?: Array<{ stage?: string; status?: string; degraded_reasons?: string[] }>;
+};
 
 const store = useProjectStore();
 const message = useMessage();
@@ -46,6 +57,8 @@ const draft = ref("");
 const sending = ref(false);
 const messages = ref<ChatMsg[]>([]);
 const sessionId = ref(`wellore-${Date.now().toString(36)}`);
+const activeJobId = ref<string | null>(null);
+const activeJob = ref<HermesJob | null>(null);
 
 const isWellore = computed(() => store.selectedProjectId === WELLORE_PROJECT_ID);
 
@@ -117,14 +130,14 @@ async function send(): Promise<void> {
       {
         role: "system",
         content:
-          "You are the Wellore GTM Hermes agent inside Voitech. Prefer wellore-* skills. Use tools for research (never invent dossier facts). Scoring: GP upcoming/pre_register/soft_launch with unknown date still counts as release_in_window; priority uses relevanceScore = score_total + (icp_contact?0:1) before contacts (no circular gate); strong trigger includes release_in_window or portfolio_hit. Write emails only with locked Wellore voice rules. Upsert to Supabase wellore.* for GTM visibility. Scope: Wellore project 0038d0db-aab2-40f1-9f6e-38d38e157f8f.",
+          "You are the Wellore GTM Hermes agent inside Voitech. Company research must use the deterministic hermes_research runner through the named wellore skill; never improvise WLR stages or paste raw HTML into context. Missing/degraded evidence is unknown, catalog-only is provisional, and partial runs cannot downgrade existing medium/high dossiers. Full writes require validation and stage logs. Write emails only with locked Wellore voice rules. Scope: Wellore project 0038d0db-aab2-40f1-9f6e-38d38e157f8f.",
       },
       ...messages.value
         .filter((m) => m.role === "user" || m.role === "assistant")
         .slice(-12)
         .map((m) => ({ role: m.role, content: m.content })),
     ];
-    const r = await fetch("/api/hermes/chat", {
+    const r = await fetch("/api/hermes/jobs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -135,7 +148,7 @@ async function send(): Promise<void> {
         messages: history,
       }),
     });
-    const j = (await r.json()) as { content?: string; model?: string; error?: string };
+    const j = (await r.json()) as { job?: HermesJob; error?: string };
     if (!r.ok) {
       messages.value.push({
         role: "assistant",
@@ -145,11 +158,24 @@ async function send(): Promise<void> {
       });
       return;
     }
+    if (!j.job?.id) throw new Error("Hermes job response did not include an id");
+    activeJobId.value = j.job.id;
+    activeJob.value = j.job;
+    const job = await pollHermesJob(j.job.id);
+    if (job.status === "failed") {
+      messages.value.push({
+        role: "assistant",
+        content: job.error || "Hermes research job failed",
+        at: new Date().toISOString(),
+        error: true,
+      });
+      return;
+    }
     messages.value.push({
       role: "assistant",
-      content: j.content || "(empty response)",
+      content: job.content || "(empty response)",
       at: new Date().toISOString(),
-      model: j.model,
+      model: job.model,
     });
   } catch (e) {
     messages.value.push({
@@ -159,11 +185,31 @@ async function send(): Promise<void> {
       error: true,
     });
   } finally {
+    activeJobId.value = null;
+    activeJob.value = null;
     sending.value = false;
   }
 }
 
+async function pollHermesJob(id: string): Promise<HermesJob> {
+  const deadline = Date.now() + 15 * 60_000;
+  while (Date.now() < deadline) {
+    if (activeJobId.value !== id) throw new Error("Hermes job polling cancelled");
+    const response = await fetch(`/api/hermes/jobs?id=${encodeURIComponent(id)}`);
+    const body = (await response.json()) as { job?: HermesJob; error?: string };
+    if (!response.ok || !body.job) {
+      throw new Error(body.error || `Job status failed (${response.status})`);
+    }
+    activeJob.value = body.job;
+    if (body.job.status === "complete" || body.job.status === "failed") return body.job;
+    await new Promise((resolve) => window.setTimeout(resolve, 2000));
+  }
+  throw new Error("Hermes job exceeded the 15-minute UI deadline");
+}
+
 function clearChat(): void {
+  activeJobId.value = null;
+  activeJob.value = null;
   messages.value = [];
   sessionId.value = `wellore-${Date.now().toString(36)}`;
 }
@@ -255,7 +301,15 @@ onMounted(async () => {
             <pre>{{ m.content }}</pre>
           </div>
           <div v-if="sending" class="bubble assistant">
-            <NSpin size="small" /> Running on Hermes (may take a few minutes for full research)…
+            <div class="job-progress">
+              <NSpin size="small" />
+              <span>
+                {{ activeJob ? `${activeJob.stage} · ${activeJob.progress}%` : "Starting Hermes job…" }}
+              </span>
+            </div>
+            <div v-if="activeJob?.degradedReasons?.length" class="degraded">
+              Degraded: {{ activeJob.degradedReasons.join("; ") }}
+            </div>
           </div>
         </div>
         <div class="composer">
@@ -360,6 +414,16 @@ h1 {
   font-family: ui-sans-serif, system-ui, sans-serif;
   font-size: 0.95rem;
   line-height: 1.45;
+}
+.job-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.degraded {
+  margin-top: 7px;
+  font-size: 12px;
+  color: #fbbf24;
 }
 .composer {
   display: grid;

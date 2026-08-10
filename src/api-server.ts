@@ -125,6 +125,7 @@ import {
 import {
   handleHermesChat,
   handleHermesHealth,
+  handleHermesJobs,
   handleHermesModels,
   handleHermesPresets,
 } from "./hermes-handlers.js";
@@ -1283,6 +1284,9 @@ const server = createServer(async (req, res) => {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
+        return;
+      case "/api/hermes/jobs":
+        await handleHermesJobs(req, res);
         return;
       case "/api/generated-messages":
         if (req.method === "GET") {

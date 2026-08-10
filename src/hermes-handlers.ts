@@ -7,6 +7,7 @@ import {
   isHermesConfigured,
   type HermesChatMessage,
 } from "./services/hermes.js";
+import { getHermesJob, startHermesJob } from "./services/hermes-jobs.js";
 
 const WELLORE_PROJECT_ID = "0038d0db-aab2-40f1-9f6e-38d38e157f8f";
 
@@ -164,6 +165,80 @@ export async function handleHermesChat(
   }
 }
 
+/**
+ * POST /api/hermes/jobs starts a background Hermes request.
+ * GET /api/hermes/jobs?id=... returns queued/running/complete/failed state.
+ */
+export async function handleHermesJobs(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method === "GET") {
+    const url = new URL(req.url || "/api/hermes/jobs", "http://localhost");
+    const id = url.searchParams.get("id")?.trim();
+    if (!id) {
+      sendJson(res, 400, { error: "id query parameter is required" });
+      return;
+    }
+    const job = getHermesJob(id);
+    if (!job) {
+      sendJson(res, 404, { error: "Hermes job not found or expired" });
+      return;
+    }
+    sendJson(res, 200, { job, welloreProjectId: WELLORE_PROJECT_ID });
+    return;
+  }
+
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "GET, POST", "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  if (!isHermesConfigured()) {
+    sendJson(res, 503, { error: "Hermes is not configured on this Voitech service" });
+    return;
+  }
+
+  let parsed: unknown;
+  try {
+    const raw = await getRawBody(req);
+    parsed = raw.trim() ? JSON.parse(raw) : null;
+  } catch {
+    sendJson(res, 400, { error: "Invalid JSON" });
+    return;
+  }
+  if (!isRecord(parsed)) {
+    sendJson(res, 400, { error: "Body must be a JSON object" });
+    return;
+  }
+  const projectId = typeof parsed.projectId === "string" ? parsed.projectId.trim() : "";
+  if (projectId && projectId !== WELLORE_PROJECT_ID) {
+    sendJson(res, 403, {
+      error: "Hermes agent v1 is scoped to the Wellore project only",
+      welloreProjectId: WELLORE_PROJECT_ID,
+    });
+    return;
+  }
+  const messages = parseMessages(parsed.messages);
+  if (!messages) {
+    sendJson(res, 400, { error: "messages must be a non-empty array of {role, content}" });
+    return;
+  }
+  const temperature =
+    typeof parsed.temperature === "number" && Number.isFinite(parsed.temperature)
+      ? parsed.temperature
+      : 0.2;
+  const job = startHermesJob({
+    messages,
+    model: typeof parsed.model === "string" ? parsed.model.trim() : "auto",
+    temperature,
+    sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId.trim() : undefined,
+    sessionKey:
+      typeof parsed.sessionKey === "string" ? parsed.sessionKey.trim() : "wellore-operator",
+  });
+  sendJson(res, 202, { job, welloreProjectId: WELLORE_PROJECT_ID });
+}
+
 /** GET /api/hermes/presets — prompt presets for the UI */
 export async function handleHermesPresets(
   _req: IncomingMessage,
@@ -175,7 +250,13 @@ export async function handleHermesPresets(
         id: "research-company",
         label: "Research company",
         prompt:
-          "Use the wellore-research-company skill. Research this company end-to-end with tools (not n8n), then upsert the dossier to Supabase wellore.* so the GTM site updates.\n\nCompany: {{company}}\nDomain/slug (if known): {{slug}}\nforce_research: false\n\nFollow geo/size/vendor gates, prefer cache hits, and use the model policy for extract vs POV steps. When done, reply with slug, score_total, pov.summary, and whether the GTM card should show level=full.",
+          "Use the wellore-research-company skill and its deterministic hermes_research runner. Do not manually reproduce the pipeline with browser/terminal calls. Research and upsert this company.\n\nCompany: {{company}}\nDomain/slug (if known): {{slug}}\nmode: full\nforce_research: false\nwrite: true\nallow_paid: true\n\nReturn the runner result JSON so Voitech can display stage statuses and degraded reasons.",
+      },
+      {
+        id: "research-company-catalog",
+        label: "Catalog-only (provisional)",
+        prompt:
+          "Use the wellore-research-catalog-only skill and its deterministic hermes_research runner. Do not use paid providers or contacts.\n\nCompany: {{company}}\nDomain/slug (if known): {{slug}}\nmode: catalog_only\nwrite: false\nallow_paid: false\n\nThis verdict is provisional: skipped evidence is unknown, final score_too_low is forbidden, and an existing medium/high segment must be preserved. Return the runner result JSON.",
       },
       {
         id: "write-email",
