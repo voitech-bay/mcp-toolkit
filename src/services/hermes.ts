@@ -7,6 +7,7 @@ const DEFAULT_TIMEOUT_MS = 600_000; // research runs can be long
 
 export const HERMES_PINNED_MODELS: Array<{ id: string; label: string; role: string }> = [
   { id: "auto", label: "Auto (policy)", role: "policy" },
+  { id: "deepseek/deepseek-v4-flash-0731", label: "DeepSeek V4 Flash 0731 (default)", role: "extract" },
   { id: "deepseek/deepseek-v3.2", label: "DeepSeek V3.2 (extract)", role: "extract" },
   { id: "deepseek/deepseek-chat-v3-0324", label: "DeepSeek Chat V3 (cheap)", role: "extract" },
   { id: "google/gemini-2.5-flash", label: "Gemini 2.5 Flash", role: "extract" },
