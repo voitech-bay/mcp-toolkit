@@ -441,10 +441,22 @@ export async function assembleWelloreResearch(
   const missing = args.leadUuids.length - contactRows.length;
   if (missing > 0) return { ok: false, status: 400, error: `${missing} selected lead(s) are not synced in Contacts` };
 
-  const idRes = await client.from("wellore_companies").select("id");
-  if (idRes.error) return { ok: false, status: 500, error: idRes.error.message };
+  // wellore_companies has thousands of rows (the full scraped pre-reg list, not just
+  // bridged ones) -- well past PostgREST's default 1000-row page cap, so this must be
+  // paginated or ids above the cap silently vanish from the reverse-hash map below.
   const wolreCompanyIdByUuid = new Map<string, number>();
-  for (const row of (idRes.data ?? []) as Array<{ id: number }>) wolreCompanyIdByUuid.set(welloreCompanyUuid(row.id), row.id);
+  {
+    const pageSize = 1000;
+    let from = 0;
+    while (true) {
+      const page = await client.from("wellore_companies").select("id").range(from, from + pageSize - 1);
+      if (page.error) return { ok: false, status: 500, error: page.error.message };
+      const rows = (page.data ?? []) as Array<{ id: number }>;
+      for (const row of rows) wolreCompanyIdByUuid.set(welloreCompanyUuid(row.id), row.id);
+      if (rows.length < pageSize) break;
+      from += pageSize;
+    }
+  }
 
   const neededWelloreIds = [...new Set(contactRows.map((c) => wolreCompanyIdByUuid.get(str(c, "company_uuid"))).filter((id): id is number => id != null))];
   const povRes = neededWelloreIds.length
