@@ -49,6 +49,39 @@ run for the same reason as Phase 6.
 7. **Instantly campaign id is not stored anywhere per-project** — the frontend keeps it in `localStorage` only (`mcp-toolkit/instantlyCampaignId`). If Wellore gets a real production campaign, either wire that as a proper setting or at minimum note the real campaign id here.
 8. **`INSTANTLY_API_KEY` is in `mcp-toolkit/.env` (local) but not yet on Railway.** Production pushes will fail until it's set there.
 
+## Loading reviewed drafts for review (added 2026-08-11)
+
+`src/scripts/load-wellore-drafts.ts` (`npm run load:wellore-drafts -- --file <path> [--apply]`)
+puts already-reviewed copy into Email Studio without spending LLM budget, so it can be
+commented on line by line with the research it was built on visible alongside. It is not a
+generation path — the copy comes from a reviewed source-of-truth JSON file.
+
+Per contact it writes one `outreach_research_snapshots` row (the Research panel reads
+`structured_research.verified_signals` / `inferred_priorities` off it, via
+`stableResearchPoints`) and one `outreach_emails` row plus a `current` version per touch,
+with `annotations` anchoring each span of copy to the research point or portfolio case it
+came from. Every draft runs through `validateDraftForProject` first; touches with blocking
+errors are reported and skipped rather than written.
+
+Idempotent: emails upsert on `outreach_emails_identity_idx`, and a re-run only writes a new
+version when the copy actually changed. Verified by running twice (18 touches, second run
+wrote nothing).
+
+First load: `projects/Wellore/artifacts/20260811-three-studio-app-load/drafts.json` in
+ai-toolkit — LoadComplete (Ilhwan Cho), Curve Games (Ranj V), Gameduo (Rukyum Kong),
+campaign `wellore-three-studio`, batch `three-studio-20260811`. 6 emails + 12 LinkedIn DMs.
+
+Two things worth knowing:
+
+- **Research point ids are positional.** `stableResearchPoints` derives them as
+  `verified-N` / `inferred-N` from array order, but spreads the stored object last, so an
+  explicit `id` in the file wins. The loader asserts the two agree — a silent mismatch would
+  break every annotation's research reference (`unknown_research`).
+- **Email Studio's list API defaults to `channel=email`.** LinkedIn DM rows live in the same
+  table and share the same review workspace, but were invisible until this change added a
+  Channel filter (and column) to the Email Studio filter bar. Default stays `email`, so
+  Velvetech's view is unchanged.
+
 ## Endpoints added
 
 | route | purpose |

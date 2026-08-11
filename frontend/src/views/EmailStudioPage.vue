@@ -9,7 +9,7 @@ import { useWorkflowLaunch, type LaunchableWorkflow } from "../composables/useWo
 import { htmlToPlaintext } from "../utils/htmlPlaintext";
 
 type Json = Record<string, any>;
-interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
+interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; channel:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
 interface Annotation { id:string; text:string; start:number; end:number; purpose:string; research_point_ids:string[]; instruction_ids:string[]; explanation:string; classification:"verified"|"product_truth"|"instruction"|"inference"; confidence:string; warnings:string[] }
 interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
 interface StyleSource extends Json { id:string; name:string; technique_summary:string; prompt_block:string; tags?:string[] }
@@ -21,7 +21,7 @@ const { launching: launchingN8n, workflows, loadWorkflows, launch } = useWorkflo
 const studioTab = ref<"email" | "linkedin">("email");
 const isVelvetech = computed(() => isVelvetechProjectId(store.selectedProjectId));
 const rows = ref<EmailRow[]>([]), total = ref(0), page = ref(1), pageSize = ref(25), loading = ref(false), error = ref("");
-const search = ref(""), statusFilter = ref<string|null>(null), campaignFilter = ref(""), batchFilter = ref(""), personaFilter = ref(""), reviewerFilter = ref(""), modelFilter = ref(""), qualityFilter = ref<string|null>(null), dateFrom = ref(""), dateTo = ref(""), openOnly = ref(false), savedView = ref("all");
+const search = ref(""), statusFilter = ref<string|null>(null), campaignFilter = ref(""), batchFilter = ref(""), personaFilter = ref(""), reviewerFilter = ref(""), modelFilter = ref(""), qualityFilter = ref<string|null>(null), dateFrom = ref(""), dateTo = ref(""), openOnly = ref(false), savedView = ref("all"), channelFilter = ref("email");
 const detailOpen = ref(false), detailLoading = ref(false), detail = ref<Json|null>(null), selectedId = ref("");
 const subject = ref(""), emailBody = ref(""), dirty = ref(false), selectedResearch = ref<string[]>([]), selectedText = ref({ quote:"", start:0, end:0 });
 const commentDraft = ref(""), regenerationPrompt = ref(""), actionLoading = ref(""), generating = ref(""), candidate = ref<Json|null>(null), compareOpen = ref(false), createOpen = ref(false);
@@ -35,6 +35,10 @@ const instructionOpen = ref(false);
 const selectedInstruction = ref<InstructionDoc | null>(null);
 
 const humanize = (value:string) => value.replace(/_/g, " ");
+// Multi-touch sequences store LinkedIn DMs in the same table as emails, so they share
+// this review workspace (research panel, line comments, versions). The API defaults to
+// email-only, which would otherwise hide them entirely.
+const channelOptions = [{label:"Email",value:"email"},{label:"LinkedIn DM",value:"linkedin_dm"},{label:"InMail",value:"linkedin_inmail"},{label:"All channels",value:"all"}];
 const statusOptions = ["research_ready","ai_draft_made","needs_review","comments_made","regenerated","final_check","approved","sent","research_missing","generation_failed","changes_requested","rejected","sending_failed"].map((value) => ({ label:humanize(value), value }));
 const savedViews = [{label:"All emails",value:"all"},{label:"Needs review",value:"needs_review"},{label:"Comments waiting",value:"comments_made"},{label:"Final checks",value:"final_check"},{label:"Approved, not sent",value:"approved"},{label:"Sent",value:"sent"},{label:"Failed or blocked",value:"failed"}];
 const statusType = (s:string) => s === "sent" ? "success" : s === "approved" ? "info" : ["generation_failed","sending_failed","rejected"].includes(s) ? "error" : ["comments_made","changes_requested","final_check"].includes(s) ? "warning" : "default";
@@ -68,7 +72,7 @@ function contactLabel(c: PickerContact): string {
 }
 
 function fmt(v:string|null) { return v ? new Date(v).toLocaleString() : "—"; }
-function qs() { const q = new URLSearchParams({ projectId:String(store.selectedProjectId), page:String(page.value), pageSize:String(pageSize.value) }); if(search.value.trim())q.set("search",search.value.trim()); const status = savedView.value !== "all" ? savedView.value : statusFilter.value; if(status)q.set("status",status); if(campaignFilter.value)q.set("campaign",campaignFilter.value); if(batchFilter.value)q.set("batch",batchFilter.value); if(personaFilter.value)q.set("persona",personaFilter.value); if(reviewerFilter.value)q.set("reviewer",reviewerFilter.value); if(modelFilter.value)q.set("model",modelFilter.value); if(qualityFilter.value)q.set("researchQuality",qualityFilter.value); if(dateFrom.value)q.set("dateFrom",dateFrom.value); if(dateTo.value)q.set("dateTo",dateTo.value); if(openOnly.value)q.set("hasOpenComments","true"); return q; }
+function qs() { const q = new URLSearchParams({ projectId:String(store.selectedProjectId), page:String(page.value), pageSize:String(pageSize.value) }); if(search.value.trim())q.set("search",search.value.trim()); const status = savedView.value !== "all" ? savedView.value : statusFilter.value; if(status)q.set("status",status); if(campaignFilter.value)q.set("campaign",campaignFilter.value); if(batchFilter.value)q.set("batch",batchFilter.value); if(personaFilter.value)q.set("persona",personaFilter.value); if(reviewerFilter.value)q.set("reviewer",reviewerFilter.value); if(modelFilter.value)q.set("model",modelFilter.value); if(qualityFilter.value)q.set("researchQuality",qualityFilter.value); if(channelFilter.value)q.set("channel",channelFilter.value); if(dateFrom.value)q.set("dateFrom",dateFrom.value); if(dateTo.value)q.set("dateTo",dateTo.value); if(openOnly.value)q.set("hasOpenComments","true"); return q; }
 async function load() { if(!store.selectedProjectId)return; loading.value=true; error.value=""; try { const r=await fetch(`/api/email-studio/emails?${qs()}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); rows.value=j.data??[]; total.value=j.total??0; } catch(e){error.value=e instanceof Error?e.message:"Could not load emails"} finally{loading.value=false} }
 async function loadStyleSources() {
   if (!store.selectedProjectId) return;
@@ -89,7 +93,7 @@ async function openQueryEmail() {
   if (projectId && projectId !== store.selectedProjectId) store.selectProject(projectId);
   if (emailId) await openEmail(emailId);
 }
-let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows();void loadStyleSources()}); watch([page,pageSize],load); watch(()=>route.query.emailId,()=>{void openQueryEmail()}); onMounted(()=>{void load();void loadWorkflows();void loadStyleSources();void openQueryEmail()});
+let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,channelFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows();void loadStyleSources()}); watch([page,pageSize],load); watch(()=>route.query.emailId,()=>{void openQueryEmail()}); onMounted(()=>{void load();void loadWorkflows();void loadStyleSources();void openQueryEmail()});
 
 function shouldIgnoreRowClick(event: MouseEvent): boolean {
   const target = event.target;
@@ -106,7 +110,9 @@ const emailRowProps = (row: EmailRow) => ({
 
 const columns:DataTableColumns<EmailRow> = [
   {title:"Contact",key:"contact_name",render:r=>h("div",[h("a",{class:"email-studio-link",href:"#",onClick:(e:MouseEvent)=>{e.preventDefault();void openEmail(r.id)}},r.contact_name||"Unknown"),h("div",{class:"muted"},r.recipient_email||"")])},
-  {title:"Company",key:"company_name"},{title:"Batch",key:"batch_name"},{title:"Persona",key:"persona"},{title:"Step",key:"sequence_step",width:65},
+  {title:"Company",key:"company_name"},{title:"Batch",key:"batch_name"},{title:"Persona",key:"persona"},
+  {title:"Channel",key:"channel",width:110,render:r=>h(NTag,{size:"small",type:r.channel==="email"?"default":"info"},{default:()=>humanize(r.channel||"email")})},
+  {title:"Step",key:"sequence_step",width:65},
   {title:"Subject",key:"current_subject",ellipsis:{tooltip:true}},{title:"Status",key:"status",render:r=>h("div",{class:"status-cell"},[h(NTag,{size:"small",type:statusType(r.status) as any},{default:()=>humanize(r.status)}),r.status==="research_missing"?h(NButton,{size:"tiny",secondary:true,type:"primary",loading:launchingN8n.value,disabled:!emailResearchWorkflow.value?.configured,onClick:(e:MouseEvent)=>{e.stopPropagation();void launchEmailResearch(r)}},{default:()=>"Launch n8n"}):null])},
   {title:"Comments",key:"open_comment_count",width:90},{title:"Updated",key:"updated_at",render:r=>fmt(r.updated_at)},
   {title:"",key:"actions",width:90,render:r=>h(NButton,{size:"small",type:"primary",secondary:true,onClick:()=>openEmail(r.id)},{default:()=>"Review"})},
@@ -331,7 +337,7 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
     <NTabs v-model:value="studioTab" type="line" animated style="margin-top: 16px">
       <NTabPane name="email" tab="Email">
         <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; only verified Smartlead events mark records as sent.</NAlert>
-        <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
+        <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="channelFilter" :options="channelOptions" placeholder="Channel"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
         <NAlert v-if="error" type="error" style="margin-top:12px">{{error}}</NAlert><NDataTable :columns="columns" :data="rows" :loading="loading" :row-key="r=>r.id" :row-props="emailRowProps" style="margin-top:12px"/><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="total" show-size-picker :page-sizes="[25,50,100]" style="margin-top:12px"/>
       </NTabPane>
 
