@@ -82,6 +82,42 @@ Two things worth knowing:
   Channel filter (and column) to the Email Studio filter bar. Default stays `email`, so
   Velvetech's view is unchanged.
 
+## Marking Instantly sends as sent (added 2026-08-11)
+
+`src/scripts/reconcile-instantly-sends.ts` (`npm run reconcile:instantly -- [--apply]`) is
+the Instantly counterpart to `smartlead-reconcile.ts`. It reads what Instantly actually
+sent, resolves each recipient to a project contact, and writes one `sent` `outreach_emails`
+row per touch carrying the copy as delivered, so Email Studio's Sent view reflects reality
+instead of only what the app itself drafted.
+
+First run marked 18 sends across 9 contacts (Nitro Games, Playdigious, GFD Studio,
+LoadComplete, Gameduo), campaigns `Wellore — 1 EMEA DRAFT` and `Wellore — 2 APAC DRAFT`,
+all from 7 Aug, steps 1 and 2 only — step 3 never went out because both campaigns are
+paused. Idempotent on the Instantly message id; a second `--apply` wrote nothing.
+
+Decisions worth knowing:
+
+- **`provenance = 'instantly_history'`** is a new value, added by migration
+  `outreach_emails_allow_instantly_history_provenance`. The existing enum only knew about
+  Smartlead. A row that already had an app-generated draft becomes `combined`, matching how
+  the Smartlead reconciler behaves.
+- **Instantly identifiers live in `external_push_log`** (provider, campaign, lead, message
+  id, step code, sending account) with `external_target = 'instantly'`, rather than being
+  crammed into the `smartlead_*` columns.
+- **Two campaigns are excluded as test sends**, listed in `EXCLUDED_CAMPAIGNS`.
+  `Wellore push test` is the Phase 7 rendering check: it used a real prospect's copy with
+  the recipient overridden to an internal inbox, so importing it would record that prospect
+  as having been mailed copy they never received. `c3036f8a` is a mail-tester deliverability
+  check.
+- **Contact resolution prefers the `title` column, not `position`.** `position` is
+  GetSales's own column and is populated on the bare duplicate rows too, so it cannot tell
+  the enriched row from the duplicate. Where several rows still tie, the script refuses to
+  guess and reports the candidates — `yaroslav@cas.ai` matches five contact rows across four
+  companies and has an explicit `CONTACT_OVERRIDES` entry pinning it to GFD Studio, which is
+  what the sent copy is about.
+- Needs `INSTANTLY_API_KEY`, which is in local `.env` but still not on Railway, so this runs
+  as a local ops script for now.
+
 ## Endpoints added
 
 | route | purpose |

@@ -29,7 +29,8 @@
     "reconcile:smartlead-lead": "tsx src/scripts/reconcile-smartlead-lead.ts",
     "start:worker": "node dist/workers/enrichment-worker.js",
     "start": "node dist/api-server.js",
-    "load:wellore-drafts": "tsx src/scripts/load-wellore-drafts.ts"
+    "load:wellore-drafts": "tsx src/scripts/load-wellore-drafts.ts",
+    "reconcile:instantly": "tsx src/scripts/reconcile-instantly-sends.ts"
   },
   "engines": {
     "node": ">=20"

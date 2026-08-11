@@ -11,6 +11,51 @@ function apiKey(): string {
   return key;
 }
 
+export interface InstantlySentEmail {
+  id: string;
+  message_id?: string;
+  subject?: string;
+  timestamp_email?: string;
+  timestamp_created?: string;
+  to_address_email_list?: string;
+  body?: { html?: string; text?: string };
+  campaign_id?: string;
+  lead?: string;
+  lead_id?: string;
+  eaccount?: string;
+  /** "0_1_0" = sequence 0, step index 1 (i.e. the second touch), variant 0. */
+  step?: string;
+  [key: string]: unknown;
+}
+
+/**
+ * Every outbound message Instantly has actually sent, newest first, across all
+ * campaigns unless one is named. Read only — this is the source of truth for what
+ * really went out, as opposed to what was drafted or pushed.
+ */
+export async function listSentEmails(opts: { campaignId?: string; max?: number } = {}): Promise<InstantlySentEmail[]> {
+  const max = opts.max ?? 1000;
+  const out: InstantlySentEmail[] = [];
+  let cursor: string | undefined;
+  do {
+    const params = new URLSearchParams({ email_type: "sent", limit: "100" });
+    if (opts.campaignId) params.set("campaign_id", opts.campaignId);
+    if (cursor) params.set("starting_after", cursor);
+    const page = await request<{ items?: InstantlySentEmail[]; next_starting_after?: string }>("GET", `/emails?${params}`);
+    const items = page.items ?? [];
+    out.push(...items);
+    cursor = items.length ? page.next_starting_after : undefined;
+  } while (cursor && out.length < max);
+  return out.slice(0, max);
+}
+
+/** Instantly's step code is "sequence_stepIndex_variant"; our step numbers are 1 based. */
+export function instantlyStepNumber(step: string | undefined): number {
+  const parts = String(step ?? "").split("_");
+  const index = Number(parts[1]);
+  return Number.isFinite(index) ? index + 1 : 1;
+}
+
 async function request<T>(method: string, path: string, body?: Record<string, unknown>): Promise<T> {
   const r = await fetch(`${BASE}${path}`, {
     method,
