@@ -202,32 +202,42 @@ const researchCitations = computed<ResearchCitation[]>(() => {
   const snap = detail.value?.research;
   if (!snap) return [];
   const structured = researchStructured.value;
-  let raw: Json[] = Array.isArray(snap.citations) ? snap.citations
+  let raw: unknown[] = Array.isArray(snap.citations) ? snap.citations
     : Array.isArray(structured?.citations) ? structured!.citations
     : [];
   if (!raw.length && structured && Array.isArray(structured.verified_signals)) {
-    raw = (structured.verified_signals as Json[])
+    raw = (structured.verified_signals as unknown[])
       .map((s) => {
         if (typeof s !== "object" || !s) return null;
-        const source = String(s.source || s.url || "").trim();
+        const row = s as Record<string, unknown>;
+        const source = String(row.source || row.url || "").trim();
         if (!source) return null;
         return {
-          title: String(s.title || s.statement || source).trim(),
-          url: isHttpUrl(source) ? source : String(s.url || "").trim(),
+          title: String(row.title || row.statement || source).trim(),
+          url: isHttpUrl(source) ? source : String(row.url || "").trim(),
           source,
-          supports: String(s.statement || s.supports || "").trim(),
+          supports: String(row.statement || row.supports || "").trim(),
         };
       })
-      .filter((c): c is Json => Boolean(c));
+      .filter((c): c is { title: string; url: string; source: string; supports: string } => c != null);
   }
-  return (raw as Json[]).map((c) => {
-    const source = String(c.source || "").trim();
-    const title = String(c.title || c.statement || source || "Source").trim();
-    const url = String(c.url || (isHttpUrl(source) ? source : "") || "").trim();
-    const supports = String(c.supports || c.statement || (!isHttpUrl(source) ? source : "") || "").trim();
-    if (!title && !url && !supports) return null;
-    return { title: title || url || "Citation", url, supports: supports === title ? "" : supports };
-  }).filter((c): c is ResearchCitation => Boolean(c));
+  return raw
+    .map((c) => {
+      if (typeof c !== "object" || !c) return null;
+      const row = c as Record<string, unknown>;
+      const source = String(row.source || "").trim();
+      const title = String(row.title || row.statement || source || "Source").trim();
+      const url = String(row.url || (isHttpUrl(source) ? source : "") || "").trim();
+      const supports = String(row.supports || row.statement || (!isHttpUrl(source) ? source : "") || "").trim();
+      if (!title && !url && !supports) return null;
+      const citation: ResearchCitation = {
+        title: title || url || "Citation",
+        url,
+        supports: supports === title ? "" : supports,
+      };
+      return citation;
+    })
+    .filter((c): c is ResearchCitation => c != null);
 });
 const researchVerifiedList = computed<string[]>(() => {
   const structured = researchStructured.value;
