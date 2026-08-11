@@ -133,6 +133,12 @@ const router = createRouter({
       meta: { title: "Contact | MCP Toolkit" },
     },
     {
+      path: "/company/wellore/:id",
+      name: "WelloreCompanyCard",
+      component: () => import("../views/WelloreCompanyCardPage.vue"),
+      meta: { title: "Wellore company | MCP Toolkit" },
+    },
+    {
       path: "/company/:id",
       name: "CompanyCard",
       component: () => import("../views/CompanyCardPage.vue"),

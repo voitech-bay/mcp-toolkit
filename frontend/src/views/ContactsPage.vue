@@ -33,6 +33,8 @@ import {
   OUTREACH_ENROLLMENT_OPTIONS,
   REPLY_SENTIMENT_OPTIONS,
 } from "../lib/outreachFilters";
+import { isWelloreProjectId } from "../project-ids";
+import WelloreContactsPanel from "./WelloreContactsPanel.vue";
 
 const CONTACT_COLUMN_WIDTHS = {
   avatar: 54,
@@ -52,6 +54,7 @@ const { applyResizable, onColumnResize, scrollXFor } = useResizableTableColumns(
 );
 
 const projectStore = useProjectStore();
+const isWellore = computed(() => isWelloreProjectId(projectStore.selectedProjectId));
 const message = useMessage();
 
 interface ContactRow {
@@ -366,6 +369,7 @@ function onCompanyAttached(payload: { contactId: string; companyId: string; comp
 
 // --- Fetch contacts ---
 async function fetchContacts() {
+  if (isWellore.value) return;
   const projectId = projectStore.selectedProjectId;
   if (!projectId) {
     data.value = [];
@@ -647,6 +651,8 @@ const tableScrollX = computed(() =>
 </script>
 
 <template>
+  <WelloreContactsPanel v-if="isWellore" />
+  <template v-else>
   <NCard>
     <template #header>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px">
@@ -785,6 +791,7 @@ const tableScrollX = computed(() =>
     :initial-search="attachTargetRow?.company_name ?? ''"
     @attached="onCompanyAttached"
   />
+  </template>
 </template>
 
 <style scoped>

@@ -33,6 +33,8 @@ import {
   OUTREACH_ENROLLMENT_OPTIONS,
   REPLY_SENTIMENT_OPTIONS,
 } from "../lib/outreachFilters";
+import { isWelloreProjectId } from "../project-ids";
+import WelloreCompaniesPanel from "./WelloreCompaniesPanel.vue";
 
 const COMPANY_COLUMN_WIDTHS = {
   name: 220,
@@ -53,6 +55,7 @@ const { applyResizable, onColumnResize, scrollXFor } = useResizableTableColumns(
 );
 
 const projectStore = useProjectStore();
+const isWellore = computed(() => isWelloreProjectId(projectStore.selectedProjectId));
 const message = useMessage();
 
 // --- Types ---
@@ -354,6 +357,7 @@ watch(searchInput, () => debouncedSearch());
 
 // --- Fetch companies ---
 async function fetchCompanies() {
+  if (isWellore.value) return;
   const projectId = projectStore.selectedProjectId;
   // When not showing all, require a project to be selected
   if (!showAll.value && !projectId) {
@@ -794,7 +798,8 @@ async function submitAddToHypothesis() {
 </script>
 
 <template>
-  <div class="companies-page">
+  <WelloreCompaniesPanel v-if="isWellore" />
+  <div v-else class="companies-page">
     <NCard>
       <div class="toolbar">
         <div class="toolbar-left">

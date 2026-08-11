@@ -130,6 +130,11 @@ import {
   handleHermesPresets,
 } from "./hermes-handlers.js";
 import {
+  handleGetWelloreCompanies,
+  handleGetWelloreContacts,
+  handleGetWelloreCompanyCard,
+} from "./wellore-handlers.js";
+import {
   handleInmailReviewItems,
   handleInmailReviewOpen,
   handleInmailReviewComment,
@@ -1113,6 +1118,15 @@ const server = createServer(async (req, res) => {
           res.writeHead(405, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
+        return;
+      case "/api/wellore/companies":
+        await handleGetWelloreCompanies(req, res);
+        return;
+      case "/api/wellore/contacts":
+        await handleGetWelloreContacts(req, res);
+        return;
+      case "/api/wellore/company-card":
+        await handleGetWelloreCompanyCard(req, res);
         return;
       case "/api/hypotheses":
         if (req.method === "GET") {
