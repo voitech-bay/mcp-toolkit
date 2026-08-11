@@ -12,6 +12,8 @@ import {
   NSelect,
   NTag,
   NCheckbox,
+  NCollapse,
+  NCollapseItem,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
@@ -37,10 +39,21 @@ interface WelloreContactRow {
   outreach_channel: string | null;
   outreach_decision: string | null;
   contact_outreach_eligible: boolean | null;
+  contact_exclusion_reason?: string | null;
   verification_status: string | null;
   is_person: boolean;
   is_gp_support: boolean;
   company_final_verification_status: string | null;
+  linkedin_duplicate?: boolean | null;
+  is_linkedin_duplicate?: boolean;
+}
+
+interface ContactsSummary {
+  people: number;
+  gp_support: number;
+  all: number;
+  with_email?: number;
+  eligible?: number;
 }
 
 const projectStore = useProjectStore();
@@ -56,11 +69,10 @@ const appliedSearch = ref("");
 
 const presence = ref("people");
 const population = ref("foxdata");
-const companySegment = ref<string | null>(null);
+const companySegment = ref<string | null>("verified");
 const source = ref<string | null>(null);
 const emailStatus = ref<string | null>(null);
 const fit = ref<string | null>(null);
-const icpFit = ref<string | null>(null);
 const contactSegment = ref<string | null>(null);
 const outreachList = ref<string | null>(null);
 const outreachChannel = ref<string | null>(null);
@@ -68,6 +80,9 @@ const outreachDecision = ref<string | null>(null);
 const eligibleOnly = ref(false);
 const sortBy = ref("name");
 const sortDirection = ref<"asc" | "desc">("asc");
+
+const summary = ref<ContactsSummary | null>(null);
+const summaryLoading = ref(false);
 
 const presenceOptions = [
   { label: "People", value: "people" },
@@ -131,16 +146,23 @@ const outreachDecisionOptions = [
   { label: "skip", value: "skip" },
 ];
 
+function isDup(row: WelloreContactRow): boolean {
+  return Boolean(
+    row.is_linkedin_duplicate
+    || row.linkedin_duplicate
+    || row.contact_exclusion_reason === "duplicate_linkedin_stale_employer"
+  );
+}
+
 function clearFilters() {
   searchInput.value = "";
   appliedSearch.value = "";
   presence.value = "people";
   population.value = "foxdata";
-  companySegment.value = null;
+  companySegment.value = "verified";
   source.value = null;
   emailStatus.value = null;
   fit.value = null;
-  icpFit.value = null;
   contactSegment.value = null;
   outreachList.value = null;
   outreachChannel.value = null;
@@ -156,6 +178,29 @@ const debouncedSearch = useDebounceFn(() => {
   page.value = 1;
 }, 300);
 watch(searchInput, () => debouncedSearch());
+
+async function fetchSummary() {
+  if (projectStore.selectedProjectId !== WELLORE_PROJECT_ID) {
+    summary.value = null;
+    return;
+  }
+  summaryLoading.value = true;
+  try {
+    const q = new URLSearchParams({
+      projectId: WELLORE_PROJECT_ID,
+      population: population.value,
+    });
+    const r = await fetch(`/api/wellore/contacts-summary?${q}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error ?? "Summary failed");
+    summary.value = j.data as ContactsSummary;
+  } catch (e) {
+    summary.value = null;
+    message.error(e instanceof Error ? e.message : "Summary failed");
+  } finally {
+    summaryLoading.value = false;
+  }
+}
 
 async function fetchContacts() {
   if (projectStore.selectedProjectId !== WELLORE_PROJECT_ID) {
@@ -180,7 +225,6 @@ async function fetchContacts() {
     if (source.value) q.set("source", source.value);
     if (emailStatus.value) q.set("emailStatus", emailStatus.value);
     if (fit.value) q.set("fit", fit.value);
-    if (icpFit.value) q.set("icpFit", icpFit.value);
     if (contactSegment.value) q.set("contactSegment", contactSegment.value);
     if (outreachList.value) q.set("outreachList", outreachList.value);
     if (outreachChannel.value) q.set("outreachChannel", outreachChannel.value);
@@ -203,6 +247,14 @@ async function fetchContacts() {
 }
 
 watch(
+  [() => projectStore.selectedProjectId, population],
+  () => {
+    void fetchSummary();
+  },
+  { immediate: true }
+);
+
+watch(
   [
     () => projectStore.selectedProjectId,
     page,
@@ -214,7 +266,6 @@ watch(
     source,
     emailStatus,
     fit,
-    icpFit,
     contactSegment,
     outreachList,
     outreachChannel,
@@ -229,17 +280,27 @@ watch(
   { immediate: true }
 );
 
+const rangeLabel = computed(() => {
+  if (total.value === 0) return "Showing 0 of 0";
+  const start = (page.value - 1) * pageSize.value + 1;
+  const end = Math.min(page.value * pageSize.value, total.value);
+  return `Showing ${start}–${end} of ${total.value}`;
+});
+
 const columns = computed<DataTableColumns<WelloreContactRow>>(() => [
   {
-    title: "Name",
+    title: "Person",
     key: "name",
     sorter: true,
-    render: (row) => row.name || (row.is_gp_support ? "GP support" : "—"),
-  },
-  {
-    title: "Title",
-    key: "title",
-    render: (row) => row.title || "—",
+    render: (row) =>
+      h("div", { class: "person-cell" }, [
+        h(
+          "div",
+          { class: "person-name" },
+          row.name || (row.is_gp_support ? "GP support" : "—")
+        ),
+        row.title ? h("div", { class: "meta" }, row.title) : null,
+      ]),
   },
   {
     title: "Company",
@@ -252,64 +313,71 @@ const columns = computed<DataTableColumns<WelloreContactRow>>(() => [
       ),
   },
   {
-    title: "Source",
-    key: "source",
-    render: (row) =>
-      h(
-        NTag,
-        {
-          size: "small",
-          type: row.is_gp_support ? "warning" : "default",
-          bordered: false,
-        },
-        { default: () => row.source || "—" }
-      ),
-  },
-  {
     title: "Email",
     key: "email",
     render: (row) => {
-      if (!row.email) return "—";
+      if (!row.email) return h("span", { class: "muted" }, "—");
       return h("div", [
         h("div", row.email),
-        h("div", { class: "meta" }, row.email_status || ""),
+        row.email_status
+          ? h("div", { class: "meta" }, row.email_status)
+          : null,
       ]);
     },
   },
   {
     title: "LinkedIn",
     key: "linkedin_url",
+    width: 90,
     render: (row) =>
       row.linkedin_url
         ? h(
             "a",
-            { href: row.linkedin_url, target: "_blank", rel: "noopener" },
+            {
+              href: row.linkedin_url,
+              target: "_blank",
+              rel: "noopener",
+              class: "company-link",
+            },
             "Profile"
           )
-        : "—",
+        : h("span", { class: "muted" }, "—"),
   },
   {
     title: "Fit",
     key: "fit",
+    width: 90,
     render: (row) => row.fit || row.icp_fit || "—",
   },
   {
-    title: "Segment",
-    key: "contact_segment",
-    render: (row) => row.contact_segment || "—",
-  },
-  {
-    title: "Outreach list",
-    key: "outreach_list",
-    render: (row) => row.outreach_list || "—",
-  },
-  {
-    title: "Eligible",
+    title: "Status",
     key: "contact_outreach_eligible",
-    render: (row) =>
-      row.contact_outreach_eligible
-        ? h(NTag, { size: "small", type: "success", bordered: false }, { default: () => "yes" })
-        : "—",
+    render: (row) => {
+      const children = [];
+      if (row.contact_outreach_eligible) {
+        children.push(
+          h(
+            NTag,
+            { size: "small", type: "success", bordered: false },
+            { default: () => "eligible" }
+          )
+        );
+      }
+      if (row.outreach_list) {
+        children.push(h("span", { class: "meta" }, row.outreach_list));
+      }
+      if (isDup(row)) {
+        children.push(
+          h(
+            NTag,
+            { size: "small", type: "warning", bordered: false },
+            { default: () => "Dup" }
+          )
+        );
+      }
+      if (children.length === 0) return h("span", { class: "muted" }, "—");
+      return h("div", { class: "status-cell" }, children);
+    },
   },
 ]);
 
@@ -338,19 +406,53 @@ const pagination = computed(() => ({
           <span class="page-title">Wellore contacts</span>
           <NTag size="small" :bordered="false">{{ total }}</NTag>
         </NSpace>
-        <NInput
-          v-model:value="searchInput"
-          placeholder="Search name, title, email, company…"
-          clearable
-          size="small"
-          style="width: 280px"
-        />
+        <span class="range">{{ rangeLabel }}</span>
       </div>
     </template>
 
+    <div class="metrics">
+      <div class="metric">
+        <div class="v">{{ summaryLoading ? "…" : (summary?.people ?? "—") }}</div>
+        <div class="l">People</div>
+      </div>
+      <div class="metric">
+        <div class="v">
+          {{
+            summaryLoading
+              ? "…"
+              : summary?.with_email != null
+                ? summary.with_email
+                : (summary?.gp_support ?? "—")
+          }}
+        </div>
+        <div class="l">
+          {{ summary?.with_email != null ? "With email" : "GP support" }}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="v">
+          {{
+            summaryLoading
+              ? "…"
+              : summary?.eligible != null
+                ? summary.eligible
+                : (summary?.all ?? "—")
+          }}
+        </div>
+        <div class="l">
+          {{ summary?.eligible != null ? "Eligible" : "All contacts" }}
+        </div>
+      </div>
+    </div>
+
     <div class="filters">
+      <NInput
+        v-model:value="searchInput"
+        placeholder="Search name, title, email, company…"
+        clearable
+        size="small"
+      />
       <NSelect v-model:value="presence" :options="presenceOptions" size="small" />
-      <NSelect v-model:value="population" :options="populationOptions" size="small" />
       <NSelect
         v-model:value="companySegment"
         :options="companySegmentOptions"
@@ -358,17 +460,70 @@ const pagination = computed(() => ({
         clearable
         size="small"
       />
-      <NSelect v-model:value="source" :options="sourceOptions" placeholder="Source…" clearable size="small" />
-      <NSelect v-model:value="emailStatus" :options="emailStatusOptions" placeholder="Email status…" clearable size="small" />
-      <NSelect v-model:value="fit" :options="fitOptions" placeholder="Fit…" clearable size="small" />
-      <NSelect v-model:value="icpFit" :options="fitOptions" placeholder="ICP fit…" clearable size="small" />
-      <NSelect v-model:value="contactSegment" :options="segmentOptions" placeholder="Contact segment…" clearable size="small" />
-      <NSelect v-model:value="outreachList" :options="outreachListOptions" placeholder="Outreach list…" clearable size="small" />
-      <NSelect v-model:value="outreachChannel" :options="outreachChannelOptions" placeholder="Outreach channel…" clearable size="small" />
-      <NSelect v-model:value="outreachDecision" :options="outreachDecisionOptions" placeholder="Decision…" clearable size="small" />
+      <NSelect
+        v-model:value="emailStatus"
+        :options="emailStatusOptions"
+        placeholder="Email status…"
+        clearable
+        size="small"
+      />
       <NCheckbox v-model:checked="eligibleOnly" size="small">Eligible only</NCheckbox>
-      <NButton size="small" @click="clearFilters">Clear filters</NButton>
+      <NButton size="small" @click="clearFilters">Clear</NButton>
     </div>
+
+    <NCollapse class="advanced">
+      <NCollapseItem title="Advanced filters" name="adv">
+        <div class="filters">
+          <NSelect
+            v-model:value="population"
+            :options="populationOptions"
+            size="small"
+          />
+          <NSelect
+            v-model:value="source"
+            :options="sourceOptions"
+            placeholder="Source…"
+            clearable
+            size="small"
+          />
+          <NSelect
+            v-model:value="fit"
+            :options="fitOptions"
+            placeholder="Fit…"
+            clearable
+            size="small"
+          />
+          <NSelect
+            v-model:value="contactSegment"
+            :options="segmentOptions"
+            placeholder="Contact segment…"
+            clearable
+            size="small"
+          />
+          <NSelect
+            v-model:value="outreachList"
+            :options="outreachListOptions"
+            placeholder="Outreach list…"
+            clearable
+            size="small"
+          />
+          <NSelect
+            v-model:value="outreachChannel"
+            :options="outreachChannelOptions"
+            placeholder="Outreach channel…"
+            clearable
+            size="small"
+          />
+          <NSelect
+            v-model:value="outreachDecision"
+            :options="outreachDecisionOptions"
+            placeholder="Decision…"
+            clearable
+            size="small"
+          />
+        </div>
+      </NCollapseItem>
+    </NCollapse>
 
     <NAlert v-if="error" type="error" style="margin-bottom: 0.75rem">{{ error }}</NAlert>
     <NEmpty v-else-if="!loading && data.length === 0" description="No contacts match these filters" />
@@ -401,14 +556,52 @@ const pagination = computed(() => ({
 }
 .page-icon { opacity: 0.7; }
 .page-title { font-size: 1.1rem; font-weight: 600; }
+.range { font-size: 12px; color: #6b7280; }
+.metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.metric {
+  background: #fafbfc;
+  border: 1px solid #e8eaed;
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+.metric .v {
+  font-size: 22px;
+  font-weight: 700;
+  color: #2563eb;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.metric .l {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #6b7280;
+}
 .filters {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   gap: 0.5rem;
-  margin-bottom: 0.75rem;
+  margin-bottom: 0.5rem;
   align-items: center;
 }
+.advanced { margin-bottom: 0.75rem; }
 .company-link { color: #2080f0; text-decoration: none; }
 .company-link:hover { text-decoration: underline; }
+.person-cell { display: flex; flex-direction: column; gap: 2px; }
+.person-name { font-weight: 600; }
+.status-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
 .meta { font-size: 0.75rem; opacity: 0.65; }
+.muted { color: #9ca3af; }
+@media (max-width: 900px) {
+  .metrics { grid-template-columns: 1fr; }
+}
 </style>

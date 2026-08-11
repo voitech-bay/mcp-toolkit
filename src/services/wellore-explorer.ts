@@ -23,7 +23,8 @@ export interface WelloreCompanyListRow {
   upcoming_count: number | null;
   has_hit: boolean | null;
   score_total: number | null;
-  score: Record<string, boolean> | null;
+  score: Record<string, true | false | "unknown"> | null;
+  name_quality: "ok" | "likely_app_title";
   recommended_channel: string | null;
   company_priority_segment: string | null;
   company_segment_reason: string | null;
@@ -63,6 +64,7 @@ export interface WelloreContactListRow {
   contact_segment: string | null;
   decision_power: string | null;
   contact_outreach_eligible: boolean | null;
+  contact_exclusion_reason: string | null;
   outreach_decision: string | null;
   outreach_list: string | null;
   outreach_channel: string | null;
@@ -81,6 +83,43 @@ function parseBoolParam(value: string | null | undefined): boolean | null {
   if (["1", "true", "yes"].includes(v)) return true;
   if (["0", "false", "no"].includes(v)) return false;
   return null;
+}
+
+export type ScoreBit = true | false | "unknown";
+
+/** Only strict true is on; "unknown" stays unknown (never Boolean-coerced). */
+export function normalizeScoreBit(value: unknown): ScoreBit {
+  if (value === true) return true;
+  if (value === false) return false;
+  if (value === "unknown" || value == null) return "unknown";
+  if (typeof value === "string") {
+    const lower = value.trim().toLowerCase();
+    if (lower === "true") return true;
+    if (lower === "false") return false;
+    if (lower === "unknown") return "unknown";
+  }
+  return "unknown";
+}
+
+const APP_TITLE_GENRE =
+  /\b(draw|paint|coloring|colouring|puzzle|racing|simulator|idle|clicker|toddler|kids?\b|baby game|games for)\b/i;
+
+/** Heuristic: FoxData sometimes stored the Play app title as the studio name. */
+export function inferNameQuality(args: {
+  name: string | null;
+  bestTitle: string | null;
+  titlePreview?: string[];
+}): "ok" | "likely_app_title" {
+  const name = (args.name || "").trim();
+  if (!name) return "ok";
+  const best = (args.bestTitle || "").trim();
+  if (best && name.toLowerCase() === best.toLowerCase()) return "likely_app_title";
+  const preview = args.titlePreview ?? [];
+  if (preview.some((t) => String(t).trim().toLowerCase() === name.toLowerCase())) return "likely_app_title";
+  if (name.length > 55) return "likely_app_title";
+  if (/ - /.test(name) && APP_TITLE_GENRE.test(name)) return "likely_app_title";
+  if (APP_TITLE_GENRE.test(name) && /[:,]/.test(name)) return "likely_app_title";
+  return "ok";
 }
 
 export async function listWelloreCompanies(
@@ -129,17 +168,21 @@ export async function listWelloreCompanies(
     data: rows.map((r) => {
       const id = Number(r.id);
       const rawScore = r.score;
-      let score: Record<string, boolean> | null = null;
+      let score: Record<string, ScoreBit> | null = null;
       if (rawScore && typeof rawScore === "object" && !Array.isArray(rawScore)) {
         score = {};
         for (const [k, v] of Object.entries(rawScore as Record<string, unknown>)) {
-          score[k] = Boolean(v);
+          if (k === "total") continue;
+          score[k] = normalizeScoreBit(v);
         }
       }
+      const name = (r.name as string) ?? null;
+      const bestTitle = (r.best_title as string) ?? null;
+      const titlePreview = Array.isArray(r.title_preview) ? (r.title_preview as string[]) : [];
       return {
         id,
         slug: (r.slug as string) ?? null,
-        name: (r.name as string) ?? null,
+        name,
         domain: (r.domain as string) ?? null,
         website: (r.website as string) ?? null,
         linkedin_company_url: (r.linkedin_company_url as string) ?? null,
@@ -147,12 +190,13 @@ export async function listWelloreCompanies(
         employee_count: r.employee_count == null ? null : Number(r.employee_count),
         source_list: (r.source_list as string) ?? null,
         segment: (r.segment as string) ?? null,
-        best_title: (r.best_title as string) ?? null,
+        best_title: bestTitle,
         released_count: r.released_count == null ? null : Number(r.released_count),
         upcoming_count: r.upcoming_count == null ? null : Number(r.upcoming_count),
         has_hit: (r.has_hit as boolean) ?? null,
         score_total: r.score_total == null ? null : Number(r.score_total),
         score,
+        name_quality: inferNameQuality({ name, bestTitle, titlePreview }),
         recommended_channel: (r.recommended_channel as string) ?? null,
         company_priority_segment: (r.company_priority_segment as string) ?? null,
         company_segment_reason: (r.company_segment_reason as string) ?? null,
@@ -170,7 +214,7 @@ export async function listWelloreCompanies(
         has_linkedin_person: Boolean(r.has_linkedin_person),
         channel_mode: String(r.channel_mode ?? "none"),
         contact_presence: String(r.contact_presence ?? "no_contacts"),
-        title_preview: Array.isArray(r.title_preview) ? (r.title_preview as string[]) : [],
+        title_preview: titlePreview,
         crm_company_id: welloreCompanyUuid(id),
       };
     }),
@@ -273,6 +317,7 @@ export async function listWelloreContacts(
         contact_segment: (r.contact_segment as string) ?? null,
         decision_power: (r.decision_power as string) ?? null,
         contact_outreach_eligible: (r.contact_outreach_eligible as boolean) ?? null,
+        contact_exclusion_reason: (r.contact_exclusion_reason as string) ?? null,
         outreach_decision: (r.outreach_decision as string) ?? null,
         outreach_list: (r.outreach_list as string) ?? null,
         outreach_channel: (r.outreach_channel as string) ?? null,

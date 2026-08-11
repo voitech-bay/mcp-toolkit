@@ -41,7 +41,8 @@ interface WelloreCompanyRow {
   upcoming_count: number | null;
   released_count: number | null;
   score_total: number | null;
-  score: Record<string, boolean> | null;
+  score: Record<string, true | false | "unknown"> | null;
+  name_quality?: "ok" | "likely_app_title";
   recommended_channel: string | null;
   source_list: string | null;
   hq_country: string | null;
@@ -401,11 +402,19 @@ const columns = computed<DataTableColumns<WelloreCompanyRow>>(() => [
     key: "name",
     sorter: true,
     render: (row) =>
-      h(
-        RouterLink,
-        { to: `/company/wellore/${row.id}`, class: "company-link" },
-        { default: () => row.name || "—" }
-      ),
+      h("div", { class: "company-cell" }, [
+        h(
+          RouterLink,
+          { to: `/company/wellore/${row.id}`, class: "company-link" },
+          { default: () => row.name || "—" }
+        ),
+        row.best_title
+          ? h("div", { class: "muted company-subtitle" }, row.best_title)
+          : null,
+        row.name_quality === "likely_app_title"
+          ? h("span", { class: "name-badge" }, "Likely app title")
+          : null,
+      ]),
   },
   {
     title: "Domain",
@@ -687,6 +696,19 @@ const pagination = computed(() => ({
 .advanced { margin-bottom: 0.75rem; }
 .company-link { color: #2080f0; text-decoration: none; font-weight: 600; }
 .company-link:hover { text-decoration: underline; }
+.company-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.company-subtitle { font-size: 0.8em; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.name-badge {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
 .muted { color: #9ca3af; }
 .pill {
   display: inline-block;

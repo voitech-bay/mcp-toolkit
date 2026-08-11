@@ -147,7 +147,21 @@ const contactColumns: DataTableColumns<ContactRow> = [
 const scoreBits = computed(() => {
   const score = company.value?.score;
   if (!score || typeof score !== "object") return null;
-  return score as Record<string, boolean>;
+  return score as Record<string, true | false | "unknown">;
+});
+
+const nameQuality = computed(() => {
+  const c = company.value;
+  if (!c) return "ok" as const;
+  const name = String(c.name || "").trim();
+  const best = String(c.best_title || "").trim();
+  if (!name) return "ok" as const;
+  if (best && name.toLowerCase() === best.toLowerCase()) return "likely_app_title" as const;
+  if (name.length > 55) return "likely_app_title" as const;
+  if (/ - /.test(name) && /\b(draw|paint|coloring|puzzle|racing|simulator|idle|clicker)\b/i.test(name)) {
+    return "likely_app_title" as const;
+  }
+  return "ok" as const;
 });
 </script>
 
@@ -166,11 +180,15 @@ const scoreBits = computed(() => {
             <div class="header">
               <div>
                 <h1 class="title">{{ company.name || "Company" }}</h1>
+                <div v-if="company.best_title" class="best-title">{{ company.best_title }}</div>
                 <div class="sub">
                   <span v-if="company.domain">{{ company.domain }}</span>
                   <span v-if="company.hq_country"> · {{ company.hq_country }}</span>
                   <span v-if="company.slug"> · {{ company.slug }}</span>
                 </div>
+                <NTag v-if="nameQuality === 'likely_app_title'" type="warning" size="small" :bordered="false" style="margin-top: 8px">
+                  Likely app title — check domain / Play developer name
+                </NTag>
               </div>
               <NSpace>
                 <NTag :type="tag(company.final_verification_status)" :bordered="false">
@@ -285,6 +303,7 @@ const scoreBits = computed(() => {
   align-items: flex-start;
 }
 .title { margin: 0; font-size: 1.35rem; }
+.best-title { opacity: 0.75; font-size: 0.95rem; margin-top: 0.2rem; }
 .sub { opacity: 0.7; font-size: 0.9rem; margin-top: 0.25rem; }
 .meta-row { opacity: 0.85; margin-bottom: 0.5rem; }
 .disq { color: #d03050; }
