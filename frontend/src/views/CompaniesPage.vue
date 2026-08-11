@@ -171,12 +171,28 @@ const linkedinOutreachFilter = ref<string | null>(null);
 const emailOutreachFilter = ref<string | null>(null);
 const replyStatusFilter = ref<string | null>(null);
 const connectionStatusFilter = ref<string | null>(null);
+const channelModeFilter = ref<string | null>(null);
+/** When false, include project companies with no real contacts. Default: only companies with ≥1 real contact. */
+const requireRealContact = ref(true);
 const sortBy = ref("created_at");
 const sortDirection = ref<"asc" | "desc">("desc");
 const listOptions = ref<Array<{ label: string; value: string }>>([]);
 const outreachEnrollmentOptions = [...OUTREACH_ENROLLMENT_OPTIONS];
 const replySentimentOptions = [...REPLY_SENTIMENT_OPTIONS];
 const connectionStatusOptions = [...CONNECTION_STATUS_OPTIONS];
+const channelModeOptions = [
+  { label: "Multi-channel", value: "multi" },
+  { label: "Email-only", value: "email_only" },
+  { label: "LinkedIn-only", value: "linkedin_only" },
+];
+
+const emptyCompaniesDescription = computed(() => {
+  if (showAll.value) return "No companies found";
+  if (requireRealContact.value) {
+    return "No companies with real contacts — uncheck “Real contacts only” or check “Show all”";
+  }
+  return "No companies in this project — check “Show all” to browse and add";
+});
 const editorOpen = ref(false);
 const editorSaving = ref(false);
 const editingCompanyId = ref<string | null>(null);
@@ -231,6 +247,8 @@ function clearCompanyFilters() {
   emailOutreachFilter.value = null;
   replyStatusFilter.value = null;
   connectionStatusFilter.value = null;
+  channelModeFilter.value = null;
+  requireRealContact.value = true;
   sortBy.value = "created_at"; sortDirection.value = "desc"; page.value = 1;
 }
 
@@ -361,6 +379,8 @@ async function fetchCompanies() {
     if (emailOutreachFilter.value) q.set("emailOutreach", emailOutreachFilter.value);
     if (replyStatusFilter.value) q.set("replyStatus", replyStatusFilter.value);
     if (connectionStatusFilter.value) q.set("connectionStatus", connectionStatusFilter.value);
+    if (channelModeFilter.value) q.set("channelMode", channelModeFilter.value);
+    q.set("requireRealContact", requireRealContact.value ? "true" : "false");
     q.set("sortBy", sortBy.value); q.set("sortDirection", sortDirection.value);
 
     let url: string;
@@ -422,7 +442,7 @@ async function fetchCompanies() {
 }
 
 watch(
-  [() => projectStore.selectedProjectId, page, pageSize, appliedSearch, showAll, statusFilter, industryFilter, employeesFilter, listFilter, hypothesisFilter, linkedinOutreachFilter, emailOutreachFilter, replyStatusFilter, connectionStatusFilter, sortBy, sortDirection],
+  [() => projectStore.selectedProjectId, page, pageSize, appliedSearch, showAll, statusFilter, industryFilter, employeesFilter, listFilter, hypothesisFilter, linkedinOutreachFilter, emailOutreachFilter, replyStatusFilter, connectionStatusFilter, channelModeFilter, requireRealContact, sortBy, sortDirection],
   () => fetchCompanies(),
   { immediate: true }
 );
@@ -827,6 +847,8 @@ async function submitAddToHypothesis() {
         <NSelect v-model:value="emailOutreachFilter" :options="outreachEnrollmentOptions" placeholder="Email outreach…" clearable size="small" />
         <NSelect v-model:value="replyStatusFilter" :options="replySentimentOptions" placeholder="Reply status…" clearable size="small" />
         <NSelect v-model:value="connectionStatusFilter" :options="connectionStatusOptions" placeholder="LinkedIn connection…" clearable size="small" />
+        <NSelect v-model:value="channelModeFilter" :options="channelModeOptions" placeholder="Channel…" clearable size="small" />
+        <NCheckbox v-model:checked="requireRealContact" size="small">Real contacts only</NCheckbox>
         <NButton size="small" @click="clearCompanyFilters">Clear filters</NButton>
       </div>
 
@@ -888,7 +910,7 @@ async function submitAddToHypothesis() {
       />
       <NEmpty
         v-else-if="!loading"
-        :description="showAll ? 'No companies found' : 'No companies in this project — check \'Show all\' to browse and add'"
+        :description="emptyCompaniesDescription"
       />
     </NCard>
 

@@ -19,6 +19,7 @@ import {
   NDrawer,
   NDrawerContent,
   NTooltip,
+  NCheckbox,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns, DataTableRowKey, SelectOption } from "naive-ui";
@@ -128,12 +129,20 @@ const linkedinOutreachFilter = ref<string | null>(null);
 const emailOutreachFilter = ref<string | null>(null);
 const replyStatusFilter = ref<string | null>(null);
 const connectionStatusFilter = ref<string | null>(null);
+const channelModeFilter = ref<string | null>(null);
+/** When false, include support-inbox / non-person rows. Default: real people only. */
+const realOnly = ref(true);
 const sortBy = ref("created_at");
 const sortDirection = ref<"asc" | "desc">("desc");
 const listOptions = ref<Array<{ label: string; value: string }>>([]);
 const outreachEnrollmentOptions = [...OUTREACH_ENROLLMENT_OPTIONS];
 const replySentimentOptions = [...REPLY_SENTIMENT_OPTIONS];
 const connectionStatusOptions = [...CONNECTION_STATUS_OPTIONS];
+const channelModeOptions = [
+  { label: "Multi-channel", value: "multi" },
+  { label: "Email-only", value: "email_only" },
+  { label: "LinkedIn-only", value: "linkedin_only" },
+];
 const editorOpen = ref(false);
 const editorSaving = ref(false);
 const editingContactId = ref<string | null>(null);
@@ -188,6 +197,8 @@ function clearFilters() {
   emailOutreachFilter.value = null;
   replyStatusFilter.value = null;
   connectionStatusFilter.value = null;
+  channelModeFilter.value = null;
+  realOnly.value = true;
   sortBy.value = "created_at"; sortDirection.value = "desc"; page.value = 1;
 }
 
@@ -379,6 +390,8 @@ async function fetchContacts() {
     if (emailOutreachFilter.value) q.set("emailOutreach", emailOutreachFilter.value);
     if (replyStatusFilter.value) q.set("replyStatus", replyStatusFilter.value);
     if (connectionStatusFilter.value) q.set("connectionStatus", connectionStatusFilter.value);
+    if (channelModeFilter.value) q.set("channelMode", channelModeFilter.value);
+    q.set("realOnly", realOnly.value ? "true" : "false");
     const r = await fetch(`/api/project-contacts?${q.toString()}`);
     const j = await r.json();
     if (!r.ok) {
@@ -415,6 +428,8 @@ watch(
     emailOutreachFilter.value,
     replyStatusFilter.value,
     connectionStatusFilter.value,
+    channelModeFilter.value,
+    realOnly.value,
     sortBy.value,
     sortDirection.value,
   ],
@@ -674,6 +689,8 @@ const tableScrollX = computed(() =>
         <NSelect v-model:value="emailOutreachFilter" :options="outreachEnrollmentOptions" placeholder="Email outreach…" clearable size="small" />
         <NSelect v-model:value="replyStatusFilter" :options="replySentimentOptions" placeholder="Reply status…" clearable size="small" />
         <NSelect v-model:value="connectionStatusFilter" :options="connectionStatusOptions" placeholder="LinkedIn connection…" clearable size="small" />
+        <NSelect v-model:value="channelModeFilter" :options="channelModeOptions" placeholder="Channel…" clearable size="small" />
+        <NCheckbox v-model:checked="realOnly" size="small">Real people only</NCheckbox>
         <NButton size="small" @click="clearFilters">Clear filters</NButton>
         <NButton v-if="checkedKeys.length" size="small" type="error" @click="deleteContacts(checkedKeys.map(String))">
           Delete {{ checkedKeys.length }}

@@ -3239,6 +3239,14 @@ export async function handleGetProjectCompanies(
   const emailOutreach = params.get("emailOutreach") ?? undefined;
   const replyStatus = params.get("replyStatus") ?? undefined;
   const connectionStatus = params.get("connectionStatus") ?? undefined;
+  const channelModeRaw = (params.get("channelMode") ?? "").trim().toLowerCase();
+  const channelMode = ["multi", "email_only", "linkedin_only"].includes(channelModeRaw)
+    ? channelModeRaw
+    : undefined;
+  const requireRealParam = params.get("requireRealContact");
+  const requireRealContact = requireRealParam == null
+    ? true
+    : !["0", "false", "no"].includes(requireRealParam.trim().toLowerCase());
   const allowedSort = ["created_at", "name", "domain", "industry", "employees_range", "status"] as const;
   const requestedSort = params.get("sortBy");
   const sortBy = allowedSort.find((value) => value === requestedSort);
@@ -3249,6 +3257,7 @@ export async function handleGetProjectCompanies(
     search, limit, offset, companyId, listUuid, status, industry, employeesRange,
     hypothesisId, sortBy, sortDirection,
     linkedinOutreach, emailOutreach, replyStatus, connectionStatus,
+    requireRealContact, channelMode,
   });
   if (result.error) {
     res.writeHead(500);
@@ -3289,6 +3298,14 @@ export async function handleGetProjectContacts(
   const sortDirection = params.get("sortDirection") === "asc" ? "asc" : "desc";
   const limit = Math.min(Math.max(parseInt(params.get("limit") ?? "25", 10) || 25, 1), 100);
   const offset = Math.max(parseInt(params.get("offset") ?? "0", 10) || 0, 0);
+  const channelModeRaw = (params.get("channelMode") ?? "").trim().toLowerCase();
+  const channelMode = ["multi", "email_only", "linkedin_only"].includes(channelModeRaw)
+    ? channelModeRaw
+    : undefined;
+  const realOnlyParam = params.get("realOnly");
+  const realOnly = realOnlyParam == null
+    ? true
+    : !["0", "false", "no"].includes(realOnlyParam.trim().toLowerCase());
   const result = await getProjectContacts(client, projectId, {
     search: params.get("search") ?? undefined,
     listUuid: params.get("listUuid") ?? undefined,
@@ -3298,6 +3315,8 @@ export async function handleGetProjectContacts(
     emailOutreach: params.get("emailOutreach") ?? undefined,
     replyStatus: params.get("replyStatus") ?? undefined,
     connectionStatus: params.get("connectionStatus") ?? undefined,
+    realOnly,
+    channelMode,
     sortBy,
     sortDirection,
     limit,

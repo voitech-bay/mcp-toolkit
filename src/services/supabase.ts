@@ -3488,7 +3488,36 @@ export async function unmarkGetSalesTagsAsHypotheses(
  * Also joins hypothesis_targets -> hypotheses to return which hypotheses each company appears in.
  * Supports optional search (name/domain ilike) and pagination with total count.
  * Optional listUuid: only companies that have at least one contact in the project on that list (Contacts.list_uuid).
+ * Default requireRealContact=true: only companies with ≥1 real (non-support) contact.
  */
+const SUPPORT_INBOX_LOCAL =
+  /^(info|support|hello|contact|office|admin|sales|press|pr|marketing|jobs|careers|hr|team|studio|games|help|mail|general|business|bd|noreply|no-reply)$/i;
+
+function isRealPersonContactRow(c: {
+  first_name?: string | null;
+  last_name?: string | null;
+  name?: string | null;
+  position?: string | null;
+  work_email?: string | null;
+  email?: string | null;
+  linkedin?: string | null;
+}): boolean {
+  const first = (c.first_name ?? "").trim();
+  const last = (c.last_name ?? "").trim();
+  const name = (c.name ?? "").trim();
+  const position = c.position ?? "";
+  const linkedin = (c.linkedin ?? "").trim();
+  const hasIdentity = Boolean(first || last || /\s/.test(name) || linkedin);
+  if (!hasIdentity) return false;
+  if (/support\s+email/i.test(position) || /google\s+play\s+listing/i.test(position)) return false;
+  if (!first && !last && !/\s/.test(name) && !linkedin) {
+    const email = ((c.work_email ?? "").trim() || (c.email ?? "").trim());
+    const local = email.split("@")[0] ?? "";
+    if (SUPPORT_INBOX_LOCAL.test(local)) return false;
+  }
+  return true;
+}
+
 export async function getProjectCompanies(
   client: SupabaseClient,
   projectId: string,
@@ -3509,6 +3538,10 @@ export async function getProjectCompanies(
     emailOutreach?: string | null;
     replyStatus?: string | null;
     connectionStatus?: string | null;
+    /** Default true: only companies with ≥1 real (non-support) contact. */
+    requireRealContact?: boolean;
+    /** Company-level channel: multi | email_only | linkedin_only */
+    channelMode?: string | null;
   }
 ): Promise<{ data: ProjectCompanyRow[]; total: number; error: string | null }> {
   const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
@@ -3521,32 +3554,56 @@ export async function getProjectCompanies(
     searchPattern = `%${escaped}%`;
   }
 
+  const requireRealContact = options?.requireRealContact !== false;
+  const channelMode = options?.channelMode?.trim() || null;
+  const hasChannelGate = requireRealContact || Boolean(channelMode);
+
   const hasOutreach =
     Boolean(options?.linkedinOutreach?.trim()) ||
     Boolean(options?.emailOutreach?.trim()) ||
     Boolean(options?.replyStatus?.trim()) ||
     Boolean(options?.connectionStatus?.trim());
 
-  if (hasOutreach) {
+  if (hasOutreach || hasChannelGate) {
     const { data: pageRows, error: pageErr } = await client.rpc(
-      "filter_project_company_ids_by_outreach",
-      {
-        p_project_id: projectId,
-        p_linkedin_outreach: options?.linkedinOutreach?.trim() || null,
-        p_email_outreach: options?.emailOutreach?.trim() || null,
-        p_reply_status: options?.replyStatus?.trim() || null,
-        p_connection_status: options?.connectionStatus?.trim() || null,
-        p_list_uuid: options?.listUuid?.trim() || null,
-        p_search_pattern: searchPattern,
-        p_status: options?.status ?? null,
-        p_industry: options?.industry ?? null,
-        p_employees_range: options?.employeesRange ?? null,
-        p_hypothesis_id: options?.hypothesisId ?? null,
-        p_limit: limit,
-        p_offset: offset,
-        p_sort_by: options?.sortBy ?? "created_at",
-        p_sort_direction: options?.sortDirection ?? "desc",
-      }
+      hasOutreach
+        ? "filter_project_company_ids_by_outreach"
+        : "filter_project_company_ids_by_contact_channel",
+      hasOutreach
+        ? {
+            p_project_id: projectId,
+            p_linkedin_outreach: options?.linkedinOutreach?.trim() || null,
+            p_email_outreach: options?.emailOutreach?.trim() || null,
+            p_reply_status: options?.replyStatus?.trim() || null,
+            p_connection_status: options?.connectionStatus?.trim() || null,
+            p_list_uuid: options?.listUuid?.trim() || null,
+            p_search_pattern: searchPattern,
+            p_status: options?.status ?? null,
+            p_industry: options?.industry ?? null,
+            p_employees_range: options?.employeesRange ?? null,
+            p_hypothesis_id: options?.hypothesisId ?? null,
+            p_limit: limit,
+            p_offset: offset,
+            p_sort_by: options?.sortBy ?? "created_at",
+            p_sort_direction: options?.sortDirection ?? "desc",
+            p_require_real_contact: requireRealContact,
+            p_channel_mode: channelMode,
+          }
+        : {
+            p_project_id: projectId,
+            p_require_real_contact: requireRealContact,
+            p_channel_mode: channelMode,
+            p_list_uuid: options?.listUuid?.trim() || null,
+            p_search_pattern: searchPattern,
+            p_status: options?.status ?? null,
+            p_industry: options?.industry ?? null,
+            p_employees_range: options?.employeesRange ?? null,
+            p_hypothesis_id: options?.hypothesisId ?? null,
+            p_limit: limit,
+            p_offset: offset,
+            p_sort_by: options?.sortBy ?? "created_at",
+            p_sort_direction: options?.sortDirection ?? "desc",
+          }
     );
     if (pageErr) return { data: [], total: 0, error: pageErr.message };
 
@@ -3591,12 +3648,22 @@ export async function getProjectCompanies(
     if (companyIds.length > 0) {
       const { data: contactData } = await client
         .from(CONTACTS_TABLE)
-        .select("company_uuid, first_name, last_name, position, project_id")
+        .select("company_uuid, first_name, last_name, name, position, work_email, email, linkedin, project_id")
+        .eq("project_id", projectId)
         .in("company_uuid", companyIds)
         .order("created_at", { ascending: false })
-        .limit(companyIds.length * 10);
+        .limit(companyIds.length * 50);
 
       for (const c of (contactData ?? []) as Array<Record<string, unknown>>) {
+        if (!isRealPersonContactRow({
+          first_name: c.first_name as string | null,
+          last_name: c.last_name as string | null,
+          name: c.name as string | null,
+          position: c.position as string | null,
+          work_email: c.work_email as string | null,
+          email: c.email as string | null,
+          linkedin: c.linkedin as string | null,
+        })) continue;
         const cid = c.company_uuid as string;
         if (!contactsByCompany[cid]) contactsByCompany[cid] = [];
         contactCountByCompany[cid] = (contactCountByCompany[cid] ?? 0) + 1;
@@ -3711,12 +3778,22 @@ export async function getProjectCompanies(
     if (companyIds.length > 0) {
       const { data: contactData } = await client
         .from(CONTACTS_TABLE)
-        .select("company_uuid, first_name, last_name, position, project_id")
+        .select("company_uuid, first_name, last_name, name, position, work_email, email, linkedin, project_id")
+        .eq("project_id", projectId)
         .in("company_uuid", companyIds)
         .order("created_at", { ascending: false })
-        .limit(companyIds.length * 10);
+        .limit(companyIds.length * 50);
 
       for (const c of (contactData ?? []) as Array<Record<string, unknown>>) {
+        if (!isRealPersonContactRow({
+          first_name: c.first_name as string | null,
+          last_name: c.last_name as string | null,
+          name: c.name as string | null,
+          position: c.position as string | null,
+          work_email: c.work_email as string | null,
+          email: c.email as string | null,
+          linkedin: c.linkedin as string | null,
+        })) continue;
         const cid = c.company_uuid as string;
         if (!contactsByCompany[cid]) contactsByCompany[cid] = [];
         contactCountByCompany[cid] = (contactCountByCompany[cid] ?? 0) + 1;
@@ -3812,12 +3889,22 @@ export async function getProjectCompanies(
   if (companyIds.length > 0) {
     const { data: contactData } = await client
       .from(CONTACTS_TABLE)
-      .select("company_uuid, first_name, last_name, position, project_id")
+      .select("company_uuid, first_name, last_name, name, position, work_email, email, linkedin, project_id")
+      .eq("project_id", projectId)
       .in("company_uuid", companyIds)
       .order("created_at", { ascending: false })
-      .limit(companyIds.length * 10); // generous upper bound per page
+      .limit(companyIds.length * 50); // generous upper bound per page
 
     for (const c of (contactData ?? []) as Array<Record<string, unknown>>) {
+      if (!isRealPersonContactRow({
+        first_name: c.first_name as string | null,
+        last_name: c.last_name as string | null,
+        name: c.name as string | null,
+        position: c.position as string | null,
+        work_email: c.work_email as string | null,
+        email: c.email as string | null,
+        linkedin: c.linkedin as string | null,
+      })) continue;
       const cid = c.company_uuid as string;
       if (!contactsByCompany[cid]) contactsByCompany[cid] = [];
       contactCountByCompany[cid] = (contactCountByCompany[cid] ?? 0) + 1;
@@ -3892,6 +3979,10 @@ export async function getProjectContacts(
     emailOutreach?: string | null;
     replyStatus?: string | null;
     connectionStatus?: string | null;
+    /** Default true: hide support-inbox / non-person rows. */
+    realOnly?: boolean;
+    /** Person-level channel: multi | email_only | linkedin_only */
+    channelMode?: string | null;
   }
 ): Promise<{ data: ProjectContactListRow[]; total: number; error: string | null }> {
   const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
@@ -3910,6 +4001,8 @@ export async function getProjectContacts(
     p_offset: offset,
     p_sort_by: options?.sortBy ?? "created_at",
     p_sort_direction: options?.sortDirection ?? "desc",
+    p_real_only: options?.realOnly !== false,
+    p_channel_mode: options?.channelMode?.trim() || null,
   });
   if (error) return { data: [], total: 0, error: error.message };
   const rows = (data ?? []) as Array<Record<string, unknown>>;
