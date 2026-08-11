@@ -131,7 +131,9 @@ import {
 } from "./hermes-handlers.js";
 import {
   handleGetWelloreCompanies,
+  handleGetWelloreCompaniesSummary,
   handleGetWelloreContacts,
+  handleGetWelloreContactsSummary,
   handleGetWelloreCompanyCard,
 } from "./wellore-handlers.js";
 import {
@@ -1122,8 +1124,14 @@ const server = createServer(async (req, res) => {
       case "/api/wellore/companies":
         await handleGetWelloreCompanies(req, res);
         return;
+      case "/api/wellore/companies-summary":
+        await handleGetWelloreCompaniesSummary(req, res);
+        return;
       case "/api/wellore/contacts":
         await handleGetWelloreContacts(req, res);
+        return;
+      case "/api/wellore/contacts-summary":
+        await handleGetWelloreContactsSummary(req, res);
         return;
       case "/api/wellore/company-card":
         await handleGetWelloreCompanyCard(req, res);

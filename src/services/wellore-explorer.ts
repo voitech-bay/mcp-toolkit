@@ -23,6 +23,7 @@ export interface WelloreCompanyListRow {
   upcoming_count: number | null;
   has_hit: boolean | null;
   score_total: number | null;
+  score: Record<string, boolean> | null;
   recommended_channel: string | null;
   company_priority_segment: string | null;
   company_segment_reason: string | null;
@@ -94,6 +95,8 @@ export async function listWelloreCompanies(
     sourceList?: string | null;
     recommendedChannel?: string | null;
     search?: string | null;
+    hqCountry?: string | null;
+    hasDomain?: string | null;
     limit?: number;
     offset?: number;
     sortBy?: string | null;
@@ -112,6 +115,8 @@ export async function listWelloreCompanies(
     p_source_list: options?.sourceList?.trim() || null,
     p_recommended_channel: options?.recommendedChannel?.trim() || null,
     p_search: options?.search?.trim() || null,
+    p_hq_country: options?.hqCountry?.trim() || null,
+    p_has_domain: options?.hasDomain?.trim() || null,
     p_limit: limit,
     p_offset: offset,
     p_sort_by: options?.sortBy ?? "name",
@@ -123,6 +128,14 @@ export async function listWelloreCompanies(
   return {
     data: rows.map((r) => {
       const id = Number(r.id);
+      const rawScore = r.score;
+      let score: Record<string, boolean> | null = null;
+      if (rawScore && typeof rawScore === "object" && !Array.isArray(rawScore)) {
+        score = {};
+        for (const [k, v] of Object.entries(rawScore as Record<string, unknown>)) {
+          score[k] = Boolean(v);
+        }
+      }
       return {
         id,
         slug: (r.slug as string) ?? null,
@@ -139,6 +152,7 @@ export async function listWelloreCompanies(
         upcoming_count: r.upcoming_count == null ? null : Number(r.upcoming_count),
         has_hit: (r.has_hit as boolean) ?? null,
         score_total: r.score_total == null ? null : Number(r.score_total),
+        score,
         recommended_channel: (r.recommended_channel as string) ?? null,
         company_priority_segment: (r.company_priority_segment as string) ?? null,
         company_segment_reason: (r.company_segment_reason as string) ?? null,
@@ -163,6 +177,29 @@ export async function listWelloreCompanies(
     total,
     error: null,
   };
+}
+
+export async function getWelloreCompaniesSummary(
+  client: SupabaseClient,
+  options?: { population?: string | null; segment?: string | null }
+): Promise<{ data: Record<string, unknown> | null; error: string | null }> {
+  const { data, error } = await client.rpc("wellore_companies_summary", {
+    p_population: options?.population?.trim() || "foxdata",
+    p_segment: options?.segment?.trim() || "all",
+  });
+  if (error) return { data: null, error: error.message };
+  return { data: (data as Record<string, unknown>) ?? null, error: null };
+}
+
+export async function getWelloreContactsSummary(
+  client: SupabaseClient,
+  options?: { population?: string | null }
+): Promise<{ data: Record<string, unknown> | null; error: string | null }> {
+  const { data, error } = await client.rpc("wellore_contacts_summary", {
+    p_population: options?.population?.trim() || "foxdata",
+  });
+  if (error) return { data: null, error: error.message };
+  return { data: (data as Record<string, unknown>) ?? null, error: null };
 }
 
 export async function listWelloreContacts(

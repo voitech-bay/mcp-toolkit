@@ -4033,6 +4033,7 @@ export interface HypothesisRow {
   name: string;
   description: string | null;
   target_persona: string | null;
+  brief: Record<string, unknown> | null;
   created_at: string;
   target_count: number;
   /** Synced GetSales tag uuid when name matches GET /leads/api/tags. */
@@ -4213,6 +4214,7 @@ export async function getHypothesesWithCounts(
       name: row.name as string,
       description: (row.description as string) ?? null,
       target_persona: (row.target_persona as string) ?? null,
+      brief: (row.brief as Record<string, unknown> | null) ?? null,
       created_at: row.created_at as string,
       target_count,
       getsales_tag_uuid: tagUuid,
@@ -4552,6 +4554,7 @@ export async function createHypothesis(
     name: string;
     description?: string | null;
     targetPersona?: string | null;
+    brief?: Record<string, unknown> | null;
     /** Link to synced GetSales tag (hypotheses.getsales_tag_uuid). */
     getsalesTagUuid?: string | null;
     listUuids?: string[];
@@ -4563,6 +4566,7 @@ export async function createHypothesis(
     description: payload.description ?? null,
     target_persona: payload.targetPersona ?? null,
   };
+  if (payload.brief !== undefined) insert.brief = payload.brief;
   if (payload.getsalesTagUuid != null && payload.getsalesTagUuid !== "") {
     insert.getsales_tag_uuid = payload.getsalesTagUuid;
   }
@@ -4589,6 +4593,7 @@ export async function updateHypothesis(
     name?: string;
     description?: string | null;
     targetPersona?: string | null;
+    brief?: Record<string, unknown> | null;
     getsalesTagUuid?: string | null;
     listUuids?: string[];
   }
@@ -4597,6 +4602,7 @@ export async function updateHypothesis(
   if (payload.name !== undefined) update.name = payload.name;
   if (payload.description !== undefined) update.description = payload.description;
   if (payload.targetPersona !== undefined) update.target_persona = payload.targetPersona;
+  if (payload.brief !== undefined) update.brief = payload.brief;
   if (payload.getsalesTagUuid !== undefined) update.getsales_tag_uuid = payload.getsalesTagUuid;
   if (Object.keys(update).length > 0) {
     const { error } = await client.from(HYPOTHESES_TABLE).update(update).eq("id", id);

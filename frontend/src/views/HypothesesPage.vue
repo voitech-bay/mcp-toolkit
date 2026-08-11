@@ -20,9 +20,12 @@ import {
 import type { DataTableColumns, DataTableRowKey } from "naive-ui";
 import { LightbulbIcon, PlusIcon, Pencil, Trash2 } from "lucide-vue-next";
 import { useProjectStore } from "../stores/project";
+import { WELLORE_PROJECT_ID } from "../project-ids";
+import WelloreHypothesesPanel from "./WelloreHypothesesPanel.vue";
 
 const projectStore = useProjectStore();
 const message = useMessage();
+const isWellore = computed(() => projectStore.selectedProjectId === WELLORE_PROJECT_ID);
 
 // --- Types ---
 interface HypothesisRow {
@@ -603,7 +606,8 @@ function renderExpand(row: HypothesisRow) {
 </script>
 
 <template>
-  <div class="hypotheses-page">
+  <WelloreHypothesesPanel v-if="isWellore" />
+  <div v-else class="hypotheses-page">
     <NCard title="Project GTM context" :segmented="{ content: true }">
       <template #header-extra>
         <NSpace align="center">

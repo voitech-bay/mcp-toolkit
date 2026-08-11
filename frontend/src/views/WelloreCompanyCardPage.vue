@@ -15,14 +15,18 @@ import {
   NDivider,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
+import WelloreScoreIcons from "../components/WelloreScoreIcons.vue";
 
 interface TitleRow {
   id: number;
   title: string | null;
   store: string | null;
+  category: string | null;
   status: string | null;
   stage: string | null;
   est_release: string | null;
+  rating: number | null;
+  installs_band: string | null;
   is_hit: boolean | null;
   package_id: string | null;
   source_url: string | null;
@@ -93,9 +97,11 @@ function tag(status: unknown): "success" | "warning" | "error" | "default" | "in
 const titleColumns: DataTableColumns<TitleRow> = [
   { title: "Title", key: "title", render: (r) => r.title || "—" },
   { title: "Store", key: "store", render: (r) => r.store || "—" },
+  { title: "Category", key: "category", render: (r) => r.category || "—" },
   { title: "Status", key: "status", render: (r) => r.status || "—" },
-  { title: "Stage", key: "stage", render: (r) => r.stage || "—" },
   { title: "Est. release", key: "est_release", render: (r) => r.est_release || "—" },
+  { title: "Rating", key: "rating", render: (r) => (r.rating == null ? "—" : String(r.rating)) },
+  { title: "Installs", key: "installs_band", render: (r) => r.installs_band || "—" },
   {
     title: "Hit",
     key: "is_hit",
@@ -140,8 +146,8 @@ const contactColumns: DataTableColumns<ContactRow> = [
 
 const scoreBits = computed(() => {
   const score = company.value?.score;
-  if (!score || typeof score !== "object") return [] as Array<{ key: string; value: unknown }>;
-  return Object.entries(score as Record<string, unknown>).map(([key, value]) => ({ key, value }));
+  if (!score || typeof score !== "object") return null;
+  return score as Record<string, boolean>;
 });
 </script>
 
@@ -199,12 +205,18 @@ const scoreBits = computed(() => {
             <span>People: {{ people.length }}</span>
             <span>GP support: {{ gpSupport.length }}</span>
             <span>Titles: {{ titles.length }}</span>
-            <span v-if="company.score_total != null">Score: {{ company.score_total }}</span>
             <span v-if="company.recommended_channel">Channel: {{ company.recommended_channel }}</span>
             <span v-if="company.disqualification_reason" class="disq">
               Disqualifier: {{ company.disqualification_reason }}
             </span>
           </NSpace>
+
+          <div style="margin: 0.75rem 0 1rem">
+            <WelloreScoreIcons
+              :score="scoreBits"
+              :score-total="company.score_total == null ? null : Number(company.score_total)"
+            />
+          </div>
 
           <NDivider />
 
@@ -251,14 +263,6 @@ const scoreBits = computed(() => {
                 :bordered="false"
                 :row-key="(r: ContactRow) => r.id"
               />
-            </NCollapseItem>
-            <NCollapseItem title="Score bits" name="score">
-              <NEmpty v-if="scoreBits.length === 0" description="No score object" />
-              <ul v-else class="score-list">
-                <li v-for="bit in scoreBits" :key="bit.key">
-                  <strong>{{ bit.key }}</strong>: {{ bit.value }}
-                </li>
-              </ul>
             </NCollapseItem>
             <NCollapseItem title="POV / notes" name="pov">
               <pre v-if="company.pov || company.notes" class="pov">{{ company.pov || company.notes }}</pre>

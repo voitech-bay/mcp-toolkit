@@ -1,7 +1,9 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { getSupabase } from "./services/supabase.js";
 import {
+  getWelloreCompaniesSummary,
   getWelloreCompanyCard,
+  getWelloreContactsSummary,
   isWelloreProjectId,
   listWelloreCompanies,
   listWelloreContacts,
@@ -61,6 +63,8 @@ export async function handleGetWelloreCompanies(
     sourceList: params.get("sourceList") ?? undefined,
     recommendedChannel: params.get("recommendedChannel") ?? undefined,
     search: params.get("search") ?? undefined,
+    hqCountry: params.get("hqCountry") ?? undefined,
+    hasDomain: params.get("hasDomain") ?? undefined,
     sortBy: params.get("sortBy") ?? undefined,
     sortDirection,
     limit,
@@ -73,6 +77,67 @@ export async function handleGetWelloreCompanies(
   }
   res.writeHead(200);
   res.end(JSON.stringify({ data: result.data, total: result.total }));
+}
+
+export async function handleGetWelloreCompaniesSummary(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET", "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  if (!requireWelloreProject(res, params.get("projectId"))) return;
+  const result = await getWelloreCompaniesSummary(client, {
+    population: params.get("population") ?? undefined,
+    segment: params.get("segment") ?? undefined,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: null, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
+}
+
+export async function handleGetWelloreContactsSummary(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET", "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const params = getQueryParams(req);
+  if (!requireWelloreProject(res, params.get("projectId"))) return;
+  const result = await getWelloreContactsSummary(client, {
+    population: params.get("population") ?? undefined,
+  });
+  if (result.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ data: null, error: result.error }));
+    return;
+  }
+  res.writeHead(200);
+  res.end(JSON.stringify({ data: result.data }));
 }
 
 export async function handleGetWelloreContacts(
