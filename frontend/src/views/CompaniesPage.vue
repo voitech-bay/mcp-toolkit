@@ -196,6 +196,12 @@ const emptyCompaniesDescription = computed(() => {
   }
   return "No companies in this project — check “Show all” to browse and add";
 });
+const rangeLabel = computed(() => {
+  if (total.value === 0) return "Showing 0 of 0";
+  const start = (page.value - 1) * pageSize.value + 1;
+  const end = Math.min(page.value * pageSize.value, total.value);
+  return `Showing ${start}–${end} of ${total.value}`;
+});
 const editorOpen = ref(false);
 const editorSaving = ref(false);
 const editingCompanyId = ref<string | null>(null);
@@ -805,7 +811,8 @@ async function submitAddToHypothesis() {
         <div class="toolbar-left">
           <BuildingIcon :size="18" class="page-icon" />
           <span class="page-title">Companies</span>
-          <NTag v-if="total > 0" size="small" :bordered="false">{{ total }}</NTag>
+          <NTag v-if="total > 0 || !loading" size="small" :bordered="false" type="info">{{ total }}</NTag>
+          <span class="range-label">{{ rangeLabel }}</span>
         </div>
         <div class="toolbar-right">
           <span v-if="loading" class="toolbar-loading-hint">Loading…</span>
@@ -1044,6 +1051,11 @@ async function submitAddToHypothesis() {
 .page-title {
   font-size: 1.1rem;
   font-weight: 600;
+}
+
+.range-label {
+  font-size: 12px;
+  color: #6b7280;
 }
 
 .toolbar-right {

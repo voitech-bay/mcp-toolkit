@@ -404,7 +404,7 @@ const pagination = computed(() => ({
         <NSpace align="center">
           <UsersIcon :size="18" class="page-icon" />
           <span class="page-title">Wellore contacts</span>
-          <NTag size="small" :bordered="false">{{ total }}</NTag>
+          <NTag size="small" :bordered="false" type="info">{{ total }}</NTag>
         </NSpace>
         <span class="range">{{ rangeLabel }}</span>
       </div>

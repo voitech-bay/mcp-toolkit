@@ -15,6 +15,7 @@ import {
   NCollapse,
   NCollapseItem,
   NSpin,
+  NTag,
   useMessage,
 } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
@@ -486,6 +487,8 @@ const pagination = computed(() => ({
         <NSpace align="center">
           <BuildingIcon :size="18" class="page-icon" />
           <span class="page-title">Wellore companies</span>
+          <NTag size="small" :bordered="false" type="info">{{ total }}</NTag>
+          <span class="range">{{ rangeLabel }}</span>
         </NSpace>
       </div>
     </template>

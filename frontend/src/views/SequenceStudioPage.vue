@@ -179,6 +179,13 @@ function channelSummary(row: StudioLead, channel: string): ChannelSummary {
   return row.statusSummary?.[channel] ?? { total: 0, approved: 0, needsReview: 0, pushed: 0, latestStatus: null };
 }
 
+const resultsLabel = computed(() => {
+  if (total.value === 0) return loading.value ? "Loading…" : "0 contacts match filters";
+  const start = (page.value - 1) * pageSize.value + 1;
+  const end = Math.min(page.value * pageSize.value, total.value);
+  return `Showing ${start}–${end} of ${total.value} contacts`;
+});
+
 function channelMessages(row: StudioLead, channel: string) {
   return (row.messages ?? []).filter((message) => String(message.channel) === channel);
 }
@@ -706,6 +713,11 @@ onMounted(async () => {
       <NButton :loading="loading" @click="load">Refresh</NButton>
     </div>
 
+    <div class="results-bar">
+      <NTag size="medium" :bordered="false" type="info">{{ total }}</NTag>
+      <span class="results-label">{{ resultsLabel }}</span>
+    </div>
+
     <div v-if="rows.length || selectedCount" class="bulk-bar">
       <NCheckbox
         :checked="allSelectedOnPage"
@@ -998,6 +1010,8 @@ onMounted(async () => {
 .header-row h1{margin:0}
 .toolbar{display:grid;grid-template-columns:repeat(6,minmax(150px,1fr)) auto;gap:10px;align-items:center;margin-bottom:12px}
 .toolbar :deep(.n-input),.toolbar :deep(.n-base-selection){min-height:34px}
+.results-bar{display:flex;align-items:center;gap:10px;margin:0 0 12px}
+.results-label{font-size:13px;color:#94a3b8}
 .scope-banner{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
 .bulk-bar{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:12px;padding:10px 12px;border:1px solid rgba(148,163,184,.25);border-radius:10px;background:rgba(15,23,42,.45);position:sticky;top:0;z-index:2}
 .muted{color:#cbd5e1;font-size:.86em}

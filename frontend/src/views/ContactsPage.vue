@@ -470,6 +470,13 @@ const pagination = computed(() => ({
   onUpdatePageSize,
 }));
 
+const rangeLabel = computed(() => {
+  if (total.value === 0) return "Showing 0 of 0";
+  const start = (page.value - 1) * pageSize.value + 1;
+  const end = Math.min(page.value * pageSize.value, total.value);
+  return `Showing ${start}–${end} of ${total.value}`;
+});
+
 const dataColumns = computed((): DataTableColumns<ContactRow> => [
   {
     key: "avatar",
@@ -659,7 +666,8 @@ const tableScrollX = computed(() =>
         <div style="display:flex;align-items:center;gap:8px">
           <UsersIcon :size="16" />
           <span>Contacts</span>
-          <NTag v-if="projectStore.selectedProjectId" size="small" :bordered="false">{{ total }}</NTag>
+          <NTag v-if="projectStore.selectedProjectId" size="small" :bordered="false" type="info">{{ total }}</NTag>
+          <span v-if="projectStore.selectedProjectId" class="range-label">{{ rangeLabel }}</span>
           <span v-if="loading" style="opacity:0.6;font-size:0.82rem">Loading…</span>
         </div>
         <NSpace size="small" align="center" wrap>
@@ -795,6 +803,10 @@ const tableScrollX = computed(() =>
 </template>
 
 <style scoped>
+.range-label {
+  font-size: 12px;
+  color: #6b7280;
+}
 .filters {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
