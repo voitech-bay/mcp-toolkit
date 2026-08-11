@@ -118,6 +118,42 @@ Decisions worth knowing:
 - Needs `INSTANTLY_API_KEY`, which is in local `.env` but still not on Railway, so this runs
   as a local ops script for now.
 
+## Attaching research to Wellore emails (added 2026-08-11)
+
+`src/scripts/attach-wellore-research.ts` (`npm run attach:wellore-research -- [--apply]`)
+fills Email Studio's Research panel for every Wellore email. Reads only, no LLM spend.
+
+The panel reads `outreach_research_snapshots.structured_research.verified_signals` /
+`.inferred_priorities` via `stableResearchPoints`. Wellore's research lives in two other
+places (`wellore_research_snapshots` and `wellore_companies.pov` / `wellore_signals` /
+`wellore_titles`), so without this bridge every Wellore email reads "No structured research
+attached" even when the pipeline has plenty on that company.
+
+- **Signals come from `wellore_titles` and `wellore_signals` directly, not from the reviewed
+  bundle's own `verified_signals`.** `assembleWelloreResearch` sorts by date and caps at 8,
+  and the pipeline writes one "site responds to a HEAD request" row per crawl, so that cap
+  fills with liveness probes. Nitro Games has 68 signal rows and its reviewed bundle
+  surfaced one useful fact; reading the tables directly gives 5. `isLivenessProbe` drops the
+  probes and `titleSignals` puts titles first, since an upcoming title with a date is the
+  reason to write at all.
+- **Titles with `status = 'unknown'` are excluded.** That status means the pipeline never
+  determined a stage. Presenting it as fact is exactly the Wobbly Life mistake, where a
+  defaulted stage got read as real.
+- **Hand-curated snapshots are preserved.** Pipeline points are merged in behind them and
+  curated points keep their positions, because `stableResearchPoints` derives ids
+  positionally and a shift would break the annotations that reference them.
+- **The content hash is canonical (keys sorted recursively).** Postgres normalizes jsonb key
+  order, so hashing a raw `JSON.stringify` of a snapshot read back from the database yields
+  a different digest than the one written and mints a fresh snapshot on every run. This bit
+  twice during the build; three consecutive `--apply` runs now report 13 unchanged.
+- Snapshots this script produced carry an `origin`; orphans are cleaned up at the end of an
+  apply run. Hand-curated snapshots have no `origin` and are never deleted.
+
+Current coverage: all 39 Wellore emails have research. GFD Studio has no POV, so its two
+contacts get title and news signals only. Gameduo's Jae Young Park gets POV points but zero
+verified signals, because both Gameduo titles are `status = 'unknown'` and its only other
+signals are liveness probes.
+
 ## Endpoints added
 
 | route | purpose |
