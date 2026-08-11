@@ -3,7 +3,7 @@ begin;
 create table if not exists public.project_knowledge_documents (
   id uuid primary key default gen_random_uuid(),
   project_id uuid not null references public."Projects"(id) on delete cascade,
-  kind text not null check (kind in ('product_truth','proof_points','icp_angle_framework','forbidden_claims','messaging_style','inmail_guidelines','message_guidelines','examples')),
+  kind text not null check (kind in ('product_truth','proof_points','icp_angle_framework','forbidden_claims','messaging_style','inmail_guidelines','message_guidelines','examples','demo_assets','meeting_summary','canonical_context')),
   title text not null,
   version integer not null check (version > 0),
   content_markdown text not null,

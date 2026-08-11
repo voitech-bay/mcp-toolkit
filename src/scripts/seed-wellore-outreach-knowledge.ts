@@ -1,8 +1,20 @@
 import "dotenv/config";
 import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getSupabase } from "../services/supabase.js";
 
 const PROJECT_ID = process.env.WELLORE_PROJECT_ID?.trim() || "0038d0db-aab2-40f1-9f6e-38d38e157f8f";
+const HERE = dirname(fileURLToPath(import.meta.url));
+const AI_TOOLKIT = process.env.AI_TOOLKIT_ROOT?.trim() || join(HERE, "../../../ai-toolkit");
+const CANONICAL = join(AI_TOOLKIT, "projects/Wellore/context/canonical");
+
+function readCanonical(name: string): string {
+  const path = join(CANONICAL, name);
+  if (!existsSync(path)) throw new Error(`Missing canonical digest: ${path}`);
+  return readFileSync(path, "utf8").trim();
+}
 
 const documents = [
   {
@@ -161,7 +173,45 @@ CTA patterns to avoid:
 - "without stretching art/the team" (abstract)
 - "you still need ..." (states an invented need as fact)`,
   },
-] as const;
+  {
+    kind: "icp_angle_framework",
+    title: "ICP and hard filters",
+    priority: 25,
+    source_path: "projects/Wellore/context/canonical/icp-and-filters.md",
+    content: readCanonical("icp-and-filters.md"),
+  },
+  {
+    kind: "product_truth",
+    title: "Pains and buying signals",
+    priority: 18,
+    source_path: "projects/Wellore/context/canonical/pains-and-signals.md",
+    content: readCanonical("pains-and-signals.md"),
+  },
+  {
+    kind: "proof_points",
+    title: "Narrative cases for outreach",
+    priority: 22,
+    source_path: "projects/Wellore/context/canonical/narrative-cases-for-outreach.md",
+    content: readCanonical("narrative-cases-for-outreach.md"),
+  },
+  {
+    kind: "meeting_summary",
+    title: "Founder meeting decisions",
+    priority: 28,
+    source_path: "projects/Wellore/context/canonical/meeting-summaries.md",
+    content: readCanonical("meeting-summaries.md"),
+  },
+];
+
+const GTM_CONTEXT = {
+  core_concept: `Wellore Limited (Hong Kong): 14+ years in game development, outsourcing, and startup acceleration. Full-cycle Unity/Unreal or targeted augmentation (prototype, art, features, optimization, ports, LiveOps). Tagline: Your Vision, Our Expertise.`,
+  icp_description: readCanonical("icp-and-filters.md"),
+  pains_and_signals: readCanonical("pains-and-signals.md"),
+  expertise_and_differentiators: `Six-stage delivery (concept → LiveOps) plus any-stage rescue, audit, modular features, monetization/analytics, Web3, and team augmentation. Mobile LiveOps/monetization expertise demonstrated in cleared mobile portfolio cases. One messaging ruleset across all list segments.`,
+  proof_and_customer_cases: `${readCanonical("narrative-cases-for-outreach.md")}\n\n---\nAlso use the active knowledge doc "10 cleared portfolio cases" for named metrics in cold email.`,
+  objections_and_competitors: `Do not open with historical "we worked together" on old logos (landmine). Investment/analytics advisory is paused for cold packaging. Individual non-industry buyers are high margin but nearly unfindable on LinkedIn — not wave-1. Godot micro-runners are weak fit.`,
+  exclusions: `RU + UA out. Company size >250 out. China, LatAm, Africa, India out; US on hold for v1. Wishlists ignored in v1. Publishers only via separate publisher_partner lane. Do not invent prospect problems or discipline-level AAA credits.`,
+};
 
 async function main(): Promise<void> {
   const client = getSupabase();
@@ -181,9 +231,20 @@ async function main(): Promise<void> {
     upgraded += 1;
   }
 
+  const gtm = await client.from("project_gtm_contexts").upsert(
+    {
+      project_id: PROJECT_ID,
+      ...GTM_CONTEXT,
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "project_id" }
+  ).select("project_id,updated_at").single();
+  if (gtm.error) throw new Error(`project_gtm_contexts upsert failed: ${gtm.error.message}`);
+
   const configured = await client.from("project_outreach_settings").update({ updated_at: new Date().toISOString() }).eq("project_id", PROJECT_ID);
   if (configured.error) throw new Error(configured.error.message);
   console.log(`Wellore outreach knowledge: ${documents.length} documents checked, ${upgraded} upgraded to a new active version.`);
+  console.log(`Wellore project_gtm_contexts upserted at ${gtm.data?.updated_at ?? "unknown"}.`);
 }
 
 main().catch((err) => {

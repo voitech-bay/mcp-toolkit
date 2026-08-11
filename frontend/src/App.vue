@@ -220,7 +220,7 @@ const backlogMenuOptions: DropdownOption[] = [
     icon: () => h(NetworkIcon, { size: 14 }),
   },
   {
-    label: "Saved contexts",
+    label: "Saved reply contexts",
     key: "/context-snapshots",
     icon: () => h(BookmarkIcon, { size: 14 }),
   },

@@ -37,7 +37,7 @@ const router = createRouter({
       meta: { title: "Hypothesis contacts (tag) | MCP Toolkit" },
     },
     { path: "/context", name: "Context", component: () => import("../views/ContextBuilderPage.vue"), meta: { title: "Context Map | MCP Toolkit" } },
-    { path: "/context-snapshots", name: "ContextSnapshots", component: () => import("../views/ContextSnapshotsPage.vue"), meta: { title: "Saved Contexts | MCP Toolkit" } },
+    { path: "/context-snapshots", name: "ContextSnapshots", component: () => import("../views/ContextSnapshotsPage.vue"), meta: { title: "Saved Reply Contexts | MCP Toolkit" } },
     { path: "/conversations", name: "Conversations", component: () => import("../views/ConversationsPage.vue"), meta: { title: "Conversations | MCP Toolkit" } },
     { path: "/getsales-tags", name: "GetSalesTags", component: () => import("../views/GetSalesTagsPage.vue"), meta: { title: "GetSales tags | MCP Toolkit" } },
     { path: "/enrichment", name: "EnrichmentTable", component: () => import("../views/EnrichmentTablePage.vue"), meta: { title: "Enrichment | MCP Toolkit" } },
