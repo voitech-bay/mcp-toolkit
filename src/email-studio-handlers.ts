@@ -167,6 +167,7 @@ export async function handleEmailStudioList(req: IncomingMessage, res: ServerRes
   const campaign = q.get("campaign"); if (campaign) query = query.eq("campaign_id", campaign);
   const sequenceId = q.get("sequenceId"); if (sequenceId && UUID_RE.test(sequenceId)) query = query.eq("sequence_id", sequenceId);
   const persona = q.get("persona"); if (persona) query = query.eq("persona", persona);
+  const contactId = q.get("contactId"); if (contactId && UUID_RE.test(contactId)) query = query.eq("contact_id", contactId);
   const reviewer = q.get("reviewer"); if (reviewer) query = query.eq("assigned_reviewer_id", reviewer);
   const quality = q.get("researchQuality"); if (quality && ["verified","partial","missing","unknown"].includes(quality)) query = query.eq("research_quality", quality);
   const model = q.get("model"); if (model) query = query.eq("current_model", model);

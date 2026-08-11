@@ -4,12 +4,25 @@ import { useRoute } from "vue-router";
 import { NAlert, NAvatar, NButton, NCard, NCheckbox, NCollapse, NCollapseItem, NDataTable, NDrawer, NDrawerContent, NEmpty, NFormItem, NInput, NInputNumber, NModal, NPagination, NSelect, NSpace, NSpin, NTabPane, NTabs, NTag, NText, useDialog, useMessage, type DataTableColumns } from "naive-ui";
 import { useProjectStore } from "../stores/project";
 import VelvetechLinkedInDraftsPanel from "../components/VelvetechLinkedInDraftsPanel.vue";
-import { isVelvetechProjectId } from "../project-ids";
+import { isVelvetechProjectId, isWelloreProjectId } from "../project-ids";
 import { useWorkflowLaunch, type LaunchableWorkflow } from "../composables/useWorkflowLaunch";
 import { htmlToPlaintext } from "../utils/htmlPlaintext";
 
 type Json = Record<string, any>;
-interface EmailRow extends Json { id:string; contact_name:string; company_name:string; batch_name:string; persona:string; channel:string; sequence_step:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
+interface EmailRow extends Json { id:string; contact_id?:string; contact_name:string; company_name:string; recipient_email?:string; campaign_id?:string; batch_name:string; persona:string; channel:string; sequence_step:number; step_number?:number; current_subject:string; status:string; open_comment_count:number; updated_at:string; sent_at:string|null }
+interface ContactGroup {
+  contactId: string;
+  contactName: string;
+  companyName: string;
+  recipientEmail: string;
+  stepCount: number;
+  openCommentCount: number;
+  worstStatus: string;
+  updatedAt: string | null;
+  emails: EmailRow[];
+  openEmailId: string;
+}
+interface ResearchCitation { title: string; url: string; supports: string }
 interface Annotation { id:string; text:string; start:number; end:number; purpose:string; research_point_ids:string[]; instruction_ids:string[]; explanation:string; classification:"verified"|"product_truth"|"instruction"|"inference"; confidence:string; warnings:string[] }
 interface PickerContact extends Json { uuid:string; name?:string; first_name?:string; last_name?:string; company_name?:string; position?:string; work_email?:string; avatar_url?:string }
 interface StyleSource extends Json { id:string; name:string; technique_summary:string; prompt_block:string; tags?:string[] }
@@ -20,6 +33,10 @@ const route = useRoute();
 const { launching: launchingN8n, workflows, loadWorkflows, launch } = useWorkflowLaunch();
 const studioTab = ref<"email" | "linkedin">("email");
 const isVelvetech = computed(() => isVelvetechProjectId(store.selectedProjectId));
+const isWellore = computed(() => isWelloreProjectId(store.selectedProjectId));
+const stylePlaceholder = computed(() =>
+  isWellore.value ? "Default Wellore style" : isVelvetech.value ? "Default Velvetech style" : "Default project style"
+);
 const rows = ref<EmailRow[]>([]), total = ref(0), page = ref(1), pageSize = ref(25), loading = ref(false), error = ref("");
 const search = ref(""), statusFilter = ref<string|null>(null), campaignFilter = ref(""), batchFilter = ref(""), personaFilter = ref(""), reviewerFilter = ref(""), modelFilter = ref(""), qualityFilter = ref<string|null>(null), dateFrom = ref(""), dateTo = ref(""), openOnly = ref(false), savedView = ref("all"), channelFilter = ref("email");
 const detailOpen = ref(false), detailLoading = ref(false), detail = ref<Json|null>(null), selectedId = ref("");
@@ -33,6 +50,8 @@ const styleSources = ref<StyleSource[]>([]);
 const styleSourceId = ref<string | null>(null);
 const instructionOpen = ref(false);
 const selectedInstruction = ref<InstructionDoc | null>(null);
+const sequenceEmails = ref<EmailRow[]>([]);
+const sequenceContactId = ref<string | null>(null);
 
 const humanize = (value:string) => value.replace(/_/g, " ");
 // Multi-touch sequences store LinkedIn DMs in the same table as emails, so they share
@@ -64,6 +83,121 @@ const styleSourceOptions = computed(() => styleSources.value.map((source) => ({
   value: source.id,
 })));
 const selectedStyleSource = computed(() => styleSources.value.find((source) => source.id === styleSourceId.value) ?? null);
+
+const DONE_STATUSES = new Set(["approved", "sent", "rejected"]);
+const STATUS_SEVERITY: Record<string, number> = {
+  generation_failed: 100, sending_failed: 95, rejected: 90, research_missing: 85, changes_requested: 80,
+  comments_made: 70, final_check: 60, needs_review: 55, regenerated: 50, ai_draft_made: 40,
+  research_ready: 30, approved: 20, sent: 10,
+};
+
+function stepOf(row: EmailRow): number {
+  return Number(row.sequence_step ?? row.step_number ?? 0) || 0;
+}
+function sortEmailsByStep(emails: EmailRow[]): EmailRow[] {
+  return [...emails].sort((a, b) => stepOf(a) - stepOf(b) || String(a.id).localeCompare(String(b.id)));
+}
+function worstStatus(emails: EmailRow[]): string {
+  return emails.slice().sort((a, b) => (STATUS_SEVERITY[b.status] ?? 0) - (STATUS_SEVERITY[a.status] ?? 0))[0]?.status || "research_missing";
+}
+function pickOpenStep(emails: EmailRow[]): EmailRow {
+  const sorted = sortEmailsByStep(emails);
+  return sorted.find((e) => !DONE_STATUSES.has(e.status)) ?? sorted[0];
+}
+function contactGroupKey(row: EmailRow): string {
+  return String(row.contact_id || row.id);
+}
+const contactGroups = computed<ContactGroup[]>(() => {
+  const map = new Map<string, EmailRow[]>();
+  for (const row of rows.value) {
+    const key = contactGroupKey(row);
+    const list = map.get(key) ?? [];
+    list.push(row);
+    map.set(key, list);
+  }
+  return [...map.entries()].map(([contactId, emails]) => {
+    const sorted = sortEmailsByStep(emails);
+    const open = pickOpenStep(sorted);
+    return {
+      contactId,
+      contactName: open.contact_name || "Unknown",
+      companyName: open.company_name || "",
+      recipientEmail: String(open.recipient_email || ""),
+      stepCount: sorted.length,
+      openCommentCount: sorted.reduce((sum, e) => sum + Number(e.open_comment_count || 0), 0),
+      worstStatus: worstStatus(sorted),
+      updatedAt: sorted.map((e) => e.updated_at).filter(Boolean).sort().slice(-1)[0] ?? null,
+      emails: sorted,
+      openEmailId: open.id,
+    };
+  });
+});
+const sequenceSorted = computed(() => sortEmailsByStep(sequenceEmails.value));
+const selectedSequenceIndex = computed(() => sequenceSorted.value.findIndex((e) => e.id === selectedId.value));
+const researchStructured = computed<Json | null>(() => {
+  const snap = detail.value?.research;
+  if (!snap || typeof snap !== "object") return null;
+  const structured = snap.structured_research;
+  return (structured && typeof structured === "object" ? structured : snap) as Json;
+});
+const researchCitations = computed<ResearchCitation[]>(() => {
+  const snap = detail.value?.research;
+  if (!snap) return [];
+  const structured = researchStructured.value;
+  const raw = Array.isArray(snap.citations) ? snap.citations
+    : Array.isArray(structured?.citations) ? structured!.citations
+    : [];
+  return (raw as Json[]).map((c) => {
+    const title = String(c.title || c.statement || c.source || "Source").trim();
+    const url = String(c.url || (typeof c.source === "string" && /^https?:\/\//i.test(c.source) ? c.source : "") || "").trim();
+    const supports = String(c.supports || c.statement || c.source || "").trim();
+    if (!title && !url && !supports) return null;
+    return { title: title || url || "Citation", url, supports: supports === title ? "" : supports };
+  }).filter((c): c is ResearchCitation => Boolean(c));
+});
+const researchVerifiedList = computed<string[]>(() => {
+  const structured = researchStructured.value;
+  const raw = Array.isArray(structured?.verified_signals) ? structured!.verified_signals : [];
+  return (raw as Json[]).map((x) => typeof x === "string" ? x : String(x.statement || "")).map((s) => s.trim()).filter(Boolean);
+});
+const researchInferredList = computed<string[]>(() => {
+  const structured = researchStructured.value;
+  const raw = Array.isArray(structured?.inferred_priorities) ? structured!.inferred_priorities : [];
+  return (raw as Json[]).map((x) => typeof x === "string" ? x : String(x.statement || "")).map((s) => s.trim()).filter(Boolean);
+});
+const researchGaps = computed<string[]>(() => {
+  const snap = detail.value?.research;
+  const structured = researchStructured.value;
+  const raw = Array.isArray(snap?.gaps) ? snap.gaps
+    : Array.isArray(structured?.gaps) ? structured!.gaps
+    : [];
+  return (raw as unknown[]).map((x) => String(x).trim()).filter(Boolean);
+});
+const N8N_SUMMARY_KEYS = [
+  "fit_score", "vertical", "pressure_points", "velvetech_angle", "discovery_questions",
+  "pov_summary", "pov_hook", "pov_wellore_angle", "brief_markdown", "company_name", "domain",
+];
+function summarizeN8nResult(result: unknown): Array<{ key: string; value: string }> {
+  if (!result || typeof result !== "object") return [{ key: "result", value: String(result ?? "") }];
+  const obj = result as Json;
+  const out: Array<{ key: string; value: string }> = [];
+  for (const key of N8N_SUMMARY_KEYS) {
+    if (obj[key] == null || obj[key] === "") continue;
+    const v = obj[key];
+    out.push({
+      key: humanize(key),
+      value: Array.isArray(v) ? v.map((x) => (typeof x === "string" ? x : JSON.stringify(x))).join("; ")
+        : typeof v === "object" ? JSON.stringify(v) : String(v),
+    });
+  }
+  if (!out.length) {
+    for (const [key, v] of Object.entries(obj).slice(0, 8)) {
+      if (v == null || typeof v === "object") continue;
+      out.push({ key: humanize(key), value: String(v) });
+    }
+  }
+  return out;
+}
 
 function contactLabel(c: PickerContact): string {
   return (typeof c.name === "string" && c.name.trim())
@@ -100,22 +234,22 @@ function shouldIgnoreRowClick(event: MouseEvent): boolean {
   return target instanceof Element && Boolean(target.closest("a, button, input, textarea, select, [role='button']"));
 }
 
-const emailRowProps = (row: EmailRow) => ({
+const emailRowProps = (row: ContactGroup) => ({
   class: "clickable-email-row",
   onClick: (event: MouseEvent) => {
     if (shouldIgnoreRowClick(event)) return;
-    void openEmail(row.id);
+    void openContactGroup(row);
   },
 });
 
-const columns:DataTableColumns<EmailRow> = [
-  {title:"Contact",key:"contact_name",render:r=>h("div",[h("a",{class:"email-studio-link",href:"#",onClick:(e:MouseEvent)=>{e.preventDefault();void openEmail(r.id)}},r.contact_name||"Unknown"),h("div",{class:"muted"},r.recipient_email||"")])},
-  {title:"Company",key:"company_name"},{title:"Batch",key:"batch_name"},{title:"Persona",key:"persona"},
-  {title:"Channel",key:"channel",width:110,render:r=>h(NTag,{size:"small",type:r.channel==="email"?"default":"info"},{default:()=>humanize(r.channel||"email")})},
-  {title:"Step",key:"sequence_step",width:65},
-  {title:"Subject",key:"current_subject",ellipsis:{tooltip:true}},{title:"Status",key:"status",render:r=>h("div",{class:"status-cell"},[h(NTag,{size:"small",type:statusType(r.status) as any},{default:()=>humanize(r.status)}),r.status==="research_missing"?h(NButton,{size:"tiny",secondary:true,type:"primary",loading:launchingN8n.value,disabled:!emailResearchWorkflow.value?.configured,onClick:(e:MouseEvent)=>{e.stopPropagation();void launchEmailResearch(r)}},{default:()=>"Launch n8n"}):null])},
-  {title:"Comments",key:"open_comment_count",width:90},{title:"Updated",key:"updated_at",render:r=>fmt(r.updated_at)},
-  {title:"",key:"actions",width:90,render:r=>h(NButton,{size:"small",type:"primary",secondary:true,onClick:()=>openEmail(r.id)},{default:()=>"Review"})},
+const columns:DataTableColumns<ContactGroup> = [
+  {title:"Contact",key:"contactName",render:r=>h("div",[h("a",{class:"email-studio-link",href:"#",onClick:(e:MouseEvent)=>{e.preventDefault();void openContactGroup(r)}},r.contactName||"Unknown"),h("div",{class:"muted"},r.recipientEmail||"")])},
+  {title:"Company",key:"companyName"},
+  {title:"Steps",key:"stepCount",width:80,render:r=>h(NTag,{size:"small"},{default:()=>`E1–E${Math.max(1, r.stepCount)} · ${r.stepCount}`})},
+  {title:"Status",key:"worstStatus",render:r=>h(NTag,{size:"small",type:statusType(r.worstStatus) as any},{default:()=>humanize(r.worstStatus)})},
+  {title:"Comments",key:"openCommentCount",width:90},
+  {title:"Updated",key:"updatedAt",render:r=>fmt(r.updatedAt)},
+  {title:"",key:"actions",width:100,render:r=>h(NButton,{size:"small",type:"primary",secondary:true,onClick:()=>openContactGroup(r)},{default:()=>"Open"})},
 ];
 
 const pickerColumns: DataTableColumns<PickerContact> = [
@@ -194,8 +328,76 @@ watch([pickerSearch, pickerPage, pickerPageSize], () => {
 watch(pickerSearch, () => { pickerPage.value = 1; });
 watch(createOpen, (open) => { if (!open) resetCreateForm(); });
 
-async function openEmail(id:string) { selectedId.value=id; detailOpen.value=true; detailLoading.value=true; candidate.value=null; try { const r=await fetch(`/api/email-studio/emails/${id}?projectId=${store.selectedProjectId}`); const j=await r.json(); if(!r.ok)throw new Error(j.error); detail.value=j; subject.value=j.currentVersion?.subject??""; emailBody.value=htmlToPlaintext(j.currentVersion?.body??""); selectedResearch.value=(j.researchPoints??[]).map((x:Json)=>x.id); dirty.value=false; if(j.data.status==="ai_draft_made") await setStatus("needs_review",false); } catch(e){toast.error(e instanceof Error?e.message:"Could not open email")} finally{detailLoading.value=false} }
-async function refreshDetail(){if(selectedId.value)await openEmail(selectedId.value)}
+async function loadSequenceForContact(contactId: string, seed?: EmailRow | null) {
+  if (!store.selectedProjectId || !contactId) {
+    sequenceContactId.value = contactId || null;
+    sequenceEmails.value = seed ? [seed] : [];
+    return;
+  }
+  sequenceContactId.value = contactId;
+  try {
+    const q = new URLSearchParams({
+      projectId: String(store.selectedProjectId),
+      contactId,
+      page: "1",
+      pageSize: "50",
+      channel: channelFilter.value || "email",
+    });
+    const r = await fetch(`/api/email-studio/emails?${q}`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "Could not load sequence");
+    let emails = sortEmailsByStep((j.data ?? []) as EmailRow[]);
+    if (seed && (seed.campaign_id || seed.batch_name)) {
+      const filtered = emails.filter((e) =>
+        (!seed.campaign_id || e.campaign_id === seed.campaign_id)
+        && (!seed.batch_name || e.batch_name === seed.batch_name)
+      );
+      if (filtered.length) emails = filtered;
+    }
+    if (!emails.length && seed) emails = [seed];
+    sequenceEmails.value = emails;
+  } catch {
+    sequenceEmails.value = seed ? [seed] : [];
+  }
+}
+
+async function openContactGroup(group: ContactGroup) {
+  await loadSequenceForContact(group.contactId, group.emails[0] ?? null);
+  const target = pickOpenStep(sequenceEmails.value.length ? sequenceEmails.value : group.emails);
+  if (target) await openEmail(target.id, { skipSequenceReload: true });
+}
+
+async function openEmail(id:string, opts?: { skipSequenceReload?: boolean }) {
+  selectedId.value=id;
+  detailOpen.value=true;
+  detailLoading.value=true;
+  candidate.value=null;
+  try {
+    const r=await fetch(`/api/email-studio/emails/${id}?projectId=${store.selectedProjectId}`);
+    const j=await r.json();
+    if(!r.ok)throw new Error(j.error);
+    detail.value=j;
+    subject.value=j.currentVersion?.subject??"";
+    emailBody.value=htmlToPlaintext(j.currentVersion?.body??"");
+    selectedResearch.value=(j.researchPoints??[]).map((x:Json)=>x.id);
+    dirty.value=false;
+    const contactId = String(j.data?.contact_id || "");
+    if (!opts?.skipSequenceReload && contactId && contactId !== sequenceContactId.value) {
+      await loadSequenceForContact(contactId, j.data as EmailRow);
+    } else if (!opts?.skipSequenceReload && contactId && !sequenceEmails.value.some((e) => e.id === id)) {
+      await loadSequenceForContact(contactId, j.data as EmailRow);
+    } else if (!sequenceEmails.value.length && j.data) {
+      sequenceEmails.value = [j.data as EmailRow];
+      sequenceContactId.value = contactId || null;
+    }
+    if(j.data.status==="ai_draft_made") await setStatus("needs_review",false);
+  } catch(e){
+    toast.error(e instanceof Error?e.message:"Could not open email");
+  } finally{
+    detailLoading.value=false;
+  }
+}
+async function refreshDetail(){if(selectedId.value)await openEmail(selectedId.value, { skipSequenceReload: true })}
 async function request(path:string, options:RequestInit={}) { actionLoading.value=path; try { const r=await fetch(path,{...options,headers:{"Content-Type":"application/json",...(options.headers??{})}}); const j=await r.json(); if(!r.ok)throw new Error(j.error??"Action failed"); return j; } finally{actionLoading.value=""} }
 async function setStatus(status:string, notify=true){try{await request(`/api/email-studio/emails/${selectedId.value}/status`,{method:"PATCH",body:JSON.stringify({projectId:store.selectedProjectId,status})});if(notify)toast.success(`Moved to ${humanize(status)}`);await refreshDetail();await load()}catch(e){if(notify)toast.error(e instanceof Error?e.message:"Status update failed")}}
 async function saveEdits(){try{await request(`/api/email-studio/emails/${selectedId.value}/human-version`,{method:"POST",body:JSON.stringify({projectId:store.selectedProjectId,subject:subject.value,body:emailBody.value})});dirty.value=false;toast.success("New version saved");await refreshDetail();await load()}catch(e){toast.error(e instanceof Error?e.message:"Save failed")}}
@@ -321,7 +523,21 @@ const annotatedSegments=computed(()=>{
   if (!out.length && body) out.push({ text: body });
   return out;
 });
-function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);if(i>0)openEmail(rows.value[i-1].id)} function nextRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);if(i>=0&&i<rows.value.length-1)openEmail(rows.value[i+1].id)}
+function previousRow(){
+  const i = selectedSequenceIndex.value;
+  if (i > 0) void openEmail(sequenceSorted.value[i - 1].id, { skipSequenceReload: true });
+}
+function nextRow(){
+  const i = selectedSequenceIndex.value;
+  if (i >= 0 && i < sequenceSorted.value.length - 1) void openEmail(sequenceSorted.value[i + 1].id, { skipSequenceReload: true });
+}
+function stepLabel(row: EmailRow): string {
+  const step = stepOf(row);
+  const ch = String(row.channel || "email");
+  if (ch === "linkedin_dm") return `LI${step || ""}`;
+  if (ch === "linkedin_inmail") return "IM";
+  return `E${step || "?"}`;
+}
 </script>
 
 <template>
@@ -338,7 +554,7 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
       <NTabPane name="email" tab="Email">
         <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; only verified Smartlead events mark records as sent.</NAlert>
         <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="channelFilter" :options="channelOptions" placeholder="Channel"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
-        <NAlert v-if="error" type="error" style="margin-top:12px">{{error}}</NAlert><NDataTable :columns="columns" :data="rows" :loading="loading" :row-key="r=>r.id" :row-props="emailRowProps" style="margin-top:12px"/><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="total" show-size-picker :page-sizes="[25,50,100]" style="margin-top:12px"/>
+        <NAlert v-if="error" type="error" style="margin-top:12px">{{error}}</NAlert><NDataTable :columns="columns" :data="contactGroups" :loading="loading" :row-key="r=>r.contactId" :row-props="emailRowProps" style="margin-top:12px"/><NPagination v-model:page="page" v-model:page-size="pageSize" :item-count="total" show-size-picker :page-sizes="[25,50,100]" style="margin-top:12px"/>
       </NTabPane>
 
       <NTabPane name="linkedin" tab="LinkedIn">
@@ -350,8 +566,32 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
       </NTabPane>
     </NTabs>
 
-    <NDrawer v-model:show="detailOpen" width="96vw"><NDrawerContent :title="`${detail?.data?.contact_name||'Email'} · step ${detail?.data?.sequence_step||''}`" closable><NSpin :show="detailLoading"><template v-if="detail">
-      <NSpace justify="space-between" align="center"><NSpace><NButton size="small" @click="previousRow">Previous</NButton><NButton size="small" @click="nextRow">Next</NButton><div class="status-cell"><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NButton v-if="detail.data.status==='research_missing'" size="tiny" secondary type="primary" :loading="launchingN8n" :disabled="!emailResearchWorkflow?.configured" @click="launchEmailResearch(detail.data)">Launch n8n</NButton></div><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton v-if="canSyncSmartlead" secondary :loading="actionLoading==='/api/email-studio/smartlead/reconcile'" @click="syncFromSmartlead">Sync from Smartlead</NButton><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>
+    <NDrawer v-model:show="detailOpen" width="96vw"><NDrawerContent :title="detail?.data?.contact_name || 'Email'" closable><NSpin :show="detailLoading"><template v-if="detail">
+      <NSpace justify="space-between" align="center"><NSpace><NButton size="small" :disabled="selectedSequenceIndex<=0" @click="previousRow">Previous</NButton><NButton size="small" :disabled="selectedSequenceIndex<0||selectedSequenceIndex>=sequenceSorted.length-1" @click="nextRow">Next</NButton><div class="status-cell"><NTag :type="statusType(detail.data.status) as any">{{humanize(detail.data.status)}}</NTag><NButton v-if="detail.data.status==='research_missing'" size="tiny" secondary type="primary" :loading="launchingN8n" :disabled="!emailResearchWorkflow?.configured" @click="launchEmailResearch(detail.data)">Launch n8n</NButton></div><NText depth="3">{{detail.data.company_name}} · {{detail.data.batch_name}} · {{detail.data.persona}}</NText></NSpace><NSpace><NButton v-if="canSyncSmartlead" secondary :loading="actionLoading==='/api/email-studio/smartlead/reconcile'" @click="syncFromSmartlead">Sync from Smartlead</NButton><NButton @click="copy">Copy</NButton><NButton v-if="['needs_review','regenerated'].includes(detail.data.status)" type="warning" secondary @click="setStatus('final_check')">Ready for final check</NButton><NButton v-if="canApprove" type="success" @click="approve">Approve</NButton><NButton type="error" secondary @click="setStatus('rejected')">Reject</NButton></NSpace></NSpace>
+      <div v-if="sequenceSorted.length" class="sequence-strip">
+        <button
+          v-for="step in sequenceSorted"
+          :key="step.id"
+          type="button"
+          class="sequence-step"
+          :class="{ active: step.id === selectedId }"
+          @click="openEmail(step.id, { skipSequenceReload: true })"
+        >{{ stepLabel(step) }}</button>
+      </div>
+      <div v-if="sequenceSorted.length > 1" class="sequence-subjects">
+        <button
+          v-for="step in sequenceSorted"
+          :key="`subj-${step.id}`"
+          type="button"
+          class="sequence-subject"
+          :class="{ active: step.id === selectedId }"
+          @click="openEmail(step.id, { skipSequenceReload: true })"
+        >
+          <span class="seq-label">{{ stepLabel(step) }}</span>
+          <span class="seq-subject-text">{{ step.current_subject || '(no subject)' }}</span>
+          <NTag size="tiny" :type="statusType(step.status) as any">{{ humanize(step.status) }}</NTag>
+        </button>
+      </div>
       <div class="workspace">
         <section class="panel research"><h3>Research & instructions</h3>
           <template v-if="researchPoints.length"><div v-for="p in researchPoints" :key="p.id" class="research-point"><NCheckbox :checked="selectedResearch.includes(p.id)" @update:checked="v=>selectedResearch=v?[...selectedResearch,p.id]:selectedResearch.filter(x=>x!==p.id)">{{p.statement}}</NCheckbox><NTag size="tiny" :type="p.kind==='verified'?'info':'warning'">{{p.kind}}</NTag></div></template>
@@ -376,17 +616,56 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
             <span>{{ i.title }} v{{ i.version }}</span>
           </button>
           <NEmpty v-if="!detail.instructions?.length" description="No active instructions" size="small" />
-          <details v-if="detail.research"><summary>Citations and raw research</summary><pre>{{JSON.stringify(detail.research,null,2)}}</pre></details>
-          <details v-else-if="rawN8nResearch.length"><summary>All raw n8n research ({{rawN8nResearch.length}})</summary><pre>{{JSON.stringify(rawN8nResearch,null,2)}}</pre></details>
+          <div v-if="detail.research" class="research-readable">
+            <div v-if="researchCitations.length" class="research-block">
+              <h4>Citations</h4>
+              <ul class="citation-list">
+                <li v-for="(c, i) in researchCitations" :key="i">
+                  <a v-if="c.url" :href="c.url" target="_blank" rel="noopener noreferrer">{{ c.title }}</a>
+                  <strong v-else>{{ c.title }}</strong>
+                  <span v-if="c.supports" class="citation-supports">{{ c.supports }}</span>
+                </li>
+              </ul>
+            </div>
+            <div v-if="!researchPoints.length && researchVerifiedList.length" class="research-block">
+              <h4>Verified</h4>
+              <ul><li v-for="(item, i) in researchVerifiedList" :key="`v-${i}`">{{ item }}</li></ul>
+            </div>
+            <div v-if="!researchPoints.length && researchInferredList.length" class="research-block">
+              <h4>Inferred</h4>
+              <ul><li v-for="(item, i) in researchInferredList" :key="`i-${i}`">{{ item }}</li></ul>
+            </div>
+            <div v-if="researchGaps.length" class="research-block">
+              <h4>Gaps</h4>
+              <ul><li v-for="(item, i) in researchGaps" :key="`g-${i}`">{{ item }}</li></ul>
+            </div>
+            <details class="raw-json-details"><summary>Show raw JSON</summary><pre>{{ JSON.stringify(detail.research, null, 2) }}</pre></details>
+          </div>
+          <div v-else-if="rawN8nResearch.length" class="research-readable">
+            <h4>n8n research runs</h4>
+            <div v-for="run in rawN8nResearch" :key="run.id || run.workflow_name + run.created_at" class="n8n-run-card">
+              <div class="n8n-run-head">
+                <strong>{{ run.workflow_name || 'workflow' }}</strong>
+                <NText depth="3">{{ fmt(run.created_at) }}</NText>
+              </div>
+              <dl class="n8n-summary">
+                <template v-for="(row, ri) in summarizeN8nResult(run.result)" :key="ri">
+                  <dt>{{ row.key }}</dt>
+                  <dd>{{ row.value }}</dd>
+                </template>
+              </dl>
+              <details class="raw-json-details"><summary>Show raw JSON</summary><pre>{{ JSON.stringify(run, null, 2) }}</pre></details>
+            </div>
+          </div>
         </section>
         <section class="panel editor"><h3>Email</h3>
           <NAlert v-if="lastGenerationFailure" type="error" style="margin-bottom:12px" :show-icon="false">
             <strong>Last attempt failed:</strong> {{lastGenerationFailure.reason || "Unknown error"}}
           </NAlert>
-          <template v-if="currentVersion"><NFormItem label="Subject"><NInput v-model:value="subject" @update:value="dirty=true"/></NFormItem><NFormItem label="Body"><NInput ref="bodyInput" v-model:value="emailBody" type="textarea" :autosize="{minRows:12,maxRows:24}" @select="captureSelection" @mouseup="captureSelection" @keyup="captureSelection" @update:value="dirty=true"/></NFormItem><NFormItem label="Style technique"><NSelect v-model:value="styleSourceId" clearable :options="styleSourceOptions" placeholder="Default Velvetech style"/></NFormItem><NAlert v-if="selectedStyleSource" type="info" :show-icon="false" style="margin-bottom:10px">{{selectedStyleSource.technique_summary}}</NAlert><NSpace><NButton type="primary" :disabled="!dirty||!!generating" @click="saveEdits">Save as new version</NButton><NButton :loading="generating==='full'" :disabled="!!generating" @click="generate(false,'full')">Regenerate all</NButton><NButton :loading="generating==='paragraph'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'paragraph')">Regenerate paragraph</NButton><NButton :loading="generating==='selection'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'selection')">Regenerate selection</NButton></NSpace><NInput v-model:value="regenerationPrompt" type="textarea" placeholder="Optional regeneration direction…" :autosize="{minRows:2,maxRows:4}" style="margin-top:10px"/><h4>Annotated preview</h4><div class="annotated"><template v-for="(s,i) in annotatedSegments" :key="i"><span v-if="s.annotation" class="annotated-span" :style="{borderBottomColor:annotationColor(s.annotation),backgroundColor:annotationColor(s.annotation)+'22'}" :title="`${s.annotation.purpose}\n${s.annotation.explanation}\nResearch: ${s.annotation.research_point_ids.join(', ')||'none'}\nRules: ${s.annotation.instruction_ids.join(', ')||'none'}\nConfidence: ${s.annotation.confidence}`">{{s.text}}</span><span v-else>{{s.text}}</span></template></div><div v-if="currentVersion.validation_results?.length"><NAlert v-for="v in currentVersion.validation_results" :key="v.code+v.message" :type="v.severity==='error'?'error':'warning'" :show-icon="false" style="margin-top:6px">{{v.message}}</NAlert></div></template>
+          <template v-if="currentVersion"><NFormItem label="Subject"><NInput v-model:value="subject" @update:value="dirty=true"/></NFormItem><NFormItem label="Body"><NInput ref="bodyInput" v-model:value="emailBody" type="textarea" :autosize="{minRows:12,maxRows:24}" @select="captureSelection" @mouseup="captureSelection" @keyup="captureSelection" @update:value="dirty=true"/></NFormItem><NFormItem label="Style technique"><NSelect v-model:value="styleSourceId" clearable :options="styleSourceOptions" :placeholder="stylePlaceholder"/></NFormItem><NAlert v-if="selectedStyleSource" type="info" :show-icon="false" style="margin-bottom:10px">{{selectedStyleSource.technique_summary}}</NAlert><NSpace><NButton type="primary" :disabled="!dirty||!!generating" @click="saveEdits">Save as new version</NButton><NButton :loading="generating==='full'" :disabled="!!generating" @click="generate(false,'full')">Regenerate all</NButton><NButton :loading="generating==='paragraph'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'paragraph')">Regenerate paragraph</NButton><NButton :loading="generating==='selection'" :disabled="!!generating||!selectedText.quote" @click="generate(false,'selection')">Regenerate selection</NButton></NSpace><NInput v-model:value="regenerationPrompt" type="textarea" placeholder="Optional regeneration direction…" :autosize="{minRows:2,maxRows:4}" style="margin-top:10px"/><h4>Annotated preview</h4><div class="annotated"><template v-for="(s,i) in annotatedSegments" :key="i"><span v-if="s.annotation" class="annotated-span" :style="{borderBottomColor:annotationColor(s.annotation),backgroundColor:annotationColor(s.annotation)+'22'}" :title="`${s.annotation.purpose}\n${s.annotation.explanation}\nResearch: ${s.annotation.research_point_ids.join(', ')||'none'}\nRules: ${s.annotation.instruction_ids.join(', ')||'none'}\nConfidence: ${s.annotation.confidence}`">{{s.text}}</span><span v-else>{{s.text}}</span></template></div><div v-if="currentVersion.validation_results?.length"><NAlert v-for="v in currentVersion.validation_results" :key="v.code+v.message" :type="v.severity==='error'?'error':'warning'" :show-icon="false" style="margin-top:6px">{{v.message}}</NAlert></div></template>
           <template v-else>
             <NEmpty :description="generating==='initial' ? 'Researching and drafting… this can take up to a minute.' : 'No draft yet'"/>
-            <NFormItem label="Style technique" style="margin-top:12px"><NSelect v-model:value="styleSourceId" clearable :options="styleSourceOptions" placeholder="Default Velvetech style"/></NFormItem>
+            <NFormItem label="Style technique" style="margin-top:12px"><NSelect v-model:value="styleSourceId" clearable :options="styleSourceOptions" :placeholder="stylePlaceholder"/></NFormItem>
             <NAlert v-if="selectedStyleSource" type="info" :show-icon="false" style="margin-bottom:10px">{{selectedStyleSource.technique_summary}}</NAlert>
             <NButton type="primary" style="margin-top:12px" :loading="generating==='initial'" :disabled="!!generating" @click="generate(true)">{{lastGenerationFailure ? "Try again" : "Research and create AI draft"}}</NButton>
           </template>
@@ -455,4 +734,4 @@ function previousRow(){const i=rows.value.findIndex(x=>x.id===selectedId.value);
   </div>
 </template>
 
-<style scoped>.email-studio-link{color:#2080f0;text-decoration:none;font-weight:600}.email-studio-link:hover{text-decoration:underline}.status-cell{display:flex;flex-direction:column;align-items:flex-start;gap:6px}:deep(.clickable-email-row){cursor:pointer}:deep(.clickable-email-row:hover td){background:rgba(32,128,240,.06)}.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 180px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.instruction{margin:7px 0}.instruction-btn{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:1px solid transparent;border-radius:8px;padding:8px 10px;background:transparent;color:inherit;cursor:pointer}.instruction-btn:hover{border-color:rgba(32,128,240,.35);background:rgba(32,128,240,.08)}.instruction-body{white-space:pre-wrap;word-break:break-word;margin:0;padding:12px;border-radius:8px;background:rgba(128,128,128,.08);max-height:60vh;overflow:auto}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.muted{opacity:.55;font-size:.8em}:deep(.picker-row-selected td){background:rgba(32,128,240,.12)!important}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>
+<style scoped>.email-studio-link{color:#2080f0;text-decoration:none;font-weight:600}.email-studio-link:hover{text-decoration:underline}.status-cell{display:flex;flex-direction:column;align-items:flex-start;gap:6px}:deep(.clickable-email-row){cursor:pointer}:deep(.clickable-email-row:hover td){background:rgba(32,128,240,.06)}.studio{max-width:1760px;margin:auto}.studio h1{margin:0}.filters{display:grid;grid-template-columns:180px minmax(260px,1fr) 170px 150px 140px auto;gap:10px;align-items:center}.sequence-strip{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}.sequence-step{border:1px solid rgba(128,128,128,.35);background:transparent;color:inherit;border-radius:8px;padding:6px 12px;cursor:pointer;font-weight:600}.sequence-step.active,.sequence-step:hover{border-color:#2080f0;background:rgba(32,128,240,.1)}.sequence-subjects{display:flex;flex-direction:column;gap:6px;margin-top:10px}.sequence-subject{display:flex;align-items:center;gap:10px;width:100%;text-align:left;border:1px solid rgba(128,128,128,.2);background:transparent;color:inherit;border-radius:8px;padding:8px 10px;cursor:pointer}.sequence-subject.active,.sequence-subject:hover{border-color:rgba(32,128,240,.45);background:rgba(32,128,240,.06)}.seq-label{font-weight:700;min-width:2.2rem}.seq-subject-text{flex:1;opacity:.85;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.workspace{display:grid;grid-template-columns:minmax(260px,1fr) minmax(430px,1.7fr) minmax(270px,1fr);gap:12px;margin-top:14px;height:calc(100vh - 240px)}.panel{border:1px solid rgba(128,128,128,.25);border-radius:10px;padding:14px;overflow:auto}.panel h3{margin-top:0}.research-point{padding:9px 0;border-bottom:1px solid rgba(128,128,128,.16)}.research-readable{margin-top:14px}.research-block{margin:12px 0}.research-block h4{margin:0 0 6px}.citation-list{list-style:none;padding:0;margin:0}.citation-list li{padding:8px 0;border-bottom:1px solid rgba(128,128,128,.12)}.citation-list a{font-weight:600}.citation-supports{display:block;margin-top:4px;opacity:.75;font-size:.9em}.n8n-run-card{border:1px solid rgba(128,128,128,.22);border-radius:8px;padding:10px;margin:10px 0}.n8n-run-head{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px}.n8n-summary{display:grid;grid-template-columns:110px 1fr;gap:4px 10px;margin:0}.n8n-summary dt{opacity:.65;font-size:.85em}.n8n-summary dd{margin:0;word-break:break-word}.raw-json-details{margin-top:8px}.instruction{margin:7px 0}.instruction-btn{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:1px solid transparent;border-radius:8px;padding:8px 10px;background:transparent;color:inherit;cursor:pointer}.instruction-btn:hover{border-color:rgba(32,128,240,.35);background:rgba(32,128,240,.08)}.instruction-body{white-space:pre-wrap;word-break:break-word;margin:0;padding:12px;border-radius:8px;background:rgba(128,128,128,.08);max-height:60vh;overflow:auto}.annotated{white-space:pre-wrap;line-height:1.75;padding:14px;background:rgba(128,128,128,.08);border-radius:8px}.annotated-span{border-bottom:3px solid;cursor:help}.comment{border:1px solid rgba(128,128,128,.25);border-radius:8px;padding:10px;margin:10px 0}.comment.resolved{opacity:.6}.comment blockquote{margin:7px 0;padding-left:8px;border-left:3px solid #f0a020}.reply{margin:5px 0 5px 12px;padding:6px;background:rgba(128,128,128,.1);border-radius:5px}.version{margin:7px 0}.compare{display:grid;grid-template-columns:1fr 1fr;gap:16px}.compare>div{border:1px solid rgba(128,128,128,.25);padding:14px;border-radius:8px}.compare pre,details pre{white-space:pre-wrap;word-break:break-word}.create-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}.muted{opacity:.55;font-size:.8em}:deep(.picker-row-selected td){background:rgba(32,128,240,.12)!important}@media(max-width:1100px){.workspace{grid-template-columns:1fr;height:auto}.filters{grid-template-columns:1fr 1fr}.compare{grid-template-columns:1fr}}@media(max-width:680px){.filters,.create-grid{grid-template-columns:1fr}}</style>

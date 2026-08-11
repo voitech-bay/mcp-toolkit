@@ -143,8 +143,7 @@ export async function resolveCompanyKeys(
     const company = await client
       .from("companies")
       .select("domain, website")
-      .eq("project_id", args.projectId)
-      .eq("uuid", args.companyId)
+      .eq("id", args.companyId)
       .maybeSingle();
     if (company.error) throw new Error(company.error.message);
     const domain = companyKeyFromHost((company.data as Json | null)?.domain);
