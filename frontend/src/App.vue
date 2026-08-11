@@ -298,7 +298,7 @@ const pipelineMenuOptions: DropdownOption[] = [
     icon: () => h(SearchIcon, { size: 14 }),
   },
   {
-    label: "Hermes Agent",
+    label: "Hermes research",
     key: "/agents/hermes",
     icon: () => h(BotIcon, { size: 14 }),
   },
