@@ -127,17 +127,21 @@ const companyDomain = computed(
 );
 const canRun = computed(() => Boolean(companyName.value) && isWellore.value && !running.value);
 
-const scoreBits = computed(() => {
-  const score = result.value?.score?.score || {};
+const scoreBits = computed<Record<string, string | boolean>>(() => {
+  const score = (result.value?.score?.score || {}) as Record<string, unknown>;
+  const pick = (value: unknown): string | boolean => {
+    if (typeof value === "boolean" || typeof value === "string") return value;
+    return "unknown";
+  };
   return {
-    own_domain: score.own_domain,
-    linkedin: score.linkedin,
-    store_catalog: score.store_catalog,
-    icp_contact_email: score.icp_contact ?? score.icp_contact_email,
-    release_in_window: score.release_in_window,
-    portfolio_hit: score.portfolio_hit,
-    art_or_production_jobs: score.jobs_signal ?? score.art_or_production_jobs,
-    money: score.money_signal ?? score.money,
+    own_domain: pick(score.own_domain),
+    linkedin: pick(score.linkedin),
+    store_catalog: pick(score.store_catalog),
+    icp_contact_email: pick(score.icp_contact ?? score.icp_contact_email),
+    release_in_window: pick(score.release_in_window),
+    portfolio_hit: pick(score.portfolio_hit),
+    art_or_production_jobs: pick(score.jobs_signal ?? score.art_or_production_jobs),
+    money: pick(score.money_signal ?? score.money),
   };
 });
 
