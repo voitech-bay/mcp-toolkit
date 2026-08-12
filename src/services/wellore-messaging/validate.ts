@@ -10,7 +10,28 @@ const EMAIL_WORD_CAP_BY_STEP: Record<number, number> = { 1: 69, 2: 60, 3: 50 };
 /** Backstop only -- the primary LinkedIn length constraint is the 3-sentence cap below. */
 const LINKEDIN_WORD_CAP = 40;
 const BANNED_FILLER = ["split", "cleanly", "quietly", "the call is", "useful talk", "intro works"];
-const BANNED_ABSTRACTIONS = ["map", "land", "stretch", "bandwidth", "creative bar", "keep landing", "modular handoff", "combat fantasy"];
+const BANNED_ABSTRACTIONS = [
+  "map",
+  "land",
+  "stretch",
+  "bandwidth",
+  "creative bar",
+  "keep landing",
+  "modular handoff",
+  "combat fantasy",
+  // 2026-08-12 messaging pack — SaaS / AI-slop nouns
+  "slate",
+  "capacity",
+  "cadence",
+  "lane",
+  "lanes",
+  "overflow",
+  "production queue",
+  "own the calendar",
+  "still needs",
+  "happy for an intro",
+  "worth 20 minutes",
+];
 const AAA_NAMES = ["Tencent", "Activision", "Blizzard", "THQ Nordic", "G5"];
 
 function wordCount(text: string): number {

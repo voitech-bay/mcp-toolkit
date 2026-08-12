@@ -2,18 +2,43 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { validateWelloreDraft } from "./validate.js";
 
-test("locked Nitro E1 model passes with zero errors", () => {
-  // Verbatim from .cursor/skills/wellore-email-copywriting/examples.md, except
-  // "co-developed" -> "co developed": the source hyphenates it, which technically
-  // violates rule 5's own hyphen ban (SKILL.md flags this exact hyphen pattern as
-  // banned via the "pre-reg" -> "pre reg" example). Flagged as a content bug in
-  // examples.md rather than silently loosening the hyphen check.
-  const subject = "Boltgun Boom";
+test("locked Patrick E1 model passes with zero errors", () => {
+  const subject = "Blast Voyage";
   const body =
-    "Hi Samuli, bold Warhammer campaign for mobile. still producing art for new worlds and Chaos enemies, or already packing it into playtests? " +
-    "we co developed Battle Legion for Traplight after soft launch: seasonal events, Battle Pass, quest content. update cycle down 35%, team stayed on core gameplay";
+    "Hi Patrick, saw your new match 3 cooking on GP\n\n" +
+    "curious if board art, tile kits and event VFX are still on your plate, or soft launch builds are already locked?\n\n" +
+    "on King God Castle for Awesomepiece (5M+ gp installs) we built seasonal events, temp game modes and special missions. event prep time down 40%\n\n" +
+    "reply loot for a deeper rundown, or 'skip' to disappear ;)";
   const results = validateWelloreDraft("email", subject, body, { sequenceStep: 1 });
   assert.deepEqual(results.filter((r) => r.severity === "error"), []);
+});
+
+test("2026-08-12 slop nouns are warnings", () => {
+  const results = validateWelloreDraft(
+    "email",
+    "Pompom",
+    "Hi Benjamin, curious if external art capacity is still open on this mobile slate while update cadence held across both lanes.",
+    { sequenceStep: 1 },
+  );
+  const msgs = results.filter((r) => r.code === "banned_abstraction").map((r) => r.message);
+  assert.ok(msgs.some((m) => m.includes("capacity")));
+  assert.ok(msgs.some((m) => m.includes("slate")));
+  assert.ok(msgs.some((m) => m.includes("cadence")));
+  assert.ok(msgs.some((m) => m.includes("lane")));
+});
+
+test("banned filler and abstractions are warnings, not errors", () => {
+  const results = validateWelloreDraft("email", "Some Title", "Hi Name, we can map the pipeline so it works cleanly for your team.", { sequenceStep: 1 });
+  const filler = results.find((r) => r.code === "banned_filler");
+  const abstraction = results.find((r) => r.code === "banned_abstraction");
+  assert.equal(filler?.severity, "warning");
+  assert.equal(abstraction?.severity, "warning");
+});
+
+test("AAA partnership name is flagged as a warning, not blocked outright", () => {
+  const results = validateWelloreDraft("email", "production partners", "Collin, open to 20 min with our CEO? he can share how we ran production with Tencent and others", { sequenceStep: 3 });
+  const aaa = results.find((r) => r.code === "aaa_name");
+  assert.equal(aaa?.severity, "warning");
 });
 
 test("E1 over word cap, hyphenated, and about-N all flag as errors", () => {
@@ -50,20 +75,6 @@ test("E1 missing the Hi Name, greeting is an error", () => {
 test("em dash is an error", () => {
   const results = validateWelloreDraft("email", "Some Title", "Hi Name, this is bold — really bold.", { sequenceStep: 1 });
   assert.ok(results.some((r) => r.code === "dash" && r.severity === "error"));
-});
-
-test("banned filler and abstractions are warnings, not errors", () => {
-  const results = validateWelloreDraft("email", "Some Title", "Hi Name, we can map the pipeline so it works cleanly for your team.", { sequenceStep: 1 });
-  const filler = results.find((r) => r.code === "banned_filler");
-  const abstraction = results.find((r) => r.code === "banned_abstraction");
-  assert.equal(filler?.severity, "warning");
-  assert.equal(abstraction?.severity, "warning");
-});
-
-test("AAA partnership name is flagged as a warning, not blocked outright", () => {
-  const results = validateWelloreDraft("email", "production partners", "Collin, worth 20 minutes with our CEO? he can share how we ran production with Tencent and others", { sequenceStep: 3 });
-  const aaa = results.find((r) => r.code === "aaa_name");
-  assert.equal(aaa?.severity, "warning");
 });
 
 test("missing subject is an error", () => {

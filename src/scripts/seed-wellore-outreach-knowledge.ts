@@ -22,33 +22,36 @@ const documents = [
     title: "Locked voice rules and anti-patterns",
     priority: 1,
     source_path: ".cursor/skills/wellore-email-copywriting/SKILL.md",
-    content: `Locked rules for Wellore 3-touch cold email sequences. Violating any of these is a hard fail.
+    content: `Locked rules for Wellore 3-touch cold email sequences. Canonical pack: projects/Wellore/context/MESSAGING-FOR-AGENTS.md. Violating any of these is a hard fail.
 
 1. Never restate the subject-line game title as the opening of the body — the reader already saw it in the subject. Lead with the observation instead.
 2. Greetings: E1 = "Hi Name,". E2/E3 = "Name," (no "Hi").
 3. Word caps (hard): E1 under 70 words, E2 at most 60, E3 at most 50.
-4. Casual lowercase tone — short, direct, no fluff.
-5. No hyphens or em dashes in send copy ("pre-reg" -> "pre reg").
+4. Casual lowercase tone — short, direct, no fluff. Always write "Awesomepiece" (never all-caps).
+5. Prefer "pre reg" over "pre-reg". No em dashes in send copy.
 6. No "about" before a number — write "35%", "140", not "about 35%".
-7. No X-not-Y / "not a port" style antithesis.
-8. Don't invent a prospect problem and state it as fact ("you still need X"). Conditional framing is fine ("if GP art is still open...").
+7. No Oxford comma before "and" in lists (write "A, B and C").
+8. Don't invent a prospect problem and state it as fact ("you still need X" / "still needs X"). Prefer "still cooking...", "can stack...", or "if GP art is still open...".
 9. Don't imply the prospect has the case-study company's problem. The case is proof of Wellore's work only — never "studios like you" or "stuck just like you".
-10. Plain language, no consultant abstractions: never use "map", "land", "stretch", "bandwidth", "creative bar", "keep landing", "modular handoff", "combat fantasy". Prefer concrete verbs ("worth exploring...").
-11. E2 has research signal + a different proof dimension than E1, soft note only, no offer.
-12. E3: adjacent expertise + "happy for an intro" + a CEO close naming portfolio clients by default. Don't reuse that contact's E1/E2 case companies in the E3 close. Large-studio exception (added 7 Aug): when the contact's own company is itself a large studio or publisher, naming Wellore's real AAA partnerships/credits (Tencent, Activision/Blizzard, THQ Nordic, G5, and portfolio credits Call of Duty, Battlefield 2042, Diablo series, SEI) is allowed where relevant — matched-scale proof reads as more credible to that audience than a smaller portfolio case. Still never invent discipline-level work claims on those IPs, state only that Wellore is credited/partnered. For a small or indie studio contact, keep using the 10 cleared case studies only. This exception is forward-looking; it does not change the already-locked 5-studio campaign copy (Nitro, LoadComplete, Playdigious, Gameduo, GFD Studio/CAS.AI).
-13. Vary "team stayed on..." phrasing. Ban AI-ish filler: "split", "cleanly", "quietly", "the call is", "useful talk", "intro works".
-14. One close per email — never stack two CTAs or a CTA plus a fallback close.
-15. Never fabricate proof: don't confuse a prospect's own research dossier with a Wellore client case, and don't invent discipline-level credits on logo IPs (e.g. never claim "we did character art on Battlefield 2042" — Wellore is only known to be credited generally, with no discipline-level detail available).
-16. Max ~2 related facts (cue + result) per proof paragraph — no metric salad.
-17. Offer must be concrete (a readout, a plan, production support) — never "worth a chat about your pipeline".
+10. Plain / gamer language. Ban SaaS mush and AI-slop: "slate", "capacity", "art capacity", "cadence", "lane", "lanes", "overflow", "production queue", "own the calendar", "bandwidth", "creative bar", fluff "pipeline", "crunch", "slip", "lock down", plus consultant abstractions "map", "land", "stretch", "keep landing", "modular handoff", "combat fantasy". Prefer "catalog"/"titles"/named games, "outside art help", "updates kept landing", "both in one pass" / "that work".
+11. E2 has research signal + production implication + a different proof dimension than E1, soft note only, no offer. Ban dead "already ships X next to Y" with no so-what.
+12. E3: adjacent expertise + intro/CEO close. Prefer "cool to intro eng if packing sits with them?" and "open to 20 min with our CEO?" — ban "happy for an intro" and "worth 20 minutes with our CEO". Don't reuse that contact's E1/E2 case companies in the E3 close. Large-studio exception: when the contact's own company is itself a large studio or publisher, naming Wellore's real AAA partnerships/credits is allowed where relevant. Still never invent discipline-level work claims on those IPs.
+13. Ban AI-ish filler: "split", "cleanly", "quietly", "the call is", "useful talk", "intro works".
+14. One close per email — never stack two CTAs.
+15. Never fabricate proof. Max ~2 related facts per proof paragraph.
+16. Mobile upcoming cohort: only Battle Legion, Cat Snack Bar, ScourgeBringer Mobile, King God Castle, West Escape — with live Google Play install buckets.
+17. Same-company full-body spin: opener, ask, proof wording, and CTA must all differ across co-workers.
 
-Anti-patterns actually seen and corrected in this campaign:
+Anti-patterns corrected 2026-08-12:
+- "slate" / "mobile slate" / "puzzle slate" — Fix: catalog, titles, or name the games.
+- "external art capacity" / "art capacity" — Fix: outside art help / hands.
+- "update cadence held" — Fix: updates kept landing.
+- "we cover both lanes" / "that lane sits elsewhere" — Fix: both in one pass / packing sits with them.
+- "still needs station kits" — Fix: kits can stack / still cooking.
+- "happy for an intro" / "worth 20 minutes with our CEO" — Fix: cool to intro eng... / open to 20 min with our CEO?
+- "own the calendar" / "production queue" — Fix: already locked / still cooking.
 - "Hi X, Cozy Cat Tree is already..." — restates the subject. Fix: drop the title, lead with the observation.
-- "you still need campaign worlds..." — invented problem. Fix: "if ... still open..."
-- "map content pipeline / stretch art" — abstract. Fix: "worth exploring extra art capacity..."
-- "creative bar" / "keep landing" — unclear jargon. Fix: plain verbs like ship, open, overload.
-- E3 name-dropping Tencent/G5/Activision to a small/indie studio contact — mismatched-scale proof. Fix: portfolio case studios only (AAA names are OK only when the contact's own company is itself a large studio/publisher).
-- "pre-reg" — hyphen ban. Fix: "pre reg".`,
+- E3 name-dropping Tencent/G5/Activision to a small/indie studio — Fix: portfolio case studios only (AAA OK only for large studio/publisher prospects).`,
   },
   {
     kind: "messaging_style",
@@ -118,60 +121,77 @@ Mobile/Google Play cases:
     title: "Gold email examples",
     priority: 35,
     source_path: ".cursor/skills/wellore-email-copywriting/examples.md",
-    content: `Use as shape references only — never copy a metric unless it matches the 10 cleared portfolio cases.
+    content: `Use as shape references only — metrics must match MESSAGING-FOR-AGENTS pack / cleared portfolio cases. Prefer "Awesomepiece" not all-caps.
 
-E1 locked model (subject title NOT restated in body). Subject: "Boltgun Boom".
-"Hi Samuli, bold Warhammer campaign for mobile. still producing art for new worlds and Chaos enemies, or already packing it into playtests? we co-developed Battle Legion for Traplight after soft launch: seasonal events, Battle Pass, quest content. update cycle down 35%, team stayed on core gameplay. worth exploring extra art capacity so new worlds, enemies, and firefight VFX can ship to Google Play on time?"
-Why it works: observation + stage ask; title only in subject; named case + one metric; concrete CTA.
+E1 Art Director gold. Subject: "Blast Voyage".
+"Hi Patrick, saw your new match 3 cooking on GP
 
-E1 opener patterns (no title in body), by studio type:
-- Adaptation/licensed: "bold Warhammer campaign for mobile. still ... or already ...?"
-- Soft launch live: "already installing on Google Play in soft launch while attractions and cat variants are still stacking."
-- Port studio: "you're porting after Sea of Stars on mobile. still in the touch UI and art pass, or packing google play games builds?"
-- Original shooter: "looks like a from scratch mobile roguelike shooter. still building mech bosses..."
-- Catalog/hypercasual: "another GFD farm defense shooter in pre reg on a cas.ai store stack..."
+curious if board art, tile kits and event VFX are still on your plate, or soft launch builds are already locked?
 
-E2 — research signal, no offer. Subject: "app store vs play".
-"Samuli, App Store lists it for 26 Aug. Google Play is still pre reg with no day yet. on Captain Bones for Raptor Claw we built 200 assets, modular environments, Unreal integration, scene optimization. are you packing Android on the same window, or is GP art and performance still open?"
-Soft close only, e.g. "can send a short note on how that unfolded before speaking". If the subject is not the game title, naming the title once in the body is OK; if the subject IS the title, prefer "it" / "the listing" / studio name.
+on King God Castle for Awesomepiece (5M+ gp installs) we built seasonal events, temp game modes and special missions. event prep time down 40%
 
-E3 — conditional need + adjacent capability + portfolio CEO close. Subject: "production partners".
-"Collin, if GP art is still open beside App Store, happy to help on production volume. we also do Unreal integration and scene optimization. if packing is with engineering, happy for an intro. worth 20 minutes with our CEO? he can share how we ran production with Estoty, TREEPLLA, and PixelNAUTS"
-Why it works: "if..." not "you still need"; Unreal work is adjacent for a creative-lane contact; CEO-close clients are different from this contact's E1/E2 cases.
+reply loot for a deeper rundown, or 'skip' to disappear ;)"
+Why it works: title only in subject; stage fork; mobile case + gp installs; slang CTA; no slate/capacity.
+
+E1 CEO kits fork. Subject: "Transport Tycoon Manager".
+"Hi Ales, saw you guys cooking a fresh transport tycoon for GP
+
+curious if you are still cranking station and vehicle kits, or already poking at store builds?
+
+on West Escape for Estoty (5M+ gp installs) we made 170+ assets and modular locations. new content came 35% faster
+
+just reply 'buff' if you want the one pager, or 'nerf' if you want me to leave you alone ;)"
+
+E2 — signal with implication, no offer. Subject: "station kits".
+"Ales, a fresh transport tycoon in pre reg sits next to titles you already ship, so station and vehicle kits can stack on live work
+
+on West Escape for Estoty (5M+ gp installs) we also stood up exploration and progression loops with daily rewards so updates kept landing"
+Why it works: so-what (kits stack); no "slate" / "still needs" / "cadence".
+
+E3 — adjacent + preferred closes. Subject: "art to packing".
+"Leïla, next to art drops we also plug into Unity packing and mid range performance
+
+cool to intro eng if packing sits with them? our CEO can share Traplight, Estoty and Flying Oak"
+
+CEO-buyer variant:
+"Ales, when station kits and Unity wiring need to move together we can take both in one pass
+
+open to 20 min with our CEO? he can share how we ran production with Traplight, Flying Oak and TREEPLLA"
 
 Bad -> good:
-- "Hi JeongHyun, Cozy Cat Tree is already installing..." -> "Hi JeongHyun, already installing on Google Play in soft launch while..."
-- "you still need campaign worlds and Chaos VFX" -> "if GP art is still open beside App Store, happy to help on production volume"
-- "what if we map how ... without stretching art?" -> "worth exploring extra art capacity so ... can ship to Google Play on time?"
-- "are Android builds on the same creative bar..." -> "is Google Play art still open, or is Android locked to what you already approved for App Store?"
-- CEO close with Tencent/G5/Activision sent to a small/indie studio -> CEO close with Traplight/Estoty/Flying Oak/etc. (AAA names are fine when the contact's own company is itself a large studio/publisher)`,
+- "slate" / "mobile slate" -> catalog / titles / name the games
+- "external art capacity" -> outside art help
+- "update cadence held" -> updates kept landing
+- "we cover both lanes" -> we can take both in one pass
+- "still needs shop layouts" -> still cooking shop layouts
+- "happy for an intro if that lane sits elsewhere" -> cool to intro eng if packing sits with them?
+- "worth 20 minutes with our CEO?" -> open to 20 min with our CEO?
+- "Hi JeongHyun, Cozy Cat Tree is already installing..." -> drop title; lead with observation
+- CEO close with Tencent/G5/Activision to a small/indie studio -> Traplight/Estoty/Flying Oak (AAA only when prospect is itself large)`,
   },
   {
     kind: "icp_angle_framework",
-    title: "E3 adjacent capability by contact lane",
+    title: "E3 adjacent capability by contact specialty",
     priority: 40,
     source_path: ".cursor/skills/wellore-email-copywriting/SKILL.md",
-    content: `E3 must name one Wellore capability adjacent to (not inside) the contact's own lane, then ask for an intro to whoever owns that adjacent work. Never pitch only the contact's own specialty across the full sequence. CEO close defaults to portfolio clients; when the contact's own company is itself a large studio/publisher, naming Wellore's real AAA partnerships/credits (Tencent, Activision/Blizzard, THQ Nordic, G5, Call of Duty, Battlefield 2042, Diablo series, SEI) is allowed instead, without inventing discipline-level claims.
+    content: `E3 must name one Wellore capability adjacent to (not inside) the contact's own specialty, then ask for an intro to whoever owns that adjacent work. Prefer "cool to intro eng if packing sits with them?" — never "happy for an intro" and never agency "lane/lanes" jargon. CEO close defaults to portfolio clients with "open to 20 min with our CEO?" (not "worth 20 minutes..."). When the contact's own company is itself a large studio/publisher, naming Wellore's real AAA partnerships/credits is allowed instead, without inventing discipline-level claims.
 
-By contact lane:
-- art / creative -> adjacent capability: Unity/Unreal integration, packing, performance -> intro to engineering
-- production -> adjacent capability: art production + engine integration -> intro to art or engineering
-- technical -> adjacent capability: art/VFX volume, modular kits -> intro to art/content
-- economic buyer -> adjacent capability: art + engineering under one partner -> intro to whoever owns that lane
-- marketing fallback -> adjacent capability: art production + LiveOps content -> intro to art or production
-
-Use "happy for an intro" — never "intro works" (banned filler).
+By contact specialty:
+- art / creative -> adjacent: Unity/Unreal integration, packing, performance -> intro to engineering
+- production -> adjacent: art production + engine integration -> intro to art or engineering
+- technical -> adjacent: art/VFX volume, modular kits -> intro to art/content
+- economic buyer -> adjacent: art + engineering under one partner -> intro to whoever owns packing/art
+- marketing fallback -> adjacent: art production + LiveOps content -> intro to art or production
 
 CTA patterns that work:
-- "worth exploring ...?"
-- "worth aligning ...?"
+- E1 slang yes/no (buff/nerf, loot/skip, gg/ff)
 - Conditional: "if GP art is still open beside App Store, happy to help on production volume"
-- Soft E2 close: "can send a short note on how that unfolded before speaking"
+- Soft E2: signal + proof only (no offer)
 
 CTA patterns to avoid:
-- "what if we map ..." (abstract, banned verb)
-- "without stretching art/the team" (abstract)
-- "you still need ..." (states an invented need as fact)`,
+- "slate", "capacity", "cadence", "lane", "still needs"
+- "what if we map ..." / "without stretching art"
+- "you still need ..." as fact`,
   },
   {
     kind: "icp_angle_framework",
