@@ -1807,8 +1807,12 @@ export interface AnalyticsSyncResult {
 export async function syncAnalyticsSnapshots(
   projectId: string,
   dateFrom: string,
-  dateTo: string
+  dateTo: string,
+  options?: { force?: boolean }
 ): Promise<AnalyticsSyncResult> {
+  // force re-pulls days that already have snapshots (recent days keep changing);
+  // replaceAnalyticsSnapshotsForDay overwrites per day, so this is idempotent.
+  const force = options?.force === true;
   const empty = (): AnalyticsSyncResult => ({
     daysRequested: [],
     daysSkippedAlreadyCollected: [],
@@ -1877,7 +1881,7 @@ export async function syncAnalyticsSnapshots(
   console.log(`${LOG_PREFIX} analytics: ${allFlows.length} flow(s) for project; per-day metrics use sender_profiles + flows filter only`);
 
   for (const day of range) {
-    if (collectedSet.has(day)) {
+    if (!force && collectedSet.has(day)) {
       daysSkippedAlreadyCollected.push(day);
       continue;
     }

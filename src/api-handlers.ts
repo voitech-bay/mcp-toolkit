@@ -951,17 +951,18 @@ export async function handleAnalyticsSync(
   }
   res.setHeader("Content-Type", "application/json");
   const body = (await getParsedBody(req)) as
-    | { projectId?: string; dateFrom?: string; dateTo?: string }
+    | { projectId?: string; dateFrom?: string; dateTo?: string; force?: boolean }
     | undefined;
   const projectId = body?.projectId?.trim();
   const dateFrom = body?.dateFrom?.trim();
   const dateTo = body?.dateTo?.trim();
+  const force = body?.force === true;
   if (!projectId || !dateFrom || !dateTo) {
     res.writeHead(400);
     res.end(JSON.stringify({ error: "Body must include projectId, dateFrom, and dateTo (YYYY-MM-DD)" }));
     return;
   }
-  const result = await syncAnalyticsSnapshots(projectId, dateFrom, dateTo);
+  const result = await syncAnalyticsSnapshots(projectId, dateFrom, dateTo, { force });
   if (result.error) {
     res.writeHead(500);
     res.end(JSON.stringify(result));

@@ -514,11 +514,37 @@ function onAnalyticsDayChipClose(day: string) {
   });
 }
 
-async function runAnalyticsSync() {
-  if (!selectedProjectId.value || !analyticsDateRange.value) return;
-  const [start, end] = analyticsDateRange.value;
-  const dateFrom = toLocalYmd(start);
-  const dateTo = toLocalYmd(end);
+/**
+ * Instant analytics refresh: force re-pull a trailing window (default 14 days) for the
+ * selected project, ignoring the date picker. force=true overwrites already-collected
+ * recent days (today/yesterday keep changing). Does not take the data-sync global lock,
+ * so it runs even while the pipeline crawl holds the lock.
+ */
+async function syncAnalyticsNow(days = 14) {
+  if (!selectedProjectId.value) return;
+  const end = new Date();
+  const start = new Date(end);
+  start.setDate(start.getDate() - (days - 1));
+  await runAnalyticsSync({
+    dateFrom: toLocalYmd(new Date(start.getFullYear(), start.getMonth(), start.getDate()).getTime()),
+    dateTo: toLocalYmd(new Date(end.getFullYear(), end.getMonth(), end.getDate()).getTime()),
+    force: true,
+  });
+}
+
+async function runAnalyticsSync(opts?: { dateFrom: string; dateTo: string; force?: boolean }) {
+  if (!selectedProjectId.value) return;
+  let dateFrom: string;
+  let dateTo: string;
+  if (opts) {
+    dateFrom = opts.dateFrom;
+    dateTo = opts.dateTo;
+  } else {
+    if (!analyticsDateRange.value) return;
+    const [start, end] = analyticsDateRange.value;
+    dateFrom = toLocalYmd(start);
+    dateTo = toLocalYmd(end);
+  }
   analyticsSyncLoading.value = true;
   try {
     const r = await fetch("/api/analytics-sync", {
@@ -528,6 +554,7 @@ async function runAnalyticsSync() {
         projectId: selectedProjectId.value,
         dateFrom,
         dateTo,
+        force: opts?.force === true,
       }),
     });
     const data = await r.json();
@@ -1132,9 +1159,22 @@ const preflightRows = computed(() => {
       <p class="muted hint" style="margin: 0 0 0.75rem">
         Separate from <strong>Start Sync</strong> (contacts, messages, senders, contact lists, flows, flow leads). This only fills
         <code>AnalyticsSnapshots</code> via
-        <code>POST /leads/api/leads/metrics</code>. Days already stored are skipped.
+        <code>POST /leads/api/leads/metrics</code>. Runs anytime — it does not take the data-sync lock.
+        The date-range button below skips days already stored; <strong>Sync now</strong> force-refreshes the recent window.
       </p>
       <NSpin :show="analyticsDaysLoading">
+        <div class="analytics-row" style="margin-bottom: 0.75rem">
+          <NButton
+            type="primary"
+            :loading="analyticsSyncLoading"
+            :disabled="!selectedProject.api_key_set"
+            @click="syncAnalyticsNow(14)"
+          >
+            <RefreshCwIcon :size="14" />
+            &nbsp;Sync now (last 14 days)
+          </NButton>
+          <span class="muted hint">Force-refreshes the last 14 days, including today. No date picking, no lock.</span>
+        </div>
         <div class="analytics-row analytics-row-dpicker">
           <span class="form-label">Date range</span>
           <!-- Teleport target for the daterange panel (scoped DOM for synced-day highlighting). -->
@@ -1157,7 +1197,7 @@ const preflightRows = computed(() => {
             type="primary"
             :loading="analyticsSyncLoading"
             :disabled="!analyticsDateRange"
-            @click="runAnalyticsSync"
+            @click="runAnalyticsSync()"
           >
             Sync analytics
           </NButton>
