@@ -72,6 +72,17 @@ export function finalizeRates(m: FunnelMetrics): FunnelMetrics {
   return m;
 }
 
+/** True when a flow has any real outreach activity (any raw count > 0). */
+export function hasFunnelActivity(m: FunnelMetrics): boolean {
+  return (
+    m.messages_sent > 0 ||
+    m.connection_sent > 0 ||
+    m.connection_accepted > 0 ||
+    m.inbox > 0 ||
+    m.positive_replies > 0
+  );
+}
+
 export function addMetricsInto(
   dst: FunnelMetrics,
   metrics: Record<string, unknown>
@@ -141,8 +152,17 @@ export async function aggregateMetricsByFlow(
     }
     if (rows.length < pageSize) break;
   }
+  // Hide empty flows (e.g. GetSales's default "AUTO" flow): a flow with zero activity in the
+  // range is noise in the per-flow breakdown. Dropping zeros here never changes any total.
+  let hiddenEmpty = 0;
+  for (const [fu, m] of metricsByFlow) {
+    if (!hasFunnelActivity(m)) {
+      metricsByFlow.delete(fu);
+      hiddenEmpty += 1;
+    }
+  }
   logAnalyticsPerf(
-    `aggregateMetricsByFlow project=${projectId} from=${dateFrom} to=${dateTo} pages=${pages} rows=${rowsRead} flows=${metricsByFlow.size} elapsedMs=${Date.now() - startedAt}`
+    `aggregateMetricsByFlow project=${projectId} from=${dateFrom} to=${dateTo} pages=${pages} rows=${rowsRead} flows=${metricsByFlow.size} hiddenEmpty=${hiddenEmpty} elapsedMs=${Date.now() - startedAt}`
   );
   return { data: metricsByFlow, error: null };
 }
