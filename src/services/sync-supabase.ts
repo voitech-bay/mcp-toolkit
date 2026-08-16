@@ -113,6 +113,15 @@ export function isSyncEntityKey(s: string): s is SyncEntityKey {
   return SYNC_ENTITY_KEY_SET.has(s);
 }
 
+/**
+ * A warmup flow (network/inbox warming, e.g. "Warmup (L2L)") holds non-target leads and
+ * must be kept out of outreach analytics entirely. Matched by name so it applies to every
+ * project without hardcoding uuids.
+ */
+export function isWarmupFlowName(name: string | null | undefined): boolean {
+  return /warm[\s._-]*up/i.test(name ?? "");
+}
+
 /** Add FK prerequisites so partial syncs do not break inserts. */
 export function expandSyncEntities(requested: SyncEntityKey[]): SyncEntityKey[] {
   const s = new Set<SyncEntityKey>();
@@ -1873,12 +1882,18 @@ export async function syncAnalyticsSnapshots(
     console.log(`${LOG_PREFIX} ${msg}`, data ?? "");
   };
 
-  const { flows: allFlows, error: flowsLoadErr } = await getFlowsForProject(client, projectId);
+  const { flows: loadedFlows, error: flowsLoadErr } = await getFlowsForProject(client, projectId);
   if (flowsLoadErr) {
     return { ...empty(), error: `Failed to load flows: ${flowsLoadErr}` };
   }
 
-  console.log(`${LOG_PREFIX} analytics: ${allFlows.length} flow(s) for project; per-day metrics use sender_profiles + flows filter only`);
+  // Warmup flows (e.g. "Warmup (L2L)") are network-warming, not target outreach, so their
+  // metrics must never enter analytics. Excluded at the source: no snapshot rows are written
+  // for them, so every downstream consumer (per-flow funnel, totals) ignores them for free.
+  const allFlows = loadedFlows.filter((f) => !isWarmupFlowName(f.name));
+  const excludedWarmup = loadedFlows.length - allFlows.length;
+
+  console.log(`${LOG_PREFIX} analytics: ${allFlows.length} target flow(s) for project (excluded ${excludedWarmup} warmup); per-day metrics use sender_profiles + flows filter only`);
 
   for (const day of range) {
     if (!force && collectedSet.has(day)) {

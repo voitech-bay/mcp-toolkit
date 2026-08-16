@@ -2396,15 +2396,15 @@ export async function getLatestUpdatedAt(
 export async function getFlowsForProject(
   client: SupabaseClient,
   projectId: string
-): Promise<{ flows: Array<{ uuid: string; created_at: string }>; error: string | null }> {
+): Promise<{ flows: Array<{ uuid: string; created_at: string; name: string }>; error: string | null }> {
   const { data, error } = await client
     .from(FLOWS_TABLE)
-    .select("uuid, created_at")
+    .select("uuid, created_at, name")
     .eq("project_id", projectId);
   if (error) return { flows: [], error: error.message };
-  const flows: Array<{ uuid: string; created_at: string }> = [];
+  const flows: Array<{ uuid: string; created_at: string; name: string }> = [];
   for (const row of data ?? []) {
-    const r = row as { uuid?: unknown; created_at?: unknown };
+    const r = row as { uuid?: unknown; created_at?: unknown; name?: unknown };
     const uuid = typeof r.uuid === "string" ? r.uuid : String(r.uuid ?? "");
     const rawCa = r.created_at;
     const created_at =
@@ -2413,7 +2413,8 @@ export async function getFlowsForProject(
         : rawCa instanceof Date
           ? rawCa.toISOString()
           : String(rawCa ?? "");
-    flows.push({ uuid, created_at });
+    const name = typeof r.name === "string" ? r.name : "";
+    flows.push({ uuid, created_at, name });
   }
   return { flows, error: null };
 }
