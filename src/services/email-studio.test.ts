@@ -10,9 +10,10 @@ import {
   validateDraft,
 } from "./email-studio.js";
 
-test("sent can only be reached by Smartlead", () => {
+test("sent can only be reached by delivery webhooks, not users", () => {
   assert.equal(canTransition("approved", "sent", "user"), false);
   assert.equal(canTransition("approved", "sent", "smartlead"), true);
+  assert.equal(canTransition("approved", "sent", "instantly"), true);
   assert.equal(canTransition("needs_review", "approved", "user"), false);
 });
 

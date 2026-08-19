@@ -298,6 +298,32 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
     "created_at";
   // Eligible / company-scoped lists are small; load the full matching set then sort/paginate in memory.
   const companyScoped = validUuid(companyId) || eligibleOnly;
+  const sentScoped =
+    !companyScoped &&
+    (sendState === "sent" || draftState === "sent" || statuses.includes("sent"));
+  if (sentScoped) {
+    let sentQuery = client
+      .from("outreach_emails")
+      .select("contact_id")
+      .eq("project_id", projectId)
+      .or("status.eq.sent,sent_at.not.is.null");
+    if (channels.length) sentQuery = sentQuery.in("channel", [...new Set(channels)]);
+    if (campaign) sentQuery = sentQuery.ilike("campaign_id", `%${campaign.replace(/[%_]/g, "")}%`);
+    if (batch) sentQuery = sentQuery.ilike("batch_name", `%${batch.replace(/[%_]/g, "")}%`);
+    if (validUuid(sequenceId)) sentQuery = sentQuery.eq("sequence_id", sequenceId);
+    if (hypothesis.sequenceIds.size) sentQuery = sentQuery.in("sequence_id", [...hypothesis.sequenceIds]);
+    if (createdFrom) sentQuery = sentQuery.gte("created_at", createdFrom);
+    if (createdTo) sentQuery = sentQuery.lte("created_at", createdTo);
+    if (sentFrom) sentQuery = sentQuery.gte("sent_at", sentFrom);
+    if (sentTo) sentQuery = sentQuery.lte("sent_at", sentTo);
+    const sentContacts = await sentQuery.limit(10000);
+    if (sentContacts.error) return send(res, 500, { error: sentContacts.error.message });
+    const sentContactIds = [...new Set((sentContacts.data ?? []).map((row) => str((row as Json).contact_id)).filter(Boolean))];
+    if (!sentContactIds.length) {
+      return send(res, 200, { data: [], total: 0, page, pageSize, scope: null });
+    }
+    contactsQuery = contactsQuery.in("uuid", sentContactIds);
+  }
   const contacts = await contactsQuery
     .order(contactSort, { ascending: sortDir === "asc", nullsFirst: false })
     .range(requiresMessageScan || companyScoped ? 0 : from, requiresMessageScan || companyScoped ? 2499 : from + pageSize - 1);
@@ -305,31 +331,41 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
   const rows = (contacts.data ?? []) as Json[];
   const contactIds = rows.map((row) => String(row.uuid));
 
-  let messageQuery = contactIds.length
-    ? client
+  const buildMessageQuery = (ids: string[]) => {
+    let query = client
       .from("outreach_emails")
       .select("id, contact_id, channel, step_number, sequence_step, status, current_subject, current_body, campaign_id, batch_name, sequence_id, external_target, external_pushed_at, created_at, sent_at, updated_at")
       .eq("project_id", projectId)
-      .in("contact_id", contactIds)
-    : null;
-  if (messageQuery && statuses.length) {
-    const expanded = statuses.includes("needs_attention")
-      ? [...new Set([...statuses.filter((s) => s !== "needs_attention"), ...NEEDS_ATTENTION_STATUSES])]
-      : statuses;
-    messageQuery = messageQuery.in("status", expanded);
+      .in("contact_id", ids);
+    if (statuses.length) {
+      const expanded = statuses.includes("needs_attention")
+        ? [...new Set([...statuses.filter((s) => s !== "needs_attention"), ...NEEDS_ATTENTION_STATUSES])]
+        : statuses;
+      query = query.in("status", expanded);
+    }
+    if (channels.length) query = query.in("channel", [...new Set(channels)]);
+    if (campaign) query = query.ilike("campaign_id", `%${campaign.replace(/[%_]/g, "")}%`);
+    if (batch) query = query.ilike("batch_name", `%${batch.replace(/[%_]/g, "")}%`);
+    if (validUuid(sequenceId)) query = query.eq("sequence_id", sequenceId);
+    if (hypothesis.sequenceIds.size) query = query.in("sequence_id", [...hypothesis.sequenceIds]);
+    if (createdFrom) query = query.gte("created_at", createdFrom);
+    if (createdTo) query = query.lte("created_at", createdTo);
+    if (sentFrom) query = query.gte("sent_at", sentFrom);
+    if (sentTo) query = query.lte("sent_at", sentTo);
+    return query.order("updated_at", { ascending: false }).limit(5000);
+  };
+  const messageRows: Json[] = [];
+  let messageError: { message: string; code?: string; details?: string; hint?: string } | null = null;
+  for (let i = 0; i < contactIds.length; i += 100) {
+    const result = await buildMessageQuery(contactIds.slice(i, i + 100));
+    if (result.error) {
+      messageError = result.error;
+      break;
+    }
+    messageRows.push(...(result.data ?? []) as Json[]);
   }
-  if (messageQuery && channels.length) messageQuery = messageQuery.in("channel", [...new Set(channels)]);
-  if (messageQuery && campaign) messageQuery = messageQuery.ilike("campaign_id", `%${campaign.replace(/[%_]/g, "")}%`);
-  if (messageQuery && batch) messageQuery = messageQuery.ilike("batch_name", `%${batch.replace(/[%_]/g, "")}%`);
-  if (messageQuery && validUuid(sequenceId)) messageQuery = messageQuery.eq("sequence_id", sequenceId);
-  if (messageQuery && hypothesis.sequenceIds.size) messageQuery = messageQuery.in("sequence_id", [...hypothesis.sequenceIds]);
-  if (messageQuery && createdFrom) messageQuery = messageQuery.gte("created_at", createdFrom);
-  if (messageQuery && createdTo) messageQuery = messageQuery.lte("created_at", createdTo);
-  if (messageQuery && sentFrom) messageQuery = messageQuery.gte("sent_at", sentFrom);
-  if (messageQuery && sentTo) messageQuery = messageQuery.lte("sent_at", sentTo);
-  const messages = messageQuery
-    ? await messageQuery.order("updated_at", { ascending: false }).limit(5000)
-    : { data: [], error: null };
+  messageRows.sort((a, b) => dateMs(b.updated_at) - dateMs(a.updated_at));
+  const messages = { data: messageRows.slice(0, 5000), error: messageError };
   if (messages.error) return send(res, 500, { error: messages.error.message });
 
   const byContact = new Map<string, Json[]>();

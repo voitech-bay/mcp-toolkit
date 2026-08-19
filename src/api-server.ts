@@ -174,6 +174,7 @@ import { handleUsers } from "./users-handlers.js";
 import { handleAuthLogin, handleAuthLogout, handleAuthProjects, handleAuthSession } from "./auth-handlers.js";
 import { handleGithubWebhook } from "./github-webhook-handlers.js";
 import { handleGetSalesAcceptWebhook } from "./getsales-webhook-handlers.js";
+import { handleInstantlyWebhook } from "./instantly-webhook-handlers.js";
 import {
   handleVelvetechResearchCsvLaunch,
   handleVelvetechResearchCsvPreview,
@@ -222,6 +223,7 @@ import {
   handleEmailStudioReply,
   handleEmailStudioStatus,
   handleEmailStudioVersions,
+  handleInstantlyReconcile,
   handleSmartleadEmailEvent,
   handleSmartleadReconcile,
   handleEmailStudioIngestFromN8n,
@@ -504,6 +506,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/email-studio/push-getsales-linkedin-sequence") { if (req.method === "POST") await handleEmailStudioPushGetSalesLinkedinSequence(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/reconcile") { if (req.method === "POST") await handleSmartleadReconcile(req, res); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/email-studio/instantly/reconcile") { if (req.method === "POST") await handleInstantlyReconcile(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/sequence-studio/leads") { await handleSequenceStudioLeads(req, res); return; }
     if (sequenceStudioLeadMatch) { await handleSequenceStudioLead(req, res, sequenceStudioLeadMatch[1]); return; }
     if (pathname === "/api/sequence-studio/pov-fact-marks") { await handlePovFactMarks(req, res); return; }
@@ -539,6 +542,10 @@ const server = createServer(async (req, res) => {
     }
     if (pathname === "/api/webhooks/github") {
       await handleGithubWebhook(req, res);
+      return;
+    }
+    if (pathname === "/api/webhooks/instantly") {
+      await handleInstantlyWebhook(req, res);
       return;
     }
 
@@ -822,6 +829,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/webhooks/fireflies":
         await handleFirefliesWebhook(req, res);
+        return;
+      case "/api/webhooks/instantly":
+        await handleInstantlyWebhook(req, res);
         return;
       case "/api/webhooks/getsales-accept":
         await handleGetSalesAcceptWebhook(req, res);
@@ -1513,6 +1523,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  DELETE /api/analytics-day?projectId=<id>&date=YYYY-MM-DD");
   console.log("  POST /api/analytics-sync");
   console.log("  POST /api/webhooks/fireflies");
+  console.log("  POST /api/webhooks/instantly");
   console.log("  GET  /api/supabase-table-query");
   console.log("  GET  /api/conversation");
   console.log("  GET  /api/project-conversation-geo?projectId=<id>&limit=<n>");

@@ -165,6 +165,7 @@ import {
 import { syncPipedriveDeals } from "./services/pipedrive-deals-sync.js";
 import {
   extractWebhookLeadUuid,
+  getSalesWebhookSkipReason,
   isGetSalesWebhookSecretValid,
   refreshGetSalesConversation,
 } from "./services/getsales-conversation-sync.js";
@@ -1127,8 +1128,25 @@ export async function handleGetSalesWebhook(
   const body = (await getParsedBody(req)) as Record<string, unknown> | undefined;
   const leadUuid = body && typeof body === "object" ? extractWebhookLeadUuid(body) : null;
   if (!leadUuid) {
-    res.writeHead(400);
-    res.end(JSON.stringify({ error: "Webhook payload does not include a lead UUID" }));
+    res.writeHead(200);
+    res.end(JSON.stringify({ status: "skipped", reason: getSalesWebhookSkipReason(null, false) }));
+    return;
+  }
+  const contact = await client
+    .from(CONTACTS_TABLE)
+    .select("uuid")
+    .eq("project_id", projectId)
+    .eq("uuid", leadUuid)
+    .maybeSingle();
+  if (contact.error) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: contact.error.message }));
+    return;
+  }
+  const skip = getSalesWebhookSkipReason(leadUuid, Boolean(contact.data));
+  if (skip) {
+    res.writeHead(200);
+    res.end(JSON.stringify({ status: "skipped", reason: skip, leadUuid }));
     return;
   }
   const result = await refreshGetSalesConversation(client, projectId, leadUuid);
