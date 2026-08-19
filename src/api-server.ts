@@ -222,6 +222,7 @@ import {
   handleEmailStudioReply,
   handleEmailStudioStatus,
   handleEmailStudioVersions,
+  handleInstantlyReconcile,
   handleSmartleadEmailEvent,
   handleSmartleadReconcile,
   handleEmailStudioIngestFromN8n,
@@ -504,6 +505,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/email-studio/push-getsales-linkedin-sequence") { if (req.method === "POST") await handleEmailStudioPushGetSalesLinkedinSequence(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/reconcile") { if (req.method === "POST") await handleSmartleadReconcile(req, res); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/email-studio/instantly/reconcile") { if (req.method === "POST") await handleInstantlyReconcile(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/sequence-studio/leads") { await handleSequenceStudioLeads(req, res); return; }
     if (sequenceStudioLeadMatch) { await handleSequenceStudioLead(req, res, sequenceStudioLeadMatch[1]); return; }
     if (pathname === "/api/sequence-studio/pov-fact-marks") { await handlePovFactMarks(req, res); return; }

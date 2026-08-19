@@ -558,6 +558,40 @@ async function syncFromSmartlead() {
   }
 }
 
+async function syncFromInstantly() {
+  if (!store.selectedProjectId) return;
+  const path = "/api/email-studio/instantly/reconcile";
+  try {
+    const preview = await request(path, {
+      method: "POST",
+      body: JSON.stringify({ projectId: store.selectedProjectId, apply: false }),
+    });
+    const data = preview.data ?? {};
+    dialog.warning({
+      title: "Sync sent email history from Instantly?",
+      content: `${data.eligible ?? 0} prospect sends found. ${data.written ?? 0} missing messages will be added, ${data.skipped ?? 0} already exist, and ${data.excluded ?? 0} test sends will stay excluded.`,
+      positiveText: data.written ? "Sync missing emails" : "Already up to date",
+      negativeText: "Cancel",
+      positiveButtonProps: { disabled: !data.written },
+      onPositiveClick: async () => {
+        try {
+          const applied = await request(path, {
+            method: "POST",
+            body: JSON.stringify({ projectId: store.selectedProjectId, apply: true }),
+          });
+          const result = applied.data ?? {};
+          toast.success(`Instantly sync: ${result.written ?? 0} added, ${result.skipped ?? 0} already present`);
+          await load();
+        } catch (e) {
+          toast.error(e instanceof Error ? e.message : "Instantly sync failed", { duration: 9000 });
+        }
+      },
+    });
+  } catch (e) {
+    toast.error(e instanceof Error ? e.message : "Instantly sync failed", { duration: 9000 });
+  }
+}
+
 async function launchEmailResearch(rowLike: Json) {
   const workflow = emailResearchWorkflow.value;
   const contactId = String(rowLike.contact_id ?? "").trim();
@@ -661,12 +695,15 @@ const hasDrawerLinkedInSteps = computed(() => sequenceSorted.value.some((e) => i
         <h1>Email Studio</h1>
         <NText depth="3">Email and LinkedIn draft review — draft, approve, and send outreach.</NText>
       </div>
-      <NButton v-if="studioTab === 'email'" type="primary" @click="openCreateModal">Write email</NButton>
+      <NSpace v-if="studioTab === 'email'">
+        <NButton v-if="isWellore" secondary :loading="actionLoading==='/api/email-studio/instantly/reconcile'" @click="syncFromInstantly">Sync Instantly sent</NButton>
+        <NButton type="primary" @click="openCreateModal">Write email</NButton>
+      </NSpace>
     </NSpace>
 
     <NTabs v-model:value="studioTab" type="line" animated style="margin-top: 16px">
       <NTabPane name="email" tab="Email">
-        <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; only verified Smartlead events mark records as sent.</NAlert>
+        <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; verified delivery history from Smartlead or Instantly marks records as sent.</NAlert>
         <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="channelFilter" :options="channelOptions" placeholder="Channel"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
         <div class="results-bar">
           <NTag size="medium" :bordered="false" type="info">{{ total }}</NTag>

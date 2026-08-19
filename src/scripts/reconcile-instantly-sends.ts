@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { pathToFileURL } from "node:url";
 import { CONTACTS_TABLE, getSupabase } from "../services/supabase.js";
 import { instantlyStepNumber, listSentEmails, type InstantlySentEmail } from "../services/instantly.js";
 
@@ -17,7 +18,7 @@ import { instantlyStepNumber, listSentEmails, type InstantlySentEmail } from "..
  * Idempotent: keyed on the Instantly message id stored in external_push_log.
  */
 
-const PROJECT_ID = "0038d0db-aab2-40f1-9f6e-38d38e157f8f"; // Wellore
+export const WELLORE_INSTANTLY_PROJECT_ID = "0038d0db-aab2-40f1-9f6e-38d38e157f8f";
 
 /** Readable batch labels so Email Studio's Batch column stays useful. */
 const CAMPAIGN_BATCHES: Record<string, string> = {
@@ -51,12 +52,6 @@ const CONTACT_OVERRIDES: Record<string, { uuid: string; why: string }> = {
 type Json = Record<string, unknown>;
 type Client = NonNullable<ReturnType<typeof getSupabase>>;
 
-const APPLY = process.argv.includes("--apply");
-const projectId = (() => {
-  const i = process.argv.indexOf("--project");
-  return i >= 0 ? String(process.argv[i + 1]) : PROJECT_ID;
-})();
-
 function str(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
 }
@@ -66,7 +61,7 @@ function str(v: unknown): string {
  * bare duplicates come from repeated bridge runs. Ambiguity beyond that is reported, not
  * guessed, because picking wrong attributes a real send to the wrong person.
  */
-async function resolveContact(client: Client, email: string): Promise<{ contact: Json | null; ambiguous: Json[] }> {
+async function resolveContact(client: Client, projectId: string, email: string): Promise<{ contact: Json | null; ambiguous: Json[] }> {
   const r = await client
     .from(CONTACTS_TABLE)
     .select("uuid, name, first_name, last_name, title, position, company_uuid, company_name, work_email")
@@ -94,7 +89,24 @@ function bodyHtml(msg: InstantlySentEmail): string {
   return str(msg.body?.html) || str(msg.body?.text);
 }
 
-async function main() {
+export type InstantlyReconcileSummary = {
+  apply: boolean;
+  reported: number;
+  eligible: number;
+  excluded: number;
+  written: number;
+  skipped: number;
+  unresolvedRecipients: number;
+};
+
+export async function reconcileInstantlySends(options: {
+  apply?: boolean;
+  projectId?: string;
+  log?: (message: string) => void;
+} = {}): Promise<InstantlyReconcileSummary> {
+  const apply = options.apply === true;
+  const projectId = options.projectId || WELLORE_INSTANTLY_PROJECT_ID;
+  const log = options.log ?? console.log;
   const client = getSupabase();
   if (!client) throw new Error("Supabase not configured (need SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)");
 
@@ -102,7 +114,7 @@ async function main() {
   const sends = all.filter((m) => !EXCLUDED_CAMPAIGNS.has(str(m.campaign_id)));
   const excluded = all.length - sends.length;
 
-  console.log(`${APPLY ? "APPLY" : "DRY RUN"} — Instantly reports ${all.length} sent messages; ${sends.length} are real prospect sends (${excluded} excluded as test sends).\n`);
+  log(`${apply ? "APPLY" : "DRY RUN"} — Instantly reports ${all.length} sent messages; ${sends.length} are real prospect sends (${excluded} excluded as test sends).\n`);
 
   // Group by recipient so the report reads per person rather than per message.
   const byRecipient = new Map<string, InstantlySentEmail[]>();
@@ -115,17 +127,17 @@ async function main() {
   let written = 0, skipped = 0, unresolved = 0;
 
   for (const [email, messages] of [...byRecipient].sort()) {
-    const { contact, ambiguous } = await resolveContact(client, email);
+    const { contact, ambiguous } = await resolveContact(client, projectId, email);
     if (!contact) {
       unresolved++;
       const detail = ambiguous.length
         ? `${ambiguous.length} contact rows match and all carry a title: ${ambiguous.map((c) => `${str(c.name)} @ ${str(c.company_name)} (${str(c.uuid)})`).join(", ")}. Add a CONTACT_OVERRIDES entry.`
         : "no contact in this project has that work_email";
-      console.log(`## ${email}: SKIPPED — ${detail}\n`);
+      log(`## ${email}: SKIPPED — ${detail}\n`);
       continue;
     }
     const name = str(contact.name) || [str(contact.first_name), str(contact.last_name)].filter(Boolean).join(" ") || "Unknown";
-    console.log(`## ${name} — ${str(contact.company_name)} <${email}>`);
+    log(`## ${name} — ${str(contact.company_name)} <${email}>`);
 
     for (const msg of messages.sort((a, b) => str(a.timestamp_email).localeCompare(str(b.timestamp_email)))) {
       const step = instantlyStepNumber(msg.step);
@@ -151,12 +163,12 @@ async function main() {
 
       if (prev && str(prev.status) === "sent" && str((prev.external_push_log as Json | null)?.message_id) === messageId) {
         skipped++;
-        console.log(`   ${label}: already recorded`);
+        log(`   ${label}: already recorded`);
         continue;
       }
-      if (!APPLY) {
+      if (!apply) {
         written++;
-        console.log(`   ${label}: would mark sent`);
+        log(`   ${label}: would mark sent`);
         continue;
       }
 
@@ -235,16 +247,33 @@ async function main() {
       if (ev.error && ev.error.code !== "23505") throw new Error(ev.error.message);
 
       written++;
-      console.log(`   ${label}: marked sent`);
+      log(`   ${label}: marked sent`);
     }
-    console.log("");
+    log("");
   }
 
-  console.log(`${APPLY ? "Wrote" : "Would write"} ${written}, already recorded ${skipped}, unresolved recipients ${unresolved}.`);
-  if (!APPLY) console.log("Re-run with --apply to write.");
+  log(`${apply ? "Wrote" : "Would write"} ${written}, already recorded ${skipped}, unresolved recipients ${unresolved}.`);
+  if (!apply) log("Re-run with --apply to write.");
+  return {
+    apply,
+    reported: all.length,
+    eligible: sends.length,
+    excluded,
+    written,
+    skipped,
+    unresolvedRecipients: unresolved,
+  };
 }
 
-main().catch((e) => {
-  console.error(e instanceof Error ? e.message : e);
-  process.exit(1);
-});
+async function main() {
+  const i = process.argv.indexOf("--project");
+  const projectId = i >= 0 ? String(process.argv[i + 1]) : WELLORE_INSTANTLY_PROJECT_ID;
+  await reconcileInstantlySends({ apply: process.argv.includes("--apply"), projectId });
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch((e) => {
+    console.error(e instanceof Error ? e.message : e);
+    process.exit(1);
+  });
+}

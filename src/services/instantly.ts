@@ -34,9 +34,10 @@ export interface InstantlySentEmail {
  * really went out, as opposed to what was drafted or pushed.
  */
 export async function listSentEmails(opts: { campaignId?: string; max?: number } = {}): Promise<InstantlySentEmail[]> {
-  const max = opts.max ?? 1000;
+  const max = opts.max ?? Number.POSITIVE_INFINITY;
   const out: InstantlySentEmail[] = [];
   let cursor: string | undefined;
+  const seenCursors = new Set<string>();
   do {
     const params = new URLSearchParams({ email_type: "sent", limit: "100" });
     if (opts.campaignId) params.set("campaign_id", opts.campaignId);
@@ -44,7 +45,9 @@ export async function listSentEmails(opts: { campaignId?: string; max?: number }
     const page = await request<{ items?: InstantlySentEmail[]; next_starting_after?: string }>("GET", `/emails?${params}`);
     const items = page.items ?? [];
     out.push(...items);
-    cursor = items.length ? page.next_starting_after : undefined;
+    const nextCursor = items.length ? page.next_starting_after : undefined;
+    cursor = nextCursor && !seenCursors.has(nextCursor) ? nextCursor : undefined;
+    if (cursor) seenCursors.add(cursor);
   } while (cursor && out.length < max);
   return out.slice(0, max);
 }

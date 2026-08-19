@@ -8,6 +8,7 @@ import { loadPriorityAnchors, type PriorityAnchor } from "./services/pov-facts.j
 import { htmlToPlaintext, plaintextToHtml } from "./services/html-plaintext.js";
 import { reconcileSmartleadLead } from "./services/smartlead-reconcile.js";
 import { parseTokenUsage } from "./services/velvetech-billing.js";
+import { reconcileInstantlySends, WELLORE_INSTANTLY_PROJECT_ID } from "./scripts/reconcile-instantly-sends.js";
 
 type Json = Record<string, unknown>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -718,5 +719,30 @@ export async function handleSmartleadReconcile(req: IncomingMessage, res: Server
     return send(res, 200, { data: result });
   } catch (e) {
     return send(res, 500, { error: e instanceof Error ? e.message : "Smartlead reconcile failed" });
+  }
+}
+
+let instantlyReconcileInFlight: Promise<unknown> | null = null;
+
+/** Pull every outbound Instantly message and idempotently mirror missing prospect sends. */
+export async function handleInstantlyReconcile(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const b = await body(req);
+  const projectId = str(b.projectId);
+  if (projectId !== WELLORE_INSTANTLY_PROJECT_ID) {
+    return send(res, 400, { error: "Instantly history sync is configured for the Wellore project only" });
+  }
+  const apply = b.apply === true;
+  if (instantlyReconcileInFlight) return send(res, 409, { error: "An Instantly history sync is already running" });
+
+  const run = reconcileInstantlySends({ apply, projectId, log: () => undefined });
+  instantlyReconcileInFlight = run;
+  try {
+    const summary = await run;
+    return send(res, 200, { data: summary });
+  } catch (e) {
+    return send(res, 502, { error: e instanceof Error ? e.message : "Instantly history sync failed" });
+  } finally {
+    instantlyReconcileInFlight = null;
   }
 }
