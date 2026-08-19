@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { appendFileSync } from "node:fs";
 import { CONTACTS_TABLE, getGetSalesCredentials, getSupabase } from "./services/supabase.js";
 import { createLeadCustomField, listLeadCustomFields, updateLeadCustomFields } from "./services/source-api.js";
 import { GETSALES_INMAIL_FIELD_NAMES, arrangeGetSalesFields } from "./services/inmail-review.js";
@@ -253,6 +254,9 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
   const companyId = str(q.get("companyId"));
   const eligibleOnly = q.get("eligible") === "1" || q.get("eligible") === "true";
   const requiresMessageScan = Boolean(statuses.length || channels.length || draftState !== "all" || sendState !== "all" || campaign || batch || validUuid(sequenceId) || validUuid(hypothesisId) || createdFrom || createdTo || sentFrom || sentTo || ["latest_draft", "email_created", "sent_at"].includes(sortBy));
+  // #region agent log
+  appendFileSync("/opt/cursor/logs/debug.log", JSON.stringify({ hypothesisId: "A,B,C,E", location: "sequence-studio-handlers.ts:handleSequenceStudioLeads:entry", message: "Sequence Studio list request parsed", data: { projectIdValid: validUuid(projectId), page, pageSize, statusesCount: statuses.length, channelsCount: channels.length, draftState, sendState, sortBy, hasCompanyId: Boolean(companyId), eligibleOnly, requiresMessageScan }, timestamp: Date.now() }) + "\n");
+  // #endregion
   const hypothesis = await hypothesisScope(client, hypothesisId);
 
   let scopeCompanyName: string | null = null;
@@ -298,38 +302,61 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
     "created_at";
   // Eligible / company-scoped lists are small; load the full matching set then sort/paginate in memory.
   const companyScoped = validUuid(companyId) || eligibleOnly;
+  // #region agent log
+  appendFileSync("/opt/cursor/logs/debug.log", JSON.stringify({ hypothesisId: "A,B,E", location: "sequence-studio-handlers.ts:handleSequenceStudioLeads:beforeContacts", message: "Executing contacts query", data: { table: CONTACTS_TABLE, contactSort, from, rangeEnd: requiresMessageScan || companyScoped ? 2499 : from + pageSize - 1, hasSearch: Boolean(search), hasCompanySearch: Boolean(companySearch), companyScoped }, timestamp: Date.now() }) + "\n");
+  // #endregion
   const contacts = await contactsQuery
     .order(contactSort, { ascending: sortDir === "asc", nullsFirst: false })
     .range(requiresMessageScan || companyScoped ? 0 : from, requiresMessageScan || companyScoped ? 2499 : from + pageSize - 1);
+  // #region agent log
+  appendFileSync("/opt/cursor/logs/debug.log", JSON.stringify({ hypothesisId: "A,B,E", location: "sequence-studio-handlers.ts:handleSequenceStudioLeads:afterContacts", message: "Contacts query completed", data: { rowCount: contacts.data?.length ?? 0, count: contacts.count ?? null, error: contacts.error ? { message: contacts.error.message, code: contacts.error.code, details: contacts.error.details, hint: contacts.error.hint } : null }, timestamp: Date.now() }) + "\n");
+  // #endregion
   if (contacts.error) return send(res, 500, { error: contacts.error.message });
   const rows = (contacts.data ?? []) as Json[];
   const contactIds = rows.map((row) => String(row.uuid));
 
-  let messageQuery = contactIds.length
-    ? client
+  const buildMessageQuery = (ids: string[]) => {
+    let query = client
       .from("outreach_emails")
       .select("id, contact_id, channel, step_number, sequence_step, status, current_subject, current_body, campaign_id, batch_name, sequence_id, external_target, external_pushed_at, created_at, sent_at, updated_at")
       .eq("project_id", projectId)
-      .in("contact_id", contactIds)
-    : null;
-  if (messageQuery && statuses.length) {
-    const expanded = statuses.includes("needs_attention")
-      ? [...new Set([...statuses.filter((s) => s !== "needs_attention"), ...NEEDS_ATTENTION_STATUSES])]
-      : statuses;
-    messageQuery = messageQuery.in("status", expanded);
+      .in("contact_id", ids);
+    if (statuses.length) {
+      const expanded = statuses.includes("needs_attention")
+        ? [...new Set([...statuses.filter((s) => s !== "needs_attention"), ...NEEDS_ATTENTION_STATUSES])]
+        : statuses;
+      query = query.in("status", expanded);
+    }
+    if (channels.length) query = query.in("channel", [...new Set(channels)]);
+    if (campaign) query = query.ilike("campaign_id", `%${campaign.replace(/[%_]/g, "")}%`);
+    if (batch) query = query.ilike("batch_name", `%${batch.replace(/[%_]/g, "")}%`);
+    if (validUuid(sequenceId)) query = query.eq("sequence_id", sequenceId);
+    if (hypothesis.sequenceIds.size) query = query.in("sequence_id", [...hypothesis.sequenceIds]);
+    if (createdFrom) query = query.gte("created_at", createdFrom);
+    if (createdTo) query = query.lte("created_at", createdTo);
+    if (sentFrom) query = query.gte("sent_at", sentFrom);
+    if (sentTo) query = query.lte("sent_at", sentTo);
+    return query.order("updated_at", { ascending: false }).limit(5000);
+  };
+  const messageQuery = contactIds.length > 0;
+  // #region agent log
+  appendFileSync("/opt/cursor/logs/debug.log", JSON.stringify({ hypothesisId: "C,D", location: "sequence-studio-handlers.ts:handleSequenceStudioLeads:beforeMessages", message: "Executing outreach messages query", data: { contactIdCount: contactIds.length, hasMessageQuery: Boolean(messageQuery), statusesCount: statuses.length, channelsCount: channels.length, hasSentRange: Boolean(sentFrom || sentTo) }, timestamp: Date.now() }) + "\n");
+  // #endregion
+  const messageRows: Json[] = [];
+  let messageError: { message: string; code?: string; details?: string; hint?: string } | null = null;
+  for (let i = 0; i < contactIds.length; i += 100) {
+    const result = await buildMessageQuery(contactIds.slice(i, i + 100));
+    if (result.error) {
+      messageError = result.error;
+      break;
+    }
+    messageRows.push(...(result.data ?? []) as Json[]);
   }
-  if (messageQuery && channels.length) messageQuery = messageQuery.in("channel", [...new Set(channels)]);
-  if (messageQuery && campaign) messageQuery = messageQuery.ilike("campaign_id", `%${campaign.replace(/[%_]/g, "")}%`);
-  if (messageQuery && batch) messageQuery = messageQuery.ilike("batch_name", `%${batch.replace(/[%_]/g, "")}%`);
-  if (messageQuery && validUuid(sequenceId)) messageQuery = messageQuery.eq("sequence_id", sequenceId);
-  if (messageQuery && hypothesis.sequenceIds.size) messageQuery = messageQuery.in("sequence_id", [...hypothesis.sequenceIds]);
-  if (messageQuery && createdFrom) messageQuery = messageQuery.gte("created_at", createdFrom);
-  if (messageQuery && createdTo) messageQuery = messageQuery.lte("created_at", createdTo);
-  if (messageQuery && sentFrom) messageQuery = messageQuery.gte("sent_at", sentFrom);
-  if (messageQuery && sentTo) messageQuery = messageQuery.lte("sent_at", sentTo);
-  const messages = messageQuery
-    ? await messageQuery.order("updated_at", { ascending: false }).limit(5000)
-    : { data: [], error: null };
+  messageRows.sort((a, b) => dateMs(b.updated_at) - dateMs(a.updated_at));
+  const messages = { data: messageRows.slice(0, 5000), error: messageError };
+  // #region agent log
+  appendFileSync("/opt/cursor/logs/debug.log", JSON.stringify({ hypothesisId: "C,D", location: "sequence-studio-handlers.ts:handleSequenceStudioLeads:afterMessages", message: "Outreach messages query completed", data: { rowCount: messages.data?.length ?? 0, error: messages.error ? { message: messages.error.message, code: messages.error.code, details: messages.error.details, hint: messages.error.hint } : null }, timestamp: Date.now() }) + "\n");
+  // #endregion
   if (messages.error) return send(res, 500, { error: messages.error.message });
 
   const byContact = new Map<string, Json[]>();
@@ -396,6 +423,9 @@ export async function handleSequenceStudioLeads(req: IncomingMessage, res: Serve
   });
   const total = requiresMessageScan || companyScoped ? data.length : contacts.count ?? data.length;
   const pageData = requiresMessageScan || companyScoped ? data.slice(from, from + pageSize) : data;
+  // #region agent log
+  appendFileSync("/opt/cursor/logs/debug.log", JSON.stringify({ hypothesisId: "A,B,C,D,E", location: "sequence-studio-handlers.ts:handleSequenceStudioLeads:exit", message: "Sequence Studio list response ready", data: { total, pageRowCount: pageData.length }, timestamp: Date.now() }) + "\n");
+  // #endregion
   return send(res, 200, {
     data: pageData,
     total,
