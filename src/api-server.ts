@@ -174,6 +174,7 @@ import { handleUsers } from "./users-handlers.js";
 import { handleAuthLogin, handleAuthLogout, handleAuthProjects, handleAuthSession } from "./auth-handlers.js";
 import { handleGithubWebhook } from "./github-webhook-handlers.js";
 import { handleGetSalesAcceptWebhook } from "./getsales-webhook-handlers.js";
+import { handleInstantlyWebhook } from "./instantly-webhook-handlers.js";
 import {
   handleVelvetechResearchCsvLaunch,
   handleVelvetechResearchCsvPreview,
@@ -543,6 +544,10 @@ const server = createServer(async (req, res) => {
       await handleGithubWebhook(req, res);
       return;
     }
+    if (pathname === "/api/webhooks/instantly") {
+      await handleInstantlyWebhook(req, res);
+      return;
+    }
 
     if (pathname === "/health") {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -824,6 +829,9 @@ const server = createServer(async (req, res) => {
         return;
       case "/api/webhooks/fireflies":
         await handleFirefliesWebhook(req, res);
+        return;
+      case "/api/webhooks/instantly":
+        await handleInstantlyWebhook(req, res);
         return;
       case "/api/webhooks/getsales-accept":
         await handleGetSalesAcceptWebhook(req, res);
@@ -1515,6 +1523,7 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log("  DELETE /api/analytics-day?projectId=<id>&date=YYYY-MM-DD");
   console.log("  POST /api/analytics-sync");
   console.log("  POST /api/webhooks/fireflies");
+  console.log("  POST /api/webhooks/instantly");
   console.log("  GET  /api/supabase-table-query");
   console.log("  GET  /api/conversation");
   console.log("  GET  /api/project-conversation-geo?projectId=<id>&limit=<n>");

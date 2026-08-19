@@ -47,6 +47,26 @@ const CONTACT_OVERRIDES: Record<string, { uuid: string; why: string }> = {
     uuid: "85f5f10f-3158-5750-8edf-d2997d37edbb",
     why: "5 contact rows share this address across GFD Studio, Spaghetti House, 3DGameHouse and Portak. The copy that was sent is about the GFD catalog, so the GFD Studio row is the right one.",
   },
+  "dfurman@funventure.eu": {
+    uuid: "9757531b-e115-4b50-bd08-e75f6f1a1d83",
+    why: "Two Funventure P.S.A. rows share this address and both have a title; keep the canonical uuid from the later bridge.",
+  },
+  "lterrieres@plugindigital.com": {
+    uuid: "5c283669-e19c-40c4-96db-38e168f5d16c",
+    why: "Two Dear Villagers producer rows share this Plug In Digital address; both are the same person.",
+  },
+  "ykara@plugindigital.com": {
+    uuid: "20908996-cd5d-287b-32b2-e783084bcc8f",
+    why: "Yani Kara appears under Dear Villagers and Plug In Digital; the Instantly recipient domain is plugindigital.com.",
+  },
+  "jaeyoung@gameduo.net": {
+    uuid: "81af1ebe-6051-c292-1d48-e05d2d951347",
+    why: "Gameduo Marketing Director row has a null work_email in Contacts, but this Instantly recipient is Jae Young Park and that row already has Instantly sent history.",
+  },
+  "abrial@playdigious.com": {
+    uuid: "c42aea83-595d-41da-9dfb-892e6e870984",
+    why: "Two Playdigious rows share this address and both have a title; keep the canonical uuid.",
+  },
 };
 
 type Json = Record<string, unknown>;
@@ -69,13 +89,20 @@ async function resolveContact(client: Client, projectId: string, email: string):
     .ilike("work_email", email);
   if (r.error) throw new Error(r.error.message);
   const rows = (r.data ?? []) as Json[];
-  if (!rows.length) return { contact: null, ambiguous: [] };
-
   const override = CONTACT_OVERRIDES[email];
   if (override) {
     const picked = rows.find((c) => str(c.uuid) === override.uuid);
     if (picked) return { contact: picked, ambiguous: [] };
+    const byId = await client
+      .from(CONTACTS_TABLE)
+      .select("uuid, name, first_name, last_name, title, position, company_uuid, company_name, work_email")
+      .eq("project_id", projectId)
+      .eq("uuid", override.uuid)
+      .maybeSingle();
+    if (byId.error) throw new Error(byId.error.message);
+    if (byId.data) return { contact: byId.data as Json, ambiguous: [] };
   }
+  if (!rows.length) return { contact: null, ambiguous: [] };
   // `title` is what the Wellore bridge populates; `position` is GetSales's own column and
   // is set on the bare duplicates too, so it cannot discriminate. Tiered, most specific first.
   const byTitle = rows.filter((c) => str(c.title));

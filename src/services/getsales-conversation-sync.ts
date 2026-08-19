@@ -1,6 +1,13 @@
+/**
+ * GetSales conversation refresh used by the live webhook and the conversation
+ * drawer. Inbox/reply webhooks should POST
+ * `/api/webhooks/getsales/<projectId>?token=<GETSALES_WEBHOOK_SECRET>` for
+ * `contact_replied_linkedin_message` / `contact_replied_inmail`. Events whose
+ * lead UUID is missing from `Contacts` (warmup) are skipped with HTTP 200.
+ */
 import { timingSafeEqual } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getConversation, getGetSalesCredentials, LINKEDIN_MESSAGES_TABLE } from "./supabase.js";
+import { CONTACTS_TABLE, getConversation, getGetSalesCredentials, LINKEDIN_MESSAGES_TABLE } from "./supabase.js";
 import { fetchLinkedInMessagesForLead } from "./source-api.js";
 import { mapMessageForSupabase } from "./sync-supabase.js";
 
@@ -25,6 +32,13 @@ export function extractWebhookLeadUuid(payload: Record<string, unknown>): string
   for (const value of candidates) {
     if (typeof value === "string" && value.trim()) return value.trim();
   }
+  return null;
+}
+
+/** Warmup and unknown GetSales events must 200-skip so the provider does not retry. */
+export function getSalesWebhookSkipReason(leadUuid: string | null, contactExists: boolean): string | null {
+  if (!leadUuid) return "No lead uuid found in event payload";
+  if (!contactExists) return "Lead is not a Contacts row in this project";
   return null;
 }
 

@@ -74,10 +74,12 @@ const transitions: Record<EmailStatus, readonly EmailStatus[]> = {
   sending_failed: ["approved", "sent", "needs_review"],
 };
 
+const SENT_ACTORS = new Set(["smartlead", "instantly", "import"]);
+
 export function canTransition(from: EmailStatus, to: EmailStatus, actorType = "user"): boolean {
   if (from === to) return true;
-  if (to === "sent" && actorType !== "smartlead") return false;
-  if (to === "sent" && actorType === "smartlead") return true;
+  if (to === "sent") return SENT_ACTORS.has(actorType);
+  if (to === "sending_failed" && SENT_ACTORS.has(actorType) && (from === "sent" || from === "approved")) return true;
   return transitions[from].includes(to);
 }
 
