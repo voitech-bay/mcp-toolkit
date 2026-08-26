@@ -2,12 +2,13 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import crypto from "node:crypto";
 import { CONTACTS_TABLE, N8N_WORKFLOW_RESULTS_TABLE, escapeIlikeMetacharacters, getSupabase } from "./services/supabase.js";
 import { assembleOutreachContext, getOrCreateResearch, loadKnowledge, structuredCall } from "./services/outreach-agent.js";
-import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, normalizeOutreachMessageChannel, normalizeSequenceStep, parseEmailStudioChannelFilter, reanchorQuote, stableResearchPoints, validateDraft, validateDraftForProject, type EmailStatus, type OutreachMessageChannel } from "./services/email-studio.js";
+import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRanges, normalizeOutreachMessageChannel, normalizeSequenceStep, parseEmailStudioChannelFilter, reanchorQuote, stableResearchPoints, unsupportedVerifiedAnnotations, validateDraft, validateDraftForProject, type EmailStatus, type OutreachMessageChannel } from "./services/email-studio.js";
 import { getMessagingEntry, type RegistryChannel } from "./services/messaging-registry.js";
 import { loadPriorityAnchors, type PriorityAnchor } from "./services/pov-facts.js";
 import { htmlToPlaintext, plaintextToHtml } from "./services/html-plaintext.js";
 import { reconcileSmartleadLead } from "./services/smartlead-reconcile.js";
 import { parseTokenUsage } from "./services/velvetech-billing.js";
+import { isWelloreProjectId } from "./services/wellore-messaging/types.js";
 
 type Json = Record<string, unknown>;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -167,6 +168,7 @@ export async function handleEmailStudioList(req: IncomingMessage, res: ServerRes
   const campaign = q.get("campaign"); if (campaign) query = query.eq("campaign_id", campaign);
   const sequenceId = q.get("sequenceId"); if (sequenceId && UUID_RE.test(sequenceId)) query = query.eq("sequence_id", sequenceId);
   const persona = q.get("persona"); if (persona) query = query.eq("persona", persona);
+  const step = q.get("step"); if (step && /^\d+$/.test(step)) query = query.eq("sequence_step", Number(step));
   const contactId = q.get("contactId"); if (contactId && UUID_RE.test(contactId)) query = query.eq("contact_id", contactId);
   const reviewer = q.get("reviewer"); if (reviewer) query = query.eq("assigned_reviewer_id", reviewer);
   const quality = q.get("researchQuality"); if (quality && ["verified","partial","missing","unknown"].includes(quality)) query = query.eq("research_quality", quality);
@@ -383,6 +385,23 @@ export async function handleEmailStudioReply(req: IncomingMessage, res: ServerRe
 
 export async function handleEmailStudioApprove(req: IncomingMessage, res: ServerResponse, id: string) {
   const client = getSupabase(); if (!client) return send(res, 500, { error: "Supabase not configured" }); const b = await body(req); const email = await getScopedEmail(client, id, String(b.projectId ?? "")); if (!email) return send(res, 404, { error: "Email not found" }); const open = await client.from("outreach_email_comments").select("id", { count: "exact", head: true }).eq("email_id", id).eq("status", "open"); if ((open.count ?? 0) > 0) return send(res, 409, { error: "Resolve all comments before approval" });
+  if (isWelloreProjectId(email.project_id)) {
+    const [version, research] = await Promise.all([
+      client.from("outreach_email_versions").select("annotations").eq("id", email.current_version_id).single(),
+      email.research_snapshot_id
+        ? client.from("outreach_research_snapshots").select("*").eq("id", email.research_snapshot_id).single()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+    if (version.error) return send(res, 500, { error: version.error.message });
+    if (research.error) return send(res, 500, { error: research.error.message });
+    const unsupported = unsupportedVerifiedAnnotations(version.data?.annotations, (research.data ?? {}) as Json);
+    if (unsupported.length) {
+      return send(res, 409, {
+        error: `Approval blocked: verified claim${unsupported.length === 1 ? "" : "s"} lack a clickable source: ${unsupported.slice(0, 3).join("; ")}`,
+        unsupported_verified_claims: unsupported,
+      });
+    }
+  }
   try { const updated = await statusChange(client, email, "approved", "user", actor(req), "Current version approved", undefined, actorUserId(req)); const r = await client.from("outreach_emails").update({ approved_version_id: email.current_version_id, approved_by: actor(req), approved_by_user_id: actorUserId(req), approved_at: new Date().toISOString() }).eq("id", id).select("*").single(); return send(res, 200, { data: r.data ?? updated }); } catch (e) { return send(res, 409, { error: e instanceof Error ? e.message : "Approval failed" }); }
 }
 

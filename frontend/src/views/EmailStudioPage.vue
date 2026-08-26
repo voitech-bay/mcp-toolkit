@@ -39,7 +39,7 @@ const stylePlaceholder = computed(() =>
   isWellore.value ? "Default Wellore style" : isVelvetech.value ? "Default Velvetech style" : "Default project style"
 );
 const rows = ref<EmailRow[]>([]), total = ref(0), page = ref(1), pageSize = ref(25), loading = ref(false), error = ref("");
-const search = ref(""), statusFilter = ref<string|null>(null), campaignFilter = ref(""), batchFilter = ref(""), personaFilter = ref(""), reviewerFilter = ref(""), modelFilter = ref(""), qualityFilter = ref<string|null>(null), dateFrom = ref(""), dateTo = ref(""), openOnly = ref(false), savedView = ref("all"), channelFilter = ref("all");
+const search = ref(""), statusFilter = ref<string|null>(null), campaignFilter = ref(""), batchFilter = ref(""), personaFilter = ref(""), reviewerFilter = ref(""), modelFilter = ref(""), qualityFilter = ref<string|null>(null), dateFrom = ref(""), dateTo = ref(""), openOnly = ref(false), savedView = ref("all"), channelFilter = ref("all"), stepFilter = ref<string|null>("all");
 const detailOpen = ref(false), detailLoading = ref(false), detail = ref<Json|null>(null), selectedId = ref("");
 const subject = ref(""), emailBody = ref(""), dirty = ref(false), selectedResearch = ref<string[]>([]), selectedText = ref({ quote:"", start:0, end:0 });
 const commentDraft = ref(""), regenerationPrompt = ref(""), actionLoading = ref(""), generating = ref(""), candidate = ref<Json|null>(null), compareOpen = ref(false), createOpen = ref(false);
@@ -59,6 +59,12 @@ const humanize = (value:string) => value.replace(/_/g, " ");
 // Multi-touch sequences store LinkedIn DMs in the same table as emails, so they share
 // this review workspace (research panel, line comments, versions). Default list filter is
 // all channels; API accepts comma-separated values (see parseEmailStudioChannelFilter).
+const stepFilterOptions = [
+  { label: "All steps", value: "all" },
+  { label: "Email 1", value: "1" },
+  { label: "Email 2", value: "2" },
+  { label: "Email 3", value: "3" },
+];
 const channelOptions = [
   { label: "All channels", value: "all" },
   { label: "Email only", value: "email" },
@@ -84,6 +90,8 @@ function isHttpUrl(value: unknown): boolean {
   return typeof value === "string" && /^https?:\/\//i.test(value.trim());
 }
 function researchPointSource(p: Json): string {
+  const sourceUrl = String(p.source_url || "").trim();
+  if (isHttpUrl(sourceUrl)) return sourceUrl;
   const url = String(p.url || "").trim();
   if (isHttpUrl(url)) return url;
   const source = String(p.source || "").trim();
@@ -104,6 +112,9 @@ const statusType = (s:string) => s === "sent" ? "success" : s === "approved" ? "
 const currentVersion = computed(() => detail.value?.currentVersion ?? null); const comments = computed<Json[]>(() => detail.value?.comments ?? []); const openComments = computed(() => comments.value.filter((c) => c.status === "open"));
 const annotations = computed<Annotation[]>(() => (currentVersion.value?.annotations ?? []).slice().sort((a:Annotation,b:Annotation) => a.start-b.start));
 const researchPoints = computed<Json[]>(() => detail.value?.researchPoints ?? []);
+const usedResearchIds = computed(() => new Set(
+  annotations.value.flatMap((annotation) => annotation.research_point_ids || []).map(String),
+));
 const rawN8nResearch = computed<Json[]>(() => detail.value?.rawN8nResearch ?? []);
 const povResearch = computed<Json|null>(() => rawN8nResearch.value.find((r) => r.workflow_name === "velvetech-pov")?.result ?? null);
 const canApprove = computed(() => detail.value?.data?.status === "final_check" && openComments.value.length === 0);
@@ -146,6 +157,11 @@ function worstStatus(emails: EmailRow[]): string {
 }
 function pickOpenStep(emails: EmailRow[]): EmailRow {
   const sorted = sortEmailsByStep(emails);
+  const wanted = stepFilter.value && stepFilter.value !== "all" ? Number(stepFilter.value) : null;
+  if (wanted) {
+    const match = sorted.find((e) => stepOf(e) === wanted);
+    if (match) return match;
+  }
   return sorted.find((e) => !DONE_STATUSES.has(e.status)) ?? sorted[0];
 }
 function contactGroupKey(row: EmailRow): string {
@@ -302,6 +318,7 @@ function qs() {
   if(modelFilter.value)q.set("model",modelFilter.value);
   if(qualityFilter.value)q.set("researchQuality",qualityFilter.value);
   if(channelFilter.value)q.set("channel", apiChannelParam(channelFilter.value));
+  if(stepFilter.value && stepFilter.value !== "all")q.set("step", stepFilter.value);
   if(dateFrom.value)q.set("dateFrom",dateFrom.value);
   if(dateTo.value)q.set("dateTo",dateTo.value);
   if(openOnly.value)q.set("hasOpenComments","true");
@@ -327,7 +344,7 @@ async function openQueryEmail() {
   if (projectId && projectId !== store.selectedProjectId) store.selectProject(projectId);
   if (emailId) await openEmail(emailId);
 }
-let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,channelFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows();void loadStyleSources()}); watch([page,pageSize],load); watch(()=>route.query.emailId,()=>{void openQueryEmail()}); onMounted(()=>{void load();void loadWorkflows();void loadStyleSources();void openQueryEmail()});
+let timer:number|undefined; watch([search,statusFilter,campaignFilter,batchFilter,personaFilter,reviewerFilter,modelFilter,qualityFilter,channelFilter,stepFilter,dateFrom,dateTo,openOnly,savedView],()=>{page.value=1; window.clearTimeout(timer); timer=window.setTimeout(load,250)}); watch(()=>store.selectedProjectId,()=>{void load();void loadWorkflows();void loadStyleSources()}); watch([page,pageSize],load); watch(()=>route.query.emailId,()=>{void openQueryEmail()}); onMounted(()=>{void load();void loadWorkflows();void loadStyleSources();void openQueryEmail()});
 
 function shouldIgnoreRowClick(event: MouseEvent): boolean {
   const target = event.target;
@@ -667,7 +684,7 @@ const hasDrawerLinkedInSteps = computed(() => sequenceSorted.value.some((e) => i
     <NTabs v-model:value="studioTab" type="line" animated style="margin-top: 16px">
       <NTabPane name="email" tab="Email">
         <NAlert type="info" :show-icon="false" style="margin:16px 0">Draft and approval workspace only. Email Studio never sends or schedules email; only verified Smartlead events mark records as sent.</NAlert>
-        <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="channelFilter" :options="channelOptions" placeholder="Channel"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
+        <NCard size="small"><div class="filters"><NSelect v-model:value="savedView" :options="savedViews"/><NInput v-model:value="search" clearable placeholder="Search contact, company, subject or email…"/><NSelect v-model:value="statusFilter" clearable :options="statusOptions" placeholder="Status"/><NSelect v-model:value="stepFilter" clearable :options="stepFilterOptions" placeholder="Sequence step"/><NInput v-model:value="campaignFilter" clearable placeholder="Campaign"/><NInput v-model:value="batchFilter" clearable placeholder="Batch"/><NInput v-model:value="personaFilter" clearable placeholder="Persona"/><NInput v-model:value="reviewerFilter" clearable placeholder="Reviewer"/><NInput v-model:value="modelFilter" clearable placeholder="Model"/><NSelect v-model:value="channelFilter" :options="channelOptions" placeholder="Channel"/><NSelect v-model:value="qualityFilter" clearable :options="['verified','partial','missing','unknown'].map(value=>({label:humanize(value),value}))" placeholder="Research quality"/><NInput v-model:value="dateFrom" placeholder="Updated from (YYYY-MM-DD)"/><NInput v-model:value="dateTo" placeholder="Updated to (YYYY-MM-DD)"/><NCheckbox v-model:checked="openOnly">Open comments</NCheckbox></div></NCard>
         <div class="results-bar">
           <NTag size="medium" :bordered="false" type="info">{{ total }}</NTag>
           <span class="results-label">{{ resultsLabel }}</span>
@@ -714,7 +731,7 @@ const hasDrawerLinkedInSteps = computed(() => sequenceSorted.value.some((e) => i
       </div>
       <div class="workspace">
         <section class="panel research"><h3>Research & instructions</h3>
-          <template v-if="researchPoints.length"><div v-for="p in researchPoints" :key="p.id" class="research-point"><NCheckbox :checked="selectedResearch.includes(p.id)" @update:checked="v=>selectedResearch=v?[...selectedResearch,p.id]:selectedResearch.filter(x=>x!==p.id)">{{p.statement}}</NCheckbox><NTag size="tiny" :type="p.kind==='verified'?'info':'warning'">{{p.kind}}</NTag><div v-if="researchPointSource(p)" class="research-source"><a v-if="isHttpUrl(researchPointSource(p))" :href="researchPointSource(p)" target="_blank" rel="noopener noreferrer">Open source</a><span v-else>{{ researchPointSource(p) }}</span></div></div></template>
+          <template v-if="researchPoints.length"><div v-for="p in researchPoints" :key="p.id" class="research-point" :class="{ 'research-point-used': usedResearchIds.has(String(p.id)) }"><NCheckbox :checked="selectedResearch.includes(p.id)" @update:checked="v=>selectedResearch=v?[...selectedResearch,p.id]:selectedResearch.filter(x=>x!==p.id)">{{p.statement}}</NCheckbox><NTag v-if="usedResearchIds.has(String(p.id))" size="tiny" type="success">used in this draft</NTag><NTag size="tiny" :type="p.kind==='verified'?'info':'warning'">{{p.kind}}</NTag><NTag v-if="p.verification_status==='unverified'" size="tiny" type="error">no verification link</NTag><div v-if="researchPointSource(p)" class="research-source"><a v-if="isHttpUrl(researchPointSource(p))" :href="researchPointSource(p)" target="_blank" rel="noopener noreferrer">Open source</a><span v-else>{{ researchPointSource(p) }}</span></div></div></template>
           <template v-else-if="povResearch">
             <NAlert type="info" :show-icon="false" style="margin-bottom:10px">From the n8n research pipeline — not yet used to draft this email. Click "Research and create AI draft" to generate a draft grounded in this.</NAlert>
             <NSpace style="margin-bottom:8px"><NTag v-if="povResearch.fit_score!=null" type="success">Fit score {{povResearch.fit_score}}</NTag><NTag v-if="povResearch.vertical">{{povResearch.vertical}}</NTag></NSpace>

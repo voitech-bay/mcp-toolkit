@@ -165,3 +165,34 @@ export function stableResearchPoints(research: Record<string, unknown>) {
     ...inferred.map((x, i) => ({ id: `inferred-${i + 1}`, kind: "inference", ...(typeof x === "object" && x ? x : { statement: String(x) }) })),
   ];
 }
+
+/** Wellore approval gate: every annotation presented as verified must resolve to
+ * at least one selected research point carrying a real HTTP(S) evidence URL. */
+export function unsupportedVerifiedAnnotations(
+  annotations: unknown,
+  research: Record<string, unknown>,
+): string[] {
+  const points = stableResearchPoints(research);
+  const byId = new Map(points.map((point) => [String(point.id), point as Record<string, unknown>]));
+  const rows = Array.isArray(annotations) ? annotations : [];
+  const unsupported: string[] = [];
+  for (const value of rows) {
+    if (!value || typeof value !== "object") continue;
+    const annotation = value as Record<string, unknown>;
+    if (annotation.classification !== "verified") continue;
+    const ids = Array.isArray(annotation.research_point_ids) ? annotation.research_point_ids.map(String) : [];
+    const linked = ids.some((id) => {
+      const point = byId.get(id);
+      if (!point) return false;
+      const candidate = String(point.source_url || point.url || point.source || "").trim();
+      try {
+        const url = new URL(candidate);
+        return url.protocol === "http:" || url.protocol === "https:";
+      } catch {
+        return false;
+      }
+    });
+    if (!linked) unsupported.push(String(annotation.text || annotation.id || "verified claim"));
+  }
+  return unsupported;
+}

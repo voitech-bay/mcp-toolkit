@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getSupabase } from "../services/supabase.js";
 import { normalizeAnnotationRanges, validateDraftForProject } from "../services/email-studio.js";
+import { getMessagingEntry } from "../services/messaging-registry.js";
 
 /**
  * Loads already-reviewed Wellore drafts into Email Studio so they can be read,
@@ -13,11 +14,13 @@ import { normalizeAnnotationRanges, validateDraftForProject } from "../services/
  * used, so the Research panel and the annotated preview line up with each other.
  *
  * Usage:
- *   npm run load:wellore-drafts -- --file <path> [--apply]
+ *   npm run load:wellore-drafts -- --file <path> [--apply] [--write-even-if-invalid]
  *
  * Without --apply it prints what it would write and touches nothing.
  * Idempotent: emails upsert on the identity index, and re-running replaces the
  * current version with a fresh v(n+1) only when the copy actually changed.
+ * `--write-even-if-invalid` still writes touches that fail the project validator
+ * (needed so E2/E3 can be reviewed and regenerated in Email Studio).
  */
 
 type Annotation = {
@@ -35,7 +38,7 @@ type Touch = {
   step: number;
   subject: string;
   body: string;
-  annotations: Annotation[];
+  annotations?: Annotation[];
 };
 
 type ResearchPoint = { id: string; statement: string; source?: string };
@@ -66,6 +69,7 @@ function arg(name: string): string | undefined {
 }
 
 const APPLY = process.argv.includes("--apply");
+const WRITE_EVEN_IF_INVALID = process.argv.includes("--write-even-if-invalid");
 const FILE = arg("file");
 
 /**
@@ -150,7 +154,7 @@ async function main() {
     for (const touch of block.touches) {
       const annotations = normalizeAnnotationRanges(
         touch.body,
-        touch.annotations.map((a, i) => ({ ...a, id: `a${i + 1}`, start: 0, end: 0, warnings: [] })),
+        (touch.annotations ?? []).map((a, i) => ({ ...a, id: `a${i + 1}`, start: 0, end: 0, warnings: [] })),
       );
       const validation = validateDraftForProject(
         file.projectId,
@@ -172,9 +176,12 @@ async function main() {
         console.log(`   ${label}: clean${warnings.length ? ` (${warnings.length} warning: ${warnings.map((w) => w.message).join(" | ")})` : ""}`);
       }
       if (!APPLY) continue;
-      if (errors.length) {
+      if (errors.length && !WRITE_EVEN_IF_INVALID) {
         console.log(`   ${label}: skipped, has blocking errors`);
         continue;
+      }
+      if (errors.length && WRITE_EVEN_IF_INVALID) {
+        console.log(`   ${label}: writing despite ${errors.length} error(s)`);
       }
 
       const upsert = await client
@@ -192,6 +199,9 @@ async function main() {
             channel: touch.channel,
             sequence_step: touch.step,
             step_number: touch.step,
+            external_target: touch.channel === "email"
+              ? `${getMessagingEntry(file.projectId)?.emailPushTarget ?? "smartlead"}:body_${touch.step}`
+              : null,
             recipient_email: touch.channel === "email" ? block.recipientEmail : null,
             provenance: "voitech_generated",
             research_snapshot_id: snapshotId,
@@ -253,9 +263,11 @@ async function main() {
     console.log("");
   }
 
-  if (blocking) {
+  if (blocking && !WRITE_EVEN_IF_INVALID) {
     console.log(`${blocking} blocking validation error(s). Those touches were not written.`);
     process.exitCode = 1;
+  } else if (blocking && WRITE_EVEN_IF_INVALID) {
+    console.log(`${blocking} blocking validation error(s). Wrote anyway (--write-even-if-invalid).`);
   } else if (!APPLY) {
     console.log("Dry run clean. Re-run with --apply to write.");
   }
