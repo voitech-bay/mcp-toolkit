@@ -108,9 +108,9 @@ function parsePart(md: string, batch: string): ParsedPerson[] {
     emailStep = 0;
   };
 
-  const startPerson = (name: string) => {
+  const startPerson = (name: string): ParsedPerson => {
     flushEmail();
-    current = {
+    const person: ParsedPerson = {
       batch,
       companyName: companyName || "Unknown",
       contactName: name.trim(),
@@ -118,8 +118,9 @@ function parsePart(md: string, batch: string): ParsedPerson[] {
       signals: [],
       emails: [],
     };
-    people.push(current);
+    people.push(person);
     mode = "none";
+    return person;
   };
 
   for (const raw of lines) {
@@ -129,11 +130,11 @@ function parsePart(md: string, batch: string): ParsedPerson[] {
     const company = line.match(/^## (?!\d+\.)(.+)$/);
 
     if (numbered) {
-      startPerson(numbered[1]!);
+      current = startPerson(numbered[1]!);
       continue;
     }
     if (named && !SKIP_HEADINGS.test(named[1]!.trim())) {
-      startPerson(named[1]!);
+      current = startPerson(named[1]!);
       continue;
     }
     if (company && !/^#{3}/.test(line)) {
