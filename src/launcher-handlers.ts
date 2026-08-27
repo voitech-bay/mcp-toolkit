@@ -180,24 +180,53 @@ async function latestVelvetechPov(client: NonNullable<ReturnType<typeof getSupab
   return result && typeof result === "object" && !Array.isArray(result) ? (result as Json) : null;
 }
 
+/** Research older than this is usable but flagged, never silently discarded. */
+export const RESEARCH_STALE_AFTER_DAYS = 30;
+
+export interface ResearchLookup {
+  /** Newest row for this workflow+entity, regardless of age. Null only when nothing was ever researched. */
+  result: Json | null;
+  ageDays: number | null;
+  stale: boolean;
+}
+
+/**
+ * Newest research row for a company, with its age.
+ *
+ * Deliberately has NO freshness filter in the query. An earlier version applied
+ * a hidden 30-day cutoff, so companies with complete-but-older research were
+ * reported to operators as "missing POV and deep research" — sending them
+ * hunting for research that already existed. Age is now returned so callers
+ * decide policy explicitly, and "absent" and "stale" stay distinguishable.
+ */
 async function latestVelvetechWorkflowResult(
   client: NonNullable<ReturnType<typeof getSupabase>>,
   workflowName: string,
   entityKey: string
-): Promise<Json | null> {
-  if (!entityKey) return null;
-  const freshCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+): Promise<ResearchLookup> {
+  const empty: ResearchLookup = { result: null, ageDays: null, stale: false };
+  if (!entityKey) return empty;
   const { data } = await client
     .from(N8N_WORKFLOW_RESULTS_TABLE)
     .select("result,created_at")
     .eq("workflow_name", workflowName)
     .eq("result->>entity_key", entityKey)
-    .gte("created_at", freshCutoff)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  const result = data && typeof data === "object" ? (data as Json).result : null;
-  return result && typeof result === "object" && !Array.isArray(result) ? (result as Json) : null;
+  const row = data && typeof data === "object" ? (data as Json) : null;
+  const result = row?.result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return empty;
+
+  const createdAt = typeof row?.created_at === "string" ? Date.parse(row.created_at) : NaN;
+  const ageDays = Number.isNaN(createdAt)
+    ? null
+    : Math.floor((Date.now() - createdAt) / (24 * 60 * 60 * 1000));
+  return {
+    result: result as Json,
+    ageDays,
+    stale: ageDays !== null && ageDays > RESEARCH_STALE_AFTER_DAYS,
+  };
 }
 
 async function buildVelvetechResearchPayload(
@@ -379,10 +408,13 @@ async function buildVelvetechMessagingPayloads(
     }
     const pov = await latestVelvetechWorkflowResult(client, "velvetech-pov", domain);
     const deep = await latestVelvetechWorkflowResult(client, "velvetech-company-deep-research", domain);
-    if (!pov || !deep) {
-      missingResearch.push(`${contactName(c) || leadUuid}: missing ${[!pov ? "POV" : "", !deep ? "deep research" : ""].filter(Boolean).join(" and ")}`);
+    if (!pov.result || !deep.result) {
+      const absent = [!pov.result ? "POV" : "", !deep.result ? "deep research" : ""].filter(Boolean).join(" and ");
+      missingResearch.push(`${contactName(c) || leadUuid} (${domain}): no ${absent} on file, run research for this company`);
       continue;
     }
+    const researchAgeDays = Math.max(pov.ageDays ?? 0, deep.ageDays ?? 0);
+    const researchStale = pov.stale || deep.stale;
     payloads.push({
       run_id: `${args.launchId}-${leadUuid.slice(0, 8)}`,
       launch_id: args.launchId,
@@ -392,8 +424,10 @@ async function buildVelvetechMessagingPayloads(
       company_key: domain,
       company_name: strAny(co, "name") || str(c, "company_name") || domain,
       company_uuid: companyId,
-      pov,
-      deep_research: deep,
+      pov: pov.result,
+      deep_research: deep.result,
+      research_age_days: researchAgeDays,
+      research_stale: researchStale,
       contact_fit: {},
       lead: {
         lead_uuid: leadUuid,
@@ -611,9 +645,21 @@ export async function buildVelvetechAcceptLinkedinPayloads(
     }
     const pov = await latestVelvetechWorkflowResult(client, "velvetech-pov", domain);
     const deep = await latestVelvetechWorkflowResult(client, "velvetech-company-deep-research", domain);
-    if (!pov || !deep) {
-      missingResearch.push(`${contactName(c) || leadUuid}: missing ${[!pov ? "POV" : "", !deep ? "deep research" : ""].filter(Boolean).join(" and ")}`);
+    // Absent research is a hard stop (nothing to write from). Stale research is
+    // usable — a company's leadership, funding and headcount rarely turn over in
+    // the days either side of the threshold — so it goes through flagged instead
+    // of dropping an accepted prospect on the floor.
+    if (!pov.result || !deep.result) {
+      const absent = [!pov.result ? "POV" : "", !deep.result ? "deep research" : ""].filter(Boolean).join(" and ");
+      missingResearch.push(`${contactName(c) || leadUuid} (${domain}): no ${absent} on file, run research for this company`);
       continue;
+    }
+    const researchAgeDays = Math.max(pov.ageDays ?? 0, deep.ageDays ?? 0);
+    const researchStale = pov.stale || deep.stale;
+    if (researchStale) {
+      console.warn(
+        `[velvetech-accept] ${contactName(c) || leadUuid} (${domain}): using research ${researchAgeDays}d old (threshold ${RESEARCH_STALE_AFTER_DAYS}d)`
+      );
     }
     const conv = await getConversation(client, { leadUuid, messageLimit: 100 });
     const messages = Array.isArray(conv.messages) ? conv.messages : [];
@@ -627,8 +673,10 @@ export async function buildVelvetechAcceptLinkedinPayloads(
       company_key: domain,
       company_name: strAny(co, "name") || str(c, "company_name") || domain,
       company_uuid: companyId,
-      pov,
-      deep_research: deep,
+      pov: pov.result,
+      deep_research: deep.result,
+      research_age_days: researchAgeDays,
+      research_stale: researchStale,
       lead: {
         lead_uuid: leadUuid,
         contact_id: leadUuid,
