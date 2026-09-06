@@ -190,6 +190,7 @@ import {
   startScheduledGetSalesSync,
   stopScheduledGetSalesSync,
 } from "./services/getsales-sync-scheduler.js";
+import { startScheduledSmartleadSync, stopScheduledSmartleadSync } from "./services/smartlead-sync-scheduler.js";
 import {
   closeLocalSyncRunsForShutdown,
   startSyncReaper,
@@ -224,6 +225,7 @@ import {
   handleEmailStudioVersions,
   handleSmartleadEmailEvent,
   handleSmartleadReconcile,
+  handleSmartleadCampaignSync,
   handleEmailStudioIngestFromN8n,
 } from "./email-studio-handlers.js";
 import {
@@ -504,6 +506,7 @@ const server = createServer(async (req, res) => {
     if (pathname === "/api/email-studio/push-getsales-linkedin-sequence") { if (req.method === "POST") await handleEmailStudioPushGetSalesLinkedinSequence(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/events") { if (req.method === "POST") await handleSmartleadEmailEvent(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/email-studio/smartlead/reconcile") { if (req.method === "POST") await handleSmartleadReconcile(req, res); else { res.writeHead(405); res.end(); } return; }
+    if (pathname === "/api/email-studio/smartlead/sync-campaigns") { if (req.method === "POST") await handleSmartleadCampaignSync(req, res); else { res.writeHead(405); res.end(); } return; }
     if (pathname === "/api/sequence-studio/leads") { await handleSequenceStudioLeads(req, res); return; }
     if (sequenceStudioLeadMatch) { await handleSequenceStudioLead(req, res, sequenceStudioLeadMatch[1]); return; }
     if (pathname === "/api/sequence-studio/pov-fact-marks") { await handlePovFactMarks(req, res); return; }
@@ -1566,6 +1569,7 @@ server.listen(PORT, "0.0.0.0", () => {
   // Ungated by the scheduler flag: manually started syncs orphan their run rows too.
   startSyncReaper(() => getSupabase());
   startScheduledGetSalesSync();
+  startScheduledSmartleadSync();
 });
 
 /**
@@ -1581,6 +1585,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[api-server] ${signal} received; releasing active sync run locks`);
   stopScheduledGetSalesSync();
+  stopScheduledSmartleadSync();
   stopSyncReaper();
   const client = getSupabase();
   if (client) {

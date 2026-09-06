@@ -1,12 +1,47 @@
+/**
+ * Email Studio backfill.
+ *
+ * Default mode imports Voitech's own generated_messages drafts. Two Smartlead modes:
+ *
+ *   --smartlead-live                          sweep every Smartlead campaign mapped to the
+ *                                             project in gtm_flow_source_map (repeatable;
+ *                                             the same code the hourly scheduler runs)
+ *   --smartlead-campaign-ids=3861480,3861481  sweep these campaigns instead of the map
+ *   --smartlead-json=<file>                   legacy: import a pre-built JSON of sends
+ *
+ * Nothing is written without --apply. Example:
+ *   SMARTLEAD_API_KEY=… npx tsx src/scripts/backfill-email-studio.ts \
+ *     --project-id=51cc22a1-868e-42c4-974f-9a7c5f5dce20 --smartlead-live --apply
+ */
+import "dotenv/config";
 import fs from "node:fs/promises";
 import { getSupabase } from "../services/supabase.js";
+import { syncSmartleadCampaignSends } from "../services/smartlead-reconcile.js";
 
 type Json = Record<string, unknown>;
 const apply = process.argv.includes("--apply");
 const projectArg = process.argv.find((x) => x.startsWith("--project-id="))?.split("=")[1] ?? "";
 const smartleadPath = process.argv.find((x) => x.startsWith("--smartlead-json="))?.split("=")[1] ?? "";
+const smartleadLive = process.argv.includes("--smartlead-live");
+const smartleadCampaignIds = (process.argv.find((x) => x.startsWith("--smartlead-campaign-ids="))?.split("=")[1] ?? "")
+  .split(",")
+  .map((x) => x.trim())
+  .filter(Boolean);
 const client = getSupabase();
 if (!client) throw new Error("Supabase is not configured");
+
+if (smartleadLive || smartleadCampaignIds.length) {
+  if (!projectArg) throw new Error("--project-id is required with --smartlead-live / --smartlead-campaign-ids");
+  const result = await syncSmartleadCampaignSends({
+    projectId: projectArg,
+    campaigns: smartleadCampaignIds.length ? smartleadCampaignIds.map((campaignId) => ({ campaignId, campaignName: null })) : undefined,
+    apply,
+    log: (line) => console.log(line),
+  });
+  console.log(JSON.stringify(result, null, 2));
+  if (!apply) console.log("Dry run. Re-run with --apply to write.");
+  process.exit(result.campaigns.some((c) => c.errors.length) ? 1 : 0);
+}
 
 async function generatedRows() {
   let query = client!.from("generated_messages").select("*,project_companies!inner(id,project_id,company_id)").eq("channel", "email").order("created_at");

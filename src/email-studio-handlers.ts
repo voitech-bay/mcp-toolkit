@@ -6,7 +6,7 @@ import { canTransition, EmailDraftSchema, EMAIL_STATUSES, normalizeAnnotationRan
 import { getMessagingEntry, type RegistryChannel } from "./services/messaging-registry.js";
 import { loadPriorityAnchors, type PriorityAnchor } from "./services/pov-facts.js";
 import { htmlToPlaintext, plaintextToHtml } from "./services/html-plaintext.js";
-import { reconcileSmartleadLead } from "./services/smartlead-reconcile.js";
+import { reconcileSmartleadLead, syncSmartleadCampaignSends } from "./services/smartlead-reconcile.js";
 import { parseTokenUsage } from "./services/velvetech-billing.js";
 import { isWelloreProjectId } from "./services/wellore-messaging/types.js";
 
@@ -737,5 +737,30 @@ export async function handleSmartleadReconcile(req: IncomingMessage, res: Server
     return send(res, 200, { data: result });
   } catch (e) {
     return send(res, 500, { error: e instanceof Error ? e.message : "Smartlead reconcile failed" });
+  }
+}
+
+/**
+ * POST /api/email-studio/smartlead/sync-campaigns
+ * Body: { projectId, campaignIds?: string[], apply?: boolean (default true) }
+ * Runs the same campaign sweep the hourly scheduler runs, on demand. Campaigns default to
+ * the project's gtm_flow_source_map entries.
+ */
+export async function handleSmartleadCampaignSync(req: IncomingMessage, res: ServerResponse) {
+  if (req.method !== "POST") return send(res, 405, { error: "Method not allowed" });
+  const b = await body(req);
+  const projectId = str(b.projectId);
+  if (!validProject(projectId)) return send(res, 400, { error: "projectId is required" });
+  const ids = Array.isArray(b.campaignIds) ? b.campaignIds.map((x: unknown) => str(x)).filter(Boolean) : [];
+  const apply = b.apply === undefined ? true : Boolean(b.apply);
+  try {
+    const result = await syncSmartleadCampaignSends({
+      projectId,
+      campaigns: ids.length ? ids.map((campaignId: string) => ({ campaignId, campaignName: null })) : undefined,
+      apply,
+    });
+    return send(res, 200, { data: result });
+  } catch (e) {
+    return send(res, 500, { error: e instanceof Error ? e.message : "Smartlead campaign sync failed" });
   }
 }
