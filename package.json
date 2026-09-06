@@ -32,7 +32,8 @@
     "load:wellore-drafts": "tsx src/scripts/load-wellore-drafts.ts",
     "load:reviewed-drafts": "tsx src/scripts/load-wellore-drafts.ts",
     "reconcile:instantly": "tsx src/scripts/reconcile-instantly-sends.ts",
-    "attach:wellore-research": "tsx src/scripts/attach-wellore-research.ts"
+    "attach:wellore-research": "tsx src/scripts/attach-wellore-research.ts",
+    "sync:smartlead-sends": "tsx src/scripts/backfill-email-studio.ts --smartlead-live"
   },
   "engines": {
     "node": ">=20"
