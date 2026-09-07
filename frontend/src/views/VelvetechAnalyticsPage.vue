@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import { NAlert, NButton, NCard, NDataTable, NGrid, NGi, NSpace, NSpin, NStatistic, NTag, NText, NTooltip } from "naive-ui";
+import { NAlert, NButton, NCard, NDataTable, NDatePicker, NGrid, NGi, NSpace, NSpin, NStatistic, NTag, NText, NTooltip } from "naive-ui";
 import type { DataTableColumns } from "naive-ui";
 import { RefreshCwIcon } from "lucide-vue-next";
 
@@ -61,6 +61,7 @@ type ResearchStats = {
 type PipelineStage = { stage: string; ord: number; companies: number; people: number; note: string | null };
 
 type Payload = {
+  window: { from: string; to: string };
   funnel: FunnelStage[];
   campaigns: CampaignRow[];
   departments: DeptRow[];
@@ -69,6 +70,20 @@ type Payload = {
   capturedAt: Record<string, string | null>;
   warnings: string[];
 };
+
+/**
+ * Sends are counted inside a window. The June-July batch is a different campaign, and
+ * counting it alongside the current one overstates every stage.
+ */
+const DEFAULT_FROM = "2026-08-01";
+const range = ref<[number, number]>([
+  new Date(`${DEFAULT_FROM}T00:00:00Z`).getTime(),
+  Date.now(),
+]);
+
+function ymd(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
 
 const loading = ref(false);
 const refreshing = ref(false);
@@ -79,7 +94,8 @@ async function load(): Promise<void> {
   loading.value = true;
   error.value = "";
   try {
-    const r = await fetch("/api/velvetech-analytics");
+    const qs = new URLSearchParams({ from: ymd(range.value[0]), to: ymd(range.value[1]) });
+    const r = await fetch(`/api/velvetech-analytics?${qs.toString()}`);
     const j = (await r.json()) as Payload & { error?: string };
     if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
     data.value = j;
@@ -180,11 +196,20 @@ const deptColumns: DataTableColumns<DeptRow> = [
       <div>
         <h2 style="margin: 0">Velvetech analytics</h2>
         <NText depth="3" style="font-size: 12px">
+          Sends counted inside the chosen window — the June–July batch is a separate campaign.
           Every stage is counted from our own records, except the two LinkedIn stages we have no
           independent record of. Those are labelled.
         </NText>
       </div>
-      <NSpace size="small">
+      <NSpace size="small" align="center">
+        <NDatePicker
+          v-model:value="range"
+          type="daterange"
+          size="small"
+          clearable
+          :disabled="loading"
+          @update:value="load"
+        />
         <NButton size="small" :loading="loading" @click="load">
           <RefreshCwIcon :size="14" style="margin-right: 4px" />
           Refresh

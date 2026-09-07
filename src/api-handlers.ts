@@ -133,7 +133,11 @@ import {
   type ProjectAnalyticsDashboardTotals,
 } from "./services/analytics-funnel.js";
 import { getProjectTotalAnalytics } from "./services/analytics-total.js";
-import { getVelvetechAnalytics, refreshVelvetechAnalytics } from "./services/velvetech-analytics.js";
+import {
+  getVelvetechAnalytics,
+  normalizeWindow,
+  refreshVelvetechAnalytics,
+} from "./services/velvetech-analytics.js";
 import { getProjectConversationGeoAggregates } from "./services/project-conversation-geo.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
 import {
@@ -7256,9 +7260,10 @@ export async function handlePostDifyContactsLookup(
 }
 
 /**
- * GET /api/velvetech-analytics
+ * GET /api/velvetech-analytics?from=YYYY-MM-DD&to=YYYY-MM-DD
  * — Velvetech outreach funnel, per-channel campaign rows, department breakdown and
  *   research coverage. Counted from our own ledgers; vendor-sourced stages are labelled.
+ *   Sends are scoped to the window, which defaults to the current batch.
  */
 export async function handleVelvetechAnalytics(
   req: IncomingMessage,
@@ -7277,8 +7282,10 @@ export async function handleVelvetechAnalytics(
     res.end(JSON.stringify({ error: "Supabase not configured" }));
     return;
   }
+  const q = getQueryParams(req);
+  const win = normalizeWindow(q.get("from"), q.get("to"));
   const startedAt = Date.now();
-  const payload = await getVelvetechAnalytics(client);
+  const payload = await getVelvetechAnalytics(client, win);
   console.info(
     `[velvetech-analytics] stages=${payload.funnel.length} campaigns=${payload.campaigns.length} warnings=${payload.warnings.length} elapsedMs=${Date.now() - startedAt}`
   );

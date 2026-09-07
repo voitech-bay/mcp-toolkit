@@ -9,9 +9,15 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * rather than presenting a vendor count as our own.
  */
 
-const FUNNEL_VIEW = "gtm_velvetech_outreach_funnel_v";
-const CAMPAIGNS_VIEW = "gtm_velvetech_campaigns_v";
-const DEPT_VIEW = "gtm_velvetech_dept_stats_v";
+/**
+ * Sends are counted inside a window, never lifetime. Velvetech ran an earlier batch in
+ * June-July whose sends belong to a different campaign; counting them alongside the current
+ * one overstated every stage. The window defaults to the current batch.
+ */
+export const DEFAULT_WINDOW_START = "2026-08-01";
+const FUNNEL_FN = "gtm_velvetech_outreach_funnel";
+const CAMPAIGNS_FN = "gtm_velvetech_campaigns";
+const DEPT_FN = "gtm_velvetech_dept_stats";
 /**
  * Research status and the pipeline funnel are read from snapshots, not live views: the live
  * research view runs correlated subqueries over every n8n result and takes ~22s, far past the
@@ -85,7 +91,13 @@ export interface PipelineStage {
   note: string | null;
 }
 
+export interface AnalyticsWindow {
+  from: string;
+  to: string;
+}
+
 export interface VelvetechAnalyticsPayload {
+  window: AnalyticsWindow;
   funnel: FunnelStage[];
   campaigns: CampaignRow[];
   departments: DeptRow[];
@@ -173,15 +185,32 @@ export async function refreshVelvetechAnalytics(client: SupabaseClient): Promise
   return typeof data === "string" ? data : null;
 }
 
+function today(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+const YMD_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Fall back to the default window rather than passing an unparseable date to Postgres. */
+export function normalizeWindow(from?: string | null, to?: string | null): AnalyticsWindow {
+  return {
+    from: from && YMD_RE.test(from) ? from : DEFAULT_WINDOW_START,
+    to: to && YMD_RE.test(to) ? to : today(),
+  };
+}
+
 export async function getVelvetechAnalytics(
-  client: SupabaseClient
+  client: SupabaseClient,
+  window?: AnalyticsWindow
 ): Promise<VelvetechAnalyticsPayload> {
   const warnings: string[] = [];
+  const win = window ?? normalizeWindow();
+  const args = { p_from: win.from, p_to: win.to };
 
   const [funnelRes, campaignRes, deptRes, researchRes, pipelineRes] = await Promise.all([
-    client.from(FUNNEL_VIEW).select("*"),
-    client.from(CAMPAIGNS_VIEW).select("*"),
-    client.from(DEPT_VIEW).select("*"),
+    client.rpc(FUNNEL_FN, args),
+    client.rpc(CAMPAIGNS_FN, args),
+    client.rpc(DEPT_FN, args),
     client.from(RESEARCH_MV).select("*").maybeSingle(),
     client.from(PIPELINE_MV).select("stage, ord, companies, people, note, refreshed_at"),
   ]);
@@ -246,6 +275,7 @@ export async function getVelvetechAnalytics(
   capturedAt.pipeline = str(pipelineRefreshedAt);
 
   return {
+    window: win,
     funnel: buildFunnel((funnelRes.data ?? []) as Array<Record<string, unknown>>),
     campaigns,
     departments,
