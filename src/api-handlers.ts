@@ -133,6 +133,7 @@ import {
   type ProjectAnalyticsDashboardTotals,
 } from "./services/analytics-funnel.js";
 import { getProjectTotalAnalytics } from "./services/analytics-total.js";
+import { getVelvetechAnalytics, refreshVelvetechAnalytics } from "./services/velvetech-analytics.js";
 import { getProjectConversationGeoAggregates } from "./services/project-conversation-geo.js";
 import { buildCompanyEntitiesForPrompt } from "./services/enrichment-entity-assembler.js";
 import {
@@ -7252,4 +7253,70 @@ export async function handlePostDifyContactsLookup(
       fetchedCompanies: cappedCompanyIds.length,
     })
   );
+}
+
+/**
+ * GET /api/velvetech-analytics
+ * — Velvetech outreach funnel, per-channel campaign rows, department breakdown and
+ *   research coverage. Counted from our own ledgers; vendor-sourced stages are labelled.
+ */
+export async function handleVelvetechAnalytics(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "GET") {
+    res.writeHead(405, { Allow: "GET" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const startedAt = Date.now();
+  const payload = await getVelvetechAnalytics(client);
+  console.info(
+    `[velvetech-analytics] stages=${payload.funnel.length} campaigns=${payload.campaigns.length} warnings=${payload.warnings.length} elapsedMs=${Date.now() - startedAt}`
+  );
+  res.writeHead(200);
+  res.end(JSON.stringify(payload));
+}
+
+/**
+ * POST /api/velvetech-analytics/refresh
+ * — rebuild the research and pipeline snapshots. Takes tens of seconds by design.
+ */
+export async function handleVelvetechAnalyticsRefresh(
+  req: IncomingMessage,
+  res: ServerResponse
+): Promise<void> {
+  if (req.method !== "POST") {
+    res.writeHead(405, { Allow: "POST" });
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ error: "Method not allowed" }));
+    return;
+  }
+  res.setHeader("Content-Type", "application/json");
+  const client = getSupabase();
+  if (!client) {
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: "Supabase not configured" }));
+    return;
+  }
+  const startedAt = Date.now();
+  try {
+    const refreshedAt = await refreshVelvetechAnalytics(client);
+    console.info(`[velvetech-analytics] refresh elapsedMs=${Date.now() - startedAt}`);
+    res.writeHead(200);
+    res.end(JSON.stringify({ refreshedAt }));
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[velvetech-analytics] refresh failed: ${msg}`);
+    res.writeHead(500);
+    res.end(JSON.stringify({ error: msg }));
+  }
 }

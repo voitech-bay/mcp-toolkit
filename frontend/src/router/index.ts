@@ -49,6 +49,12 @@ const router = createRouter({
       meta: { title: "Launch workflow | MCP Toolkit" },
     },
     {
+      path: "/velvetech/analytics",
+      name: "VelvetechAnalytics",
+      component: () => import("../views/VelvetechAnalyticsPage.vue"),
+      meta: { title: "Velvetech analytics | Voitech" },
+    },
+    {
       path: "/velvetech/research-launch",
       name: "VelvetechResearchLaunch",
       component: () => import("../views/VelvetechResearchLaunchPage.vue"),
