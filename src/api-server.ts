@@ -20,6 +20,8 @@ import {
   handleFlowFunnel,
   handleProjectAnalytics,
   handleProjectAnalyticsTotal,
+  handleVelvetechAnalytics,
+  handleVelvetechAnalyticsRefresh,
   handleProjectAnalyticsDaily,
   handleAnalyticsSync,
   handleAnalyticsDayDelete,
@@ -783,6 +785,22 @@ const server = createServer(async (req, res) => {
           res.end(JSON.stringify({ error: "Method not allowed" }));
         }
         return;
+      case "/api/velvetech-analytics":
+        if (req.method === "GET") {
+          await handleVelvetechAnalytics(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
+      case "/api/velvetech-analytics/refresh":
+        if (req.method === "POST") {
+          await handleVelvetechAnalyticsRefresh(req, res);
+        } else {
+          res.writeHead(405, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ error: "Method not allowed" }));
+        }
+        return;
       case "/api/project-analytics-total":
         if (req.method === "GET") {
           await handleProjectAnalyticsTotal(req, res);
@@ -1510,6 +1528,8 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(
     "  GET  /api/project-analytics?projectId=<id>&dateFrom=...&dateTo=...&groupBy=flow|hypothesis",
     "  GET  /api/project-analytics-total?projectId=<id>",
+    "  GET  /api/velvetech-analytics",
+    "  POST /api/velvetech-analytics/refresh",
     "  GET  /api/project-analytics-daily?projectId=&dateFrom=&dateTo=&groupBy=flow|hypothesis&entityIds=uuid,uuid"
   );
   console.log("  GET  /api/analytics-collected-days?projectId=<id>");

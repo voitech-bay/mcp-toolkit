@@ -124,6 +124,7 @@ const BACKLOG_PATHS = [
 const PIPELINE_PATHS = [
   "/sync",
   "/n8n/launch",
+  "/velvetech/analytics",
   "/velvetech/research-launch",
   "/n8n/lead-views",
   "/n8n/workflow-results",
@@ -137,6 +138,7 @@ const PIPELINE_PATHS = [
 ] as const;
 const VELVETECH_PATHS = [
   "/",
+  "/velvetech/analytics",
   "/companies",
   "/contacts",
   "/conversations",
@@ -155,6 +157,12 @@ const VELVETECH_PATHS = [
   "/tables",
   "/context",
 ] as const;
+
+/** Pages that are scoped to one fixed project and so need no project picked in the header. */
+const PROJECTLESS_PATHS = ["/velvetech/analytics"] as const;
+const isProjectlessRoute = computed(() =>
+  PROJECTLESS_PATHS.includes(route.path as (typeof PROJECTLESS_PATHS)[number])
+);
 
 function pathInGroup(path: string, group: readonly string[]): boolean {
   return group.includes(path);
@@ -323,6 +331,11 @@ const analyticsMenuOptions: DropdownOption[] = [
   {
     label: "Total",
     key: "/analytics/total",
+    icon: () => h(BarChart3Icon, { size: 14 }),
+  },
+  {
+    label: "Velvetech",
+    key: "/velvetech/analytics",
     icon: () => h(BarChart3Icon, { size: 14 }),
   },
 ];
@@ -977,6 +990,10 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
                     <RefreshCwIcon :size="14" style="margin-right: 4px" />
                     Sync
                   </NButton>
+                  <NButton quaternary :type="route.path === '/velvetech/analytics' ? 'primary' : undefined" size="small" @click="router.push('/velvetech/analytics')">
+                    <BarChart3Icon :size="14" style="margin-right: 4px" />
+                    Analytics
+                  </NButton>
                   <NButton quaternary :type="route.path === '/velvetech/research-launch' ? 'primary' : undefined" size="small" @click="router.push('/velvetech/research-launch')">
                     <RocketIcon :size="14" style="margin-right: 4px" />
                     Launch
@@ -1056,7 +1073,7 @@ function formatHeaderAnalyticsRange(first: string | null, last: string | null): 
         </NModal>
 
         <main class="main">
-          <template v-if="!projectStore.selectedProjectId">
+          <template v-if="!projectStore.selectedProjectId && !isProjectlessRoute">
             <div class="no-project-orbit-wrap" :style="noProjectOrbitStageStyle">
               <img
                 class="no-project-orbit-img"
