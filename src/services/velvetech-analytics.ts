@@ -1,4 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { fetchLeadsMetricsForRange } from "./source-api.js";
+import { getGetSalesCredentials } from "./supabase.js";
 
 /**
  * Velvetech outreach analytics.
@@ -15,6 +17,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
  * one overstated every stage. The window defaults to the current batch.
  */
 export const DEFAULT_WINDOW_START = "2026-08-01";
+const VELVETECH_PROJECT_ID = "51cc22a1-868e-42c4-974f-9a7c5f5dce20";
 const FUNNEL_FN = "gtm_velvetech_outreach_funnel";
 const CAMPAIGNS_FN = "gtm_velvetech_campaigns";
 const DEPT_FN = "gtm_velvetech_dept_stats";
@@ -162,6 +165,66 @@ function buildFunnel(rows: Array<Record<string, unknown>>): FunnelStage[] {
   return out;
 }
 
+/**
+ * LinkedIn stage counts straight from GetSales for the window.
+ *
+ * The campaign snapshots this used to read are captured on a schedule and hold LIFETIME totals
+ * per flow, so they went stale between captures and could not be windowed: on 2026-09-08 they
+ * reported 356 connections sent and 22 accepted where GetSales itself reported 485 and 43 for
+ * the same window. GetSales is the only party that records these, so we ask it directly.
+ */
+async function fetchLinkedinStages(
+  client: SupabaseClient,
+  win: AnalyticsWindow
+): Promise<{ counts: Record<string, number> | null; error: string | null }> {
+  const { credentials, error } = await getGetSalesCredentials(client, VELVETECH_PROJECT_ID);
+  if (error) return { counts: null, error };
+  if (!credentials) return { counts: null, error: "GetSales credentials are not configured" };
+
+  const res = await fetchLeadsMetricsForRange(
+    {
+      fromIso: `${win.from}T00:00:00.000Z`,
+      toIso: `${win.to}T23:59:59.999Z`,
+      groupBy: "flows",
+      metrics: [
+        "linkedin_connection_request_sent_count",
+        "linkedin_connection_request_accepted_count",
+        "linkedin_sent_count",
+        "linkedin_inbox_count",
+      ],
+    },
+    credentials
+  );
+  if (res.error) return { counts: null, error: res.error };
+
+  const counts: Record<string, number> = {
+    linkedin_connection_request_sent_count: 0,
+    linkedin_connection_request_accepted_count: 0,
+    linkedin_sent_count: 0,
+    linkedin_inbox_count: 0,
+  };
+  for (const row of res.rows) {
+    for (const key of Object.keys(counts)) counts[key] += num(row.metrics[key]);
+  }
+  return { counts, error: null };
+}
+
+/** Notes replace the snapshot wording once a stage is answered live. */
+const LINKEDIN_STAGE_NOTE: Record<string, string> = {
+  "Connection sent": "Counted by GetSales for this window",
+  "Connection accepted": "Counted by GetSales for this window",
+  "Message sent": "People GetSales sent a direct message to in this window",
+  Replied: "People who wrote back in this window, counted by GetSales",
+};
+
+/** Which GetSales counter backs each LinkedIn stage. Stages absent here keep their own count. */
+const LINKEDIN_STAGE_METRIC: Record<string, string> = {
+  "Connection sent": "linkedin_connection_request_sent_count",
+  "Connection accepted": "linkedin_connection_request_accepted_count",
+  "Message sent": "linkedin_sent_count",
+  Replied: "linkedin_inbox_count",
+};
+
 function buildResearch(row: Record<string, unknown> | null): ResearchStats | null {
   if (!row) return null;
   return {
@@ -207,12 +270,13 @@ export async function getVelvetechAnalytics(
   const win = window ?? normalizeWindow();
   const args = { p_from: win.from, p_to: win.to };
 
-  const [funnelRes, campaignRes, deptRes, researchRes, pipelineRes] = await Promise.all([
+  const [funnelRes, campaignRes, deptRes, researchRes, pipelineRes, linkedinLive] = await Promise.all([
     client.rpc(FUNNEL_FN, args),
     client.rpc(CAMPAIGNS_FN, args),
     client.rpc(DEPT_FN, args),
     client.from(RESEARCH_MV).select("*").maybeSingle(),
     client.from(PIPELINE_MV).select("stage, ord, companies, people, note, refreshed_at"),
+    fetchLinkedinStages(client, win),
   ]);
 
   if (funnelRes.error) warnings.push(`Outreach funnel unavailable: ${funnelRes.error.message}`);
@@ -220,6 +284,24 @@ export async function getVelvetechAnalytics(
   if (deptRes.error) warnings.push(`Department breakdown unavailable: ${deptRes.error.message}`);
   if (researchRes.error) warnings.push(`Research snapshot unavailable: ${researchRes.error.message}`);
   if (pipelineRes.error) warnings.push(`Pipeline snapshot unavailable: ${pipelineRes.error.message}`);
+
+  // GetSales is the only record of the LinkedIn stages, so its live counts win over the
+  // scheduled snapshot. On failure the snapshot stands and the page says the numbers are stale.
+  const funnelRows = (funnelRes.data ?? []) as Array<Record<string, unknown>>;
+  if (linkedinLive.counts) {
+    for (const row of funnelRows) {
+      if (row.channel !== "linkedin") continue;
+      const metric = LINKEDIN_STAGE_METRIC[String(row.stage ?? "")];
+      if (!metric) continue;
+      row.people = linkedinLive.counts[metric];
+      row.source = "getsales";
+      row.note = LINKEDIN_STAGE_NOTE[String(row.stage ?? "")] ?? row.note;
+    }
+  } else if (linkedinLive.error) {
+    warnings.push(
+      `LinkedIn stages fell back to the last snapshot, which may be days old: ${linkedinLive.error}`
+    );
+  }
 
   const campaigns: CampaignRow[] = ((campaignRes.data ?? []) as Array<Record<string, unknown>>).map(
     (row) => ({
@@ -276,7 +358,7 @@ export async function getVelvetechAnalytics(
 
   return {
     window: win,
-    funnel: buildFunnel((funnelRes.data ?? []) as Array<Record<string, unknown>>),
+    funnel: buildFunnel(funnelRows),
     campaigns,
     departments,
     research: researchRes.error ? null : buildResearch((researchRes.data ?? null) as Record<string, unknown> | null),
