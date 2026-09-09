@@ -189,8 +189,6 @@ async function fetchLinkedinStages(
       metrics: [
         "linkedin_connection_request_sent_count",
         "linkedin_connection_request_accepted_count",
-        "linkedin_sent_count",
-        "linkedin_inbox_count",
       ],
     },
     credentials
@@ -200,8 +198,6 @@ async function fetchLinkedinStages(
   const counts: Record<string, number> = {
     linkedin_connection_request_sent_count: 0,
     linkedin_connection_request_accepted_count: 0,
-    linkedin_sent_count: 0,
-    linkedin_inbox_count: 0,
   };
   for (const row of res.rows) {
     for (const key of Object.keys(counts)) counts[key] += num(row.metrics[key]);
@@ -213,16 +209,19 @@ async function fetchLinkedinStages(
 const LINKEDIN_STAGE_NOTE: Record<string, string> = {
   "Connection sent": "Counted by GetSales for this window",
   "Connection accepted": "Counted by GetSales for this window",
-  "Message sent": "People GetSales sent a direct message to in this window",
-  Replied: "People who wrote back in this window, counted by GetSales",
 };
 
-/** Which GetSales counter backs each LinkedIn stage. Stages absent here keep their own count. */
+/**
+ * Only the two stages we hold no record of come from GetSales.
+ *
+ * Messages and replies must NOT: GetSales's `linkedin_sent_count` counts flow-attributed sends
+ * only, so a message an SDR types by hand does not appear in it. On 2026-09-09 it reported zero
+ * messages for a window in which 67 were sent by hand to 37 people, and the page published that
+ * zero. Our own message mirror records both automated and manual sends, so it answers these two.
+ */
 const LINKEDIN_STAGE_METRIC: Record<string, string> = {
   "Connection sent": "linkedin_connection_request_sent_count",
   "Connection accepted": "linkedin_connection_request_accepted_count",
-  "Message sent": "linkedin_sent_count",
-  Replied: "linkedin_inbox_count",
 };
 
 function buildResearch(row: Record<string, unknown> | null): ResearchStats | null {
