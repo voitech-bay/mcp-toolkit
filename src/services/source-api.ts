@@ -2250,8 +2250,37 @@ export type LeadsMetricsGroupBy = "flows" | "sender_profiles";
 
 export interface FetchLeadsMetricsResult {
   rows: Array<{ group_uuid: string | null; metrics: Record<string, unknown> }>;
+  /**
+   * The API's own workspace total, when it returns one.
+   *
+   * Never reconstruct this by summing `rows`: the counters are UNIQUE LEADS, and a person
+   * enrolled in two flows appears in both rows. Summing double-counts them — on 2026-09-09 it
+   * turned 47 accepted connections into 49, and 17 into 25, because three flows had been
+   * duplicated and held the same people.
+   */
+  total: Record<string, unknown> | null;
   error: string | null;
   errorDetail?: SourceApiErrorDetail;
+}
+
+/** Pull the API's aggregate block out of a metrics response, wherever it nests it. */
+function extractMetricsTotal(res: unknown): Record<string, unknown> | null {
+  if (!res || typeof res !== "object" || Array.isArray(res)) return null;
+  const o = res as Record<string, unknown>;
+  for (const key of ["total", "totals", "summary", "aggregate"]) {
+    const v = o[key];
+    if (v && typeof v === "object" && !Array.isArray(v) && Object.keys(v).length > 0) {
+      return v as Record<string, unknown>;
+    }
+  }
+  for (const nested of ["data", "result", "payload", "response"]) {
+    const v = o[nested];
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const inner = extractMetricsTotal(v);
+      if (inner) return inner;
+    }
+  }
+  return null;
 }
 
 function isPlainObjectRowArray(arr: unknown): arr is Record<string, unknown>[] {
@@ -2431,7 +2460,9 @@ export async function fetchLeadsMetricsForRange(
   onLog?: FetchLogger
 ): Promise<FetchLeadsMetricsResult> {
   const config = resolveCredentials(credentials);
-  if (!config) return { rows: [], error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
+  if (!config) {
+    return { rows: [], total: null, error: "SOURCE_API_BASE_URL and SOURCE_API_KEY are required" };
+  }
   const url = `${config.baseUrl}${LEADS_METRICS_PATH}`;
   const metrics = params.metrics?.length ? [...params.metrics] : [...LEADS_METRICS_REQUEST_KEYS];
   const body = JSON.stringify({
@@ -2461,10 +2492,10 @@ export async function fetchLeadsMetricsForRange(
       await onLog(`metrics: no rows parsed from response (check API shape)`, preview);
     }
     const rows = rawRows.map((r) => normalizeLeadsMetricsRow(r, params.groupBy));
-    return { rows, error: null };
+    return { rows, total: extractMetricsTotal(res), error: null };
   } catch (e) {
     const fe = fetchErrorFromUnknown(e);
-    return { rows: [], error: fe.error, errorDetail: fe.errorDetail };
+    return { rows: [], total: null, error: fe.error, errorDetail: fe.errorDetail };
   }
 }
 

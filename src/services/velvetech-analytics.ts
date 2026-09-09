@@ -149,7 +149,10 @@ function buildFunnel(rows: Array<Record<string, unknown>>): FunnelStage[] {
       const prev = prevRow ? num(prevRow.people) : null;
       // A step rate only means something when both stages were counted the same way. Dividing
       // our count by a vendor's produces figures over 100% and reads as a conversion.
-      const comparable = prevRow ? prevRow.source === row.source : false;
+      const comparable =
+        prevRow !== null &&
+        prevRow.source === row.source &&
+        !LINKEDIN_STAGE_NO_RATE.has(String(row.stage ?? ""));
       out.push({
         channel: channel === "linkedin" ? "linkedin" : "email",
         stage: String(row.stage ?? ""),
@@ -176,10 +179,11 @@ function buildFunnel(rows: Array<Record<string, unknown>>): FunnelStage[] {
 async function fetchLinkedinStages(
   client: SupabaseClient,
   win: AnalyticsWindow
-): Promise<{ counts: Record<string, number> | null; error: string | null }> {
+): Promise<{ counts: Record<string, number> | null; error: string | null; summed?: boolean }> {
   const { credentials, error } = await getGetSalesCredentials(client, VELVETECH_PROJECT_ID);
   if (error) return { counts: null, error };
   if (!credentials) return { counts: null, error: "GetSales credentials are not configured" };
+
 
   const res = await fetchLeadsMetricsForRange(
     {
@@ -195,21 +199,47 @@ async function fetchLinkedinStages(
   );
   if (res.error) return { counts: null, error: res.error };
 
-  const counts: Record<string, number> = {
-    linkedin_connection_request_sent_count: 0,
-    linkedin_connection_request_accepted_count: 0,
-  };
-  for (const row of res.rows) {
-    for (const key of Object.keys(counts)) counts[key] += num(row.metrics[key]);
+  // These counters are unique LEADS, so summing the per-flow rows double-counts anyone enrolled
+  // in more than one flow — and three of these flows are duplicates holding the same people.
+  // Take the API's own total; only fall back to a sum when it does not return one, and say so.
+  const keys = [
+    "linkedin_connection_request_sent_count",
+    "linkedin_connection_request_accepted_count",
+  ];
+  const counts: Record<string, number> = { [keys[0]]: 0, [keys[1]]: 0 };
+  if (res.total) {
+    for (const key of keys) counts[key] = num(res.total[key]);
+    return { counts, error: null };
   }
-  return { counts, error: null };
+  for (const row of res.rows) {
+    for (const key of keys) counts[key] += num(row.metrics[key]);
+  }
+  return {
+    counts,
+    error: null,
+    summed: true,
+  };
 }
 
 /** Notes replace the snapshot wording once a stage is answered live. */
 const LINKEDIN_STAGE_NOTE: Record<string, string> = {
-  "Connection sent": "Counted by GetSales for this window",
-  "Connection accepted": "Counted by GetSales for this window",
+  "Connection sent": "Invitations GetSales sent inside this window",
+  "Connection accepted":
+    "Acceptances GetSales recorded inside this window. Some belong to invitations sent " +
+    "earlier, so this is not a conversion of the row above and no rate is shown against it.",
 };
+
+/**
+ * Stages whose base differs from the stage above, so a step percentage between them would be
+ * arithmetic on two different populations.
+ *
+ * GetSales offers two readings of an acceptance: the counter view (how many acceptances landed
+ * in the window, whenever the invitation went out) and the cohort view (of the invitations sent
+ * in the window, how many have been accepted). We read the counter, which on 2026-09-09 gave 49
+ * where the cohort gave 47, and 25 where the cohort gave 17. Dividing the counter by invitations
+ * sent produces a rate that belongs to neither reading.
+ */
+const LINKEDIN_STAGE_NO_RATE = new Set(["Connection accepted"]);
 
 /**
  * Only the two stages we hold no record of come from GetSales.
@@ -295,6 +325,12 @@ export async function getVelvetechAnalytics(
       row.people = linkedinLive.counts[metric];
       row.source = "getsales";
       row.note = LINKEDIN_STAGE_NOTE[String(row.stage ?? "")] ?? row.note;
+    }
+    if (linkedinLive.summed) {
+      warnings.push(
+        "GetSales returned no workspace total, so the LinkedIn connection figures are a sum " +
+          "across flows and may double-count anyone enrolled in more than one."
+      );
     }
   } else if (linkedinLive.error) {
     warnings.push(
